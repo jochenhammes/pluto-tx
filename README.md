@@ -4,9 +4,34 @@ Eigene FM/SSB(USB)-Sendesoftware für den ADALM-PLUTO (Pluto+, Tezuka-Firmware),
 
 Lizenzierter Betrieb: für den Einsatz mit einer gültigen Amateurfunklizenz (hier: DE Klasse A). Verantwortung für Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 
+## Installation (auf einem anderen Rechner)
+
+Repo auf den Zielrechner bringen (klonen oder kopieren), dann:
+
+```
+./install.sh
+```
+
+Das Skript ist für Debian/Ubuntu-artige Systeme (`apt-get`) gedacht und installiert alles, was die Apps tatsächlich brauchen:
+
+- **`gnuradio`** — das Debian/Ubuntu-Paket zieht dabei automatisch `gr-iio` (die `iio`-Blöcke, z.B. `iio.fmcomms2_sink_fc32`/`fmcomms2_source_fc32`) und `python3-pyqt5` als harte Abhängigkeiten mit.
+- **`python3-libiio`** — die *rohen* libiio-Python-Bindings (`import iio`), getrennt von `gnuradio.iio` oben. Wird direkt von `pluto_tx/safety.py` (TX-Dämpfung/LO-Powerdown, unabhängig von GNU Radio) und `pluto_tx/netutil.py` (Verbindungs-Timeout, Geräte-Scan) gebraucht — `gnuradio` allein bringt das NICHT mit.
+- **`libiio-utils`** — `iio_info`/`iio_attr`, nicht zwingend nötig für die Apps selbst, aber praktisch zum manuellen Nachschauen auf der Kommandozeile.
+- **`avahi-daemon`** — löst `*.local`-mDNS-Hostnamen wie `plutoplus.local` tatsächlich auf. Wichtig: `libiio0` zieht zwar automatisch die Avahi-*Client*-Bibliotheken mit (harte Abhängigkeit), der eigentliche Daemon ist aber nur ein apt-„Suggests" — ohne dieses Paket würde `plutoplus.local` auf einem frisch installierten Rechner NICHT auflösbar sein, nur eine nackte IP-Adresse. Das Skript aktiviert den Dienst danach auch gleich per `systemctl enable --now`.
+- **`git`** — zum Klonen/Updaten dieses Repos, falls noch nicht vorhanden.
+
+Danach prüft das Skript per echtem Python-Import (`from gnuradio import iio, qtgui, ...`, `import iio`, `from PyQt5 import ...`), ob alles sauber importierbar ist, und legt zwei Kommandozeilen-Starter unter `~/.local/bin/` an: `pluto-tx` (startet die GUI, `--gui` ist schon eingebaut) und `pluto-rx`. Ist `~/.local/bin` noch nicht im `PATH`, sagt das Skript das am Ende explizit dazu.
+
+Das Skript ist beliebig oft wiederholbar (`apt-get install` auf bereits installierte Pakete ist ein No-Op) — z.B. auch einfach erneut ausführen, um nur die Starter-Skripte neu anzulegen oder den Python-Import-Test erneut laufen zu lassen.
+
+Nicht Teil des Skripts (bewusst manuell, da hardware-/setup-abhängig):
+- Der Pluto selbst muss bereits per Netzwerk (Ethernet/`ip:...`) oder USB (`usb:...`) erreichbar sein — siehe Geräte-Scan/-Auswahl unten.
+- Bei einer USB-Verbindung ggf. nötige udev-Regeln für Nicht-root-Zugriff auf das USB-Gerät (in diesem Projekt bisher nicht gebraucht/getestet, siehe ToDo unten).
+
 ## Struktur
 
 ```
+install.sh                  # siehe Installation oben
 pluto_tx/
 ├── config.py      # Konstanten: Dämpfungsgrenzen, Samplerates, DE-Bandplan
 ├── safety.py       # PlutoSafety: rohes python3-libiio, unabhängig von gr-iio
@@ -25,6 +50,15 @@ pluto_tx_carrier.py         # einfaches iio_attr/iio_writedev Carrier-Test-Skrip
 `pluto_rx` ist bewusst unabhängig von `pluto_tx`: der RX-Zweig kann nicht senden, braucht also keine der TX-Safety-Mechanismen (`safety.py`) und ist nur lose über die gemeinsamen Konstanten (Bandplan, Default-URI) gekoppelt.
 
 ## Start
+
+Nach `./install.sh` (siehe Installation oben), mit den dabei angelegten Kurzbefehlen:
+
+```
+pluto-tx
+pluto-rx
+```
+
+Oder direkt, ohne die Starter-Skripte, aus dem Repo-Verzeichnis:
 
 ```
 python3 -m pluto_tx.app --freq 432150000 --gui
@@ -61,5 +95,5 @@ Der eigentliche Verbindungsaufbau (`iio.Context`) hat kein eingebautes Timeout u
 ## ToDo für nächstes Mal
 
 - **Geteilter AD9361-Takt zwischen `pluto_rx` und `pluto_tx` beheben.** Ein erster Versuch (`pluto_tx.key_ptt()` ruft vor jedem Senden `pluto_sink.set_samplerate()` erneut auf, um den Takt "zurückzuholen") hat das Problem in der Praxis NICHT gelöst — vermutlich weil das Zurückholen des Takts durch `pluto_tx` genau umgekehrt die aktuell in `pluto_rx` eingestellte Bandbreite wieder verstellt, sobald als nächstes `pluto_rx` etwas mit dem Takt macht (z.B. beim nächsten `set_frequency`/Retune, oder generell weil beide Apps denselben Takt für sich beanspruchen). Der Fix wurde deshalb wieder entfernt (siehe Git-History). Nötig ist vermutlich eine echte Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+ (Tezuka-Firmware) — z.B. ob/wie sich RX- und TX-Sample-Clock über libiio wirklich unabhängig konfigurieren lassen (eigene BBPLL-Teiler pro Richtung), oder ob das auf dieser Firmware/diesem Board grundsätzlich nicht getrennt werden kann. Bis dahin: `pluto_rx`-Bandbreite nicht ändern, während `pluto_tx` aktiv sendet.
-- **Nativer USB-Backend nicht getestet** — der Geräte-Scan (siehe oben) findet auch USB-Contexts, aber ob eine echte USB-Verbindung (`usb:...`) durchgängig funktioniert, ist ungetestet. Der native USB-Backend könnte außerdem den RX-Durchsatz über die aktuell gemessenen ~4,7-4,9 MSa/s (IIOD-Netzwerkprotokoll) hinaus verbessern und 5/10-MHz-RX-Bandbreiten wieder nutzbar machen.
+- **Nativer USB-Backend nicht getestet** — der Geräte-Scan (siehe oben) findet auch USB-Contexts, aber ob eine echte USB-Verbindung (`usb:...`) durchgängig funktioniert, ist ungetestet — inklusive ob dafür auf einem frischen Rechner erst noch udev-Regeln für Nicht-root-Zugriff auf das USB-Gerät nötig sind (`install.sh` richtet das bewusst nicht ein). Der native USB-Backend könnte außerdem den RX-Durchsatz über die aktuell gemessenen ~4,7-4,9 MSa/s (IIOD-Netzwerkprotokoll) hinaus verbessern und 5/10-MHz-RX-Bandbreiten wieder nutzbar machen.
 - **GUI besser/cooler aussehen lassen** — aktuell rein funktional (Standard-Qt-Widgets). Eventuell Inspiration von anderer SDR-Software (SDR++, SDRangel) oder modernen Ham-Radio-Interfaces holen.
