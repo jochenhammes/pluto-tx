@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Installs everything the pluto_tx / pluto_rx apps need on a Debian/Ubuntu
-# Linux machine: GNU Radio (which pulls in gr-iio and PyQt5 as hard
-# dependencies of its own "gnuradio" package), raw python3-libiio (used
-# directly by safety.py/netutil.py for the TX attenuation/LO-powerdown
-# safety layer and the connect-timeout/device-scan helpers -- a different
-# Python module ("iio") from gnuradio.iio, not pulled in by "gnuradio"
-# itself), libiio-utils (iio_info/iio_attr, handy for manual
-# troubleshooting), and avahi-daemon (actually RESOLVES "*.local" mDNS
-# hostnames like plutoplus.local -- libiio only gets the avahi CLIENT
+# Installs everything the pluto_tx / pluto_rx / pluto_advanced_rx apps need
+# on a Debian/Ubuntu Linux machine: GNU Radio (which pulls in gr-iio and
+# PyQt5 as hard dependencies of its own "gnuradio" package), raw
+# python3-libiio (used directly by safety.py/netutil.py for the TX
+# attenuation/LO-powerdown safety layer and the connect-timeout/device-scan
+# helpers -- a different Python module ("iio") from gnuradio.iio, not
+# pulled in by "gnuradio" itself), libiio-utils (iio_info/iio_attr, handy
+# for manual troubleshooting), avahi-daemon (actually RESOLVES "*.local"
+# mDNS hostnames like plutoplus.local -- libiio only gets the avahi CLIENT
 # libraries for free as a hard dependency; the daemon itself is merely an
-# apt "Suggests", so it's easy to end up without it on a fresh install).
+# apt "Suggests", so it's easy to end up without it on a fresh install),
+# and python3-pyqtgraph (pluto_advanced_rx's interactive waterfall widget --
+# only a "Recommends" of "gnuradio", not a hard dependency, so also easy to
+# end up without on a fresh install).
 #
 # Usage:
 #   ./install.sh
@@ -19,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "== pluto-tx / pluto-rx installer =="
+echo "== pluto-tx / pluto-rx / pluto-advanced-rx installer =="
 echo "Repo directory: $SCRIPT_DIR"
 echo
 
@@ -33,16 +36,19 @@ launcher scripts and the self-test:
   - libiio-utils (iio_info, iio_attr -- optional but handy)
   - an mDNS resolver/daemon (e.g. avahi-daemon) if you want to use
     hostnames like plutoplus.local instead of a bare IP address
+  - python3-pyqtgraph, if you want to use pluto_advanced_rx's interactive
+    waterfall
 EOF
     exit 1
 fi
 
 PACKAGES=(
-    gnuradio        # pulls in gr-iio (libgnuradio-iio) and python3-pyqt5 as hard deps
-    python3-libiio  # raw libiio Python bindings ("import iio") -- NOT pulled in by gnuradio
-    libiio-utils    # iio_info, iio_attr -- optional, useful for manual troubleshooting
-    avahi-daemon    # resolves "*.local" mDNS hostnames; libiio only gets the client libs for free
-    git             # to clone/update this repo
+    gnuradio          # pulls in gr-iio (libgnuradio-iio) and python3-pyqt5 as hard deps
+    python3-libiio    # raw libiio Python bindings ("import iio") -- NOT pulled in by gnuradio
+    libiio-utils      # iio_info, iio_attr -- optional, useful for manual troubleshooting
+    avahi-daemon      # resolves "*.local" mDNS hostnames; libiio only gets the client libs for free
+    python3-pyqtgraph # pluto_advanced_rx's interactive waterfall -- only a gnuradio "Recommends", not a hard dep
+    git               # to clone/update this repo
 )
 
 echo "Installing: ${PACKAGES[*]}"
@@ -71,6 +77,7 @@ try:
     from gnuradio.filter import firdes  # noqa: F401
     import iio as libiio  # noqa: F401  -- raw python3-libiio, distinct from gnuradio.iio above
     from PyQt5 import QtCore, QtWidgets, sip  # noqa: F401
+    import pyqtgraph  # noqa: F401  -- pluto_advanced_rx's interactive waterfall
 except ImportError as e:
     print(f"FAILED: {e}", file=sys.stderr)
     sys.exit(1)
@@ -93,7 +100,13 @@ cd "$SCRIPT_DIR" && exec python3 -m pluto_rx.app "\$@"
 EOF
 chmod +x "$HOME/.local/bin/pluto-rx"
 
-echo "Created $HOME/.local/bin/pluto-tx and $HOME/.local/bin/pluto-rx"
+cat > "$HOME/.local/bin/pluto-advanced-rx" <<EOF
+#!/usr/bin/env bash
+cd "$SCRIPT_DIR" && exec python3 -m pluto_advanced_rx.app "\$@"
+EOF
+chmod +x "$HOME/.local/bin/pluto-advanced-rx"
+
+echo "Created $HOME/.local/bin/pluto-tx, pluto-rx, and pluto-advanced-rx"
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
@@ -110,7 +123,9 @@ echo "== Done =="
 echo "Start the apps with:"
 echo "    pluto-tx"
 echo "    pluto-rx"
-echo "(both accept --uri/--freq/etc. -- see 'pluto-tx --help' / 'pluto-rx --help'."
+echo "    pluto-advanced-rx"
+echo "(all accept --uri/--freq/etc. -- see e.g. 'pluto-tx --help'."
 echo " Without a launcher on PATH, run them directly from $SCRIPT_DIR instead:"
 echo "    python3 -m pluto_tx.app --gui"
-echo "    python3 -m pluto_rx.app)"
+echo "    python3 -m pluto_rx.app"
+echo "    python3 -m pluto_advanced_rx.app)"
