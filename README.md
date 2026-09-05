@@ -103,6 +103,21 @@ Kernproblem, das diesen Eigenbau motiviert hat: der AD9361-Treiber (libiio) tren
 
 PTT schaltet nur die Dämpfung (schnell, kein LO-Relock), nicht den LO-Powerdown — der ist für App-Start/-Ende reserviert.
 
+## NF-Verarbeitung (Noise Gate, Kompressor, Limiter)
+
+Signalkette (`pluto_tx/flowgraph.py`):
+
+```
+ptt_mute -> nf_filter (Bandpass) -> gate -> agc -> compressor -> nf_gain -> limiter_smooth -> limiter (Hard-Clip)
+```
+
+- **`gate`** (`analog.pwr_squelch_ff`): unterdrückt Rauschen/Raumhall zwischen Wortgruppen, bevor es die AGC erreicht — verhindert, dass die AGC in Sprechpausen hochpumpt.
+- **`compressor`** (`pluto_tx/dynamics.py`, eigener `gr.sync_block`, kein fertiger GNU-Radio-Block existiert dafür): Standard-Soft-Knee-Kompressor (Threshold/Ratio/Knie/Attack/Release), macht die Modulation im Schnitt gleichmäßiger/lauter. Regler: Threshold + Ratio; Attack/Release/Knie sind feste, abgestimmte Werte.
+- **`limiter_smooth`**: dieselbe Klasse, als schneller/hoher-Ratio-Limiter parametriert — fängt Transienten ab, *bevor* sie den bestehenden Hard-Clip (`limiter`, `analog.rail_ff`) erreichen. Der Hard-Clip bleibt unverändert als letztes Sicherheitsnetz bestehen (nicht ersetzt) — er soll dadurch seltener/nie mehr tatsächlich eingreifen müssen.
+- Kein separater Makeup-Gain-Regler: `nf_gain` ("Audio Gain") bleibt bewusst der einzige Ansteuerungsregler, jetzt direkt hinter dem Kompressor. Das heißt konkret: Kompression allein macht die Modulation NICHT automatisch lauter (reduziert nur die Dynamik/Spitzen) — erst wer danach "Audio Gain" hochdreht, nutzt den neu gewonnenen Headroom tatsächlich aus. Gemessen (offline, `da2jh-test.wav`): bei gleicher Audio-Gain-Einstellung sinkt die Hard-Clip-Rate von 0,28 % auf 0 %; bei 3× höherer Audio-Gain (spürbar lauter als vorher) bleibt sie mit 0,13 % immer noch unter der alten Rate.
+
+Alle drei Stufen einzeln per Checkbox aktivierbar/deaktivierbar, Einstellungen bleiben über Geräte-Reconnect und Datei-Wechsel erhalten (wie alle anderen Regler). Startwerte in `config.py` sind allgemeine Rundfunk-/Sprachprozessor-Konvention, gegen `da2jh-test.wav` grob validiert, aber nicht mikrofonspezifisch feinjustiert — je nach Mikrofon/Pegel ggf. nachregeln.
+
 ## Bekannte Einschränkungen
 
 - Datei-Wechsel zur Laufzeit ("Choose File") funktioniert, ist aber kein Live-Swap: `blocks.wavfile_source` hat in dieser GNU-Radio-Version (3.10.12) keine Laufzeit-Datei-Wechsel-API, deshalb baut `MainWindow._rebuild()` bei einer neuen Dateiauswahl den kompletten Flowgraph neu auf (derselbe Mechanismus wie beim Geräte-Reconnect) — kurze Unterbrechung, aber sicher (schaltet vorher automatisch ab).

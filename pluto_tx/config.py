@@ -44,7 +44,32 @@ NF_FILTER_PRESETS = {
 }
 
 FM_DEVIATION_HZ = 2500.0  # narrowband voice FM default
-DEFAULT_NF_GAIN = 1.0  # manual audio drive multiplier, applied after the AGC
+DEFAULT_NF_GAIN = 1.0  # manual audio drive multiplier, applied after the compressor
+
+# --- NF dynamics processing: noise gate, compressor, smooth limiter -------
+# Signal order: ptt_mute -> nf_filter -> gate -> agc -> compressor ->
+# nf_gain -> limiter_smooth -> limiter (existing hard-clip safety backstop,
+# unchanged). See pluto_tx/dynamics.py for the algorithm and pluto_tx/
+# flowgraph.py for the wiring. Values below are starting points from general
+# broadcast-audio convention, not yet re-validated against this project's
+# actual mic/WAV levels -- treat as a reasonable default, not gospel.
+GATE_THRESHOLD_DB = -50.0
+GATE_ALPHA = 0.0001  # analog.pwr_squelch_ff's internal averaging filter gain
+GATE_RAMP_SAMPLES = 480  # ~10ms at AUDIO_RATE, sinusoidal attack/release ramp
+GATE_BYPASS_THRESHOLD_DB = -100.0  # pwr_squelch_ff has no enable/disable API; this
+# floor threshold is the bypass trick -- effectively never gates (see set_gate_enabled)
+
+COMPRESSOR_THRESHOLD_DB = -18.0
+COMPRESSOR_RATIO = 4.0  # whole number: the GUI's ratio slider is integer-stepped
+COMPRESSOR_KNEE_DB = 6.0
+COMPRESSOR_ATTACK_MS = 8.0
+COMPRESSOR_RELEASE_MS = 120.0
+
+LIMITER_THRESHOLD_DB = -3.0
+LIMITER_RATIO = 20.0
+LIMITER_KNEE_DB = 1.0
+LIMITER_ATTACK_MS = 1.0
+LIMITER_RELEASE_MS = 60.0
 
 # German amateur radio band edges reachable by the Pluto's TX LO range
 # (46.875 MHz - 6 GHz), used only for a non-blocking sanity warning in the GUI.

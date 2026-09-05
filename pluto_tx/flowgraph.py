@@ -24,6 +24,7 @@ from gnuradio.filter import firdes
 from gnuradio.fft import window
 
 from . import config
+from . import dynamics
 from .safety import PlutoSafety
 
 _PLACEHOLDER_WAV = os.path.join(os.path.dirname(__file__), "_silence.wav")
@@ -122,6 +123,32 @@ class PlutoTxFlowgraph(gr.top_block):
         # sample outside [-1, 1] regardless of AGC transient overshoot.
         self.limiter = analog.rail_ff(-1.0, 1.0)
 
+        # --- NF dynamics processing: noise gate, compressor, smooth limiter.
+        # Gate sits BEFORE the AGC so the AGC never "sees" and reacts to
+        # room noise/hiss during pauses -- only real speech. No native
+        # enable/disable exists on pwr_squelch_ff (confirmed via dir()); the
+        # bypass in set_gate_enabled() below sets the threshold to a floor
+        # that effectively never gates, caching the real value to restore.
+        self._gate_threshold_db = config.GATE_THRESHOLD_DB
+        self.gate = analog.pwr_squelch_ff(
+            config.GATE_THRESHOLD_DB, config.GATE_ALPHA, config.GATE_RAMP_SAMPLES, False,
+        )
+        # Compressor: moderate ratio/knee, slower release -- evens out
+        # average speech level. Limiter: high ratio, fast attack, small
+        # knee -- catches transient peaks BEFORE the hard-clip safety net
+        # below, so that net engages rarely/never on normal material
+        # instead of being the routine (harmonic-distortion-generating)
+        # ceiling. Both are the same DynamicsProcessor class, see
+        # dynamics.py's module docstring for why one class covers both roles.
+        self.compressor = dynamics.DynamicsProcessor(
+            config.AUDIO_RATE, config.COMPRESSOR_THRESHOLD_DB, config.COMPRESSOR_RATIO,
+            config.COMPRESSOR_KNEE_DB, config.COMPRESSOR_ATTACK_MS, config.COMPRESSOR_RELEASE_MS,
+        )
+        self.limiter_smooth = dynamics.DynamicsProcessor(
+            config.AUDIO_RATE, config.LIMITER_THRESHOLD_DB, config.LIMITER_RATIO,
+            config.LIMITER_KNEE_DB, config.LIMITER_ATTACK_MS, config.LIMITER_RELEASE_MS,
+        )
+
         # --- FM branch: real audio @ AUDIO_RATE -> resample -> FM ---------
         g = math.gcd(config.QUAD_RATE, config.AUDIO_RATE)
         self.fm_resampler = filter.rational_resampler_fff(
@@ -173,9 +200,12 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(file_mono, (self.source_selector, self.SRC_FILE))
         self.connect(self.source_selector, self.ptt_mute)
         self.connect(self.ptt_mute, self.nf_filter)
-        self.connect(self.nf_filter, self.agc)
-        self.connect(self.agc, self.nf_gain)
-        self.connect(self.nf_gain, self.limiter)
+        self.connect(self.nf_filter, self.gate)
+        self.connect(self.gate, self.agc)
+        self.connect(self.agc, self.compressor)
+        self.connect(self.compressor, self.nf_gain)
+        self.connect(self.nf_gain, self.limiter_smooth)
+        self.connect(self.limiter_smooth, self.limiter)
 
         self.connect(self.limiter, self.fm_resampler)
         self.connect(self.fm_resampler, self.fm_mod)
@@ -232,6 +262,28 @@ class PlutoTxFlowgraph(gr.top_block):
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
+
+    def set_gate_enabled(self, enabled: bool):
+        # pwr_squelch_ff has no enable/disable API -- bypass by dropping the
+        # threshold to a floor that effectively never gates, restoring the
+        # cached real value when re-enabled.
+        self.gate.set_threshold(self._gate_threshold_db if enabled else config.GATE_BYPASS_THRESHOLD_DB)
+
+    def set_gate_threshold(self, db: float):
+        self._gate_threshold_db = db
+        self.gate.set_threshold(db)
+
+    def set_compressor_enabled(self, enabled: bool):
+        self.compressor.set_enabled(enabled)
+
+    def set_compressor_threshold(self, db: float):
+        self.compressor.set_threshold_db(db)
+
+    def set_compressor_ratio(self, ratio: float):
+        self.compressor.set_ratio(ratio)
+
+    def set_limiter_enabled(self, enabled: bool):
+        self.limiter_smooth.set_enabled(enabled)
 
     def set_fine_offset(self, offset_hz: float):
         self.fine_offset_hz = offset_hz

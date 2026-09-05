@@ -124,6 +124,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nf_gain_label.setMinimumWidth(50)
         nf_row.addWidget(self.nf_gain_label)
         layout.addLayout(nf_row)
+
+        # --- NF dynamics processing: noise gate, compressor, limiter -------
+        # Attack/release/knee stay fixed (config.py) at all three stages --
+        # exposing threshold (+ ratio for the compressor) is the "medium"
+        # control depth the operator asked for; the limiter is enable-only
+        # (a fixed, tuned safety/quality stage, not a session knob).
+        gate_row = QtWidgets.QHBoxLayout()
+        self.gate_enable = QtWidgets.QCheckBox("Noise Gate")
+        self.gate_enable.setChecked(True)
+        self.gate_enable.toggled.connect(self._on_gate_enabled_changed)
+        gate_row.addWidget(self.gate_enable)
+        gate_row.addWidget(QtWidgets.QLabel("Threshold (dB):"))
+        self.gate_threshold_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.gate_threshold_slider.setRange(-80, -20)
+        self.gate_threshold_slider.setValue(int(config.GATE_THRESHOLD_DB))
+        self.gate_threshold_slider.valueChanged.connect(self._on_gate_threshold_changed)
+        gate_row.addWidget(self.gate_threshold_slider)
+        self.gate_threshold_label = QtWidgets.QLabel(f"{int(config.GATE_THRESHOLD_DB)} dB")
+        self.gate_threshold_label.setMinimumWidth(50)
+        gate_row.addWidget(self.gate_threshold_label)
+        layout.addLayout(gate_row)
+
+        comp_row = QtWidgets.QHBoxLayout()
+        self.compressor_enable = QtWidgets.QCheckBox("Compressor")
+        self.compressor_enable.setChecked(True)
+        self.compressor_enable.toggled.connect(self._on_compressor_enabled_changed)
+        comp_row.addWidget(self.compressor_enable)
+        comp_row.addWidget(QtWidgets.QLabel("Threshold (dB):"))
+        self.compressor_threshold_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.compressor_threshold_slider.setRange(-40, 0)
+        self.compressor_threshold_slider.setValue(int(config.COMPRESSOR_THRESHOLD_DB))
+        self.compressor_threshold_slider.valueChanged.connect(self._on_compressor_threshold_changed)
+        comp_row.addWidget(self.compressor_threshold_slider)
+        self.compressor_threshold_label = QtWidgets.QLabel(f"{int(config.COMPRESSOR_THRESHOLD_DB)} dB")
+        self.compressor_threshold_label.setMinimumWidth(50)
+        comp_row.addWidget(self.compressor_threshold_label)
+        comp_row.addWidget(QtWidgets.QLabel("Ratio:"))
+        self.compressor_ratio_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.compressor_ratio_slider.setRange(1, 10)
+        self.compressor_ratio_slider.setValue(int(config.COMPRESSOR_RATIO))
+        self.compressor_ratio_slider.valueChanged.connect(self._on_compressor_ratio_changed)
+        comp_row.addWidget(self.compressor_ratio_slider)
+        self.compressor_ratio_label = QtWidgets.QLabel(f"{int(config.COMPRESSOR_RATIO)}:1")
+        self.compressor_ratio_label.setMinimumWidth(40)
+        comp_row.addWidget(self.compressor_ratio_label)
+        self.compressor_gr_label = QtWidgets.QLabel("GR: 0.0 dB")
+        self.compressor_gr_label.setMinimumWidth(70)
+        comp_row.addWidget(self.compressor_gr_label)
+        layout.addLayout(comp_row)
+
+        limiter_row = QtWidgets.QHBoxLayout()
+        self.limiter_enable = QtWidgets.QCheckBox("Smooth Limiter (before the hard safety clip)")
+        self.limiter_enable.setChecked(True)
+        self.limiter_enable.toggled.connect(self._on_limiter_enabled_changed)
+        limiter_row.addWidget(self.limiter_enable)
+        limiter_row.addStretch(1)
+        layout.addLayout(limiter_row)
         layout.addSpacing(16)
 
         # --- PTT + emergency stop + status -------------------------------
@@ -214,8 +271,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_connected_controls_enabled(self, enabled: bool):
         for w in (self.freq_spin, self.fine_slider, self.mode_combo, self.source_combo,
                   self.power_slider, self.unlock_full_power, self.nf_gain_slider,
+                  self.gate_enable, self.compressor_enable, self.limiter_enable,
                   self.ptt_button, self.ptt_mode_button, self.estop_button):
             w.setEnabled(enabled)
+        # Threshold/ratio sliders additionally depend on their own stage's
+        # checkbox -- no point leaving them interactive while that stage is
+        # bypassed.
+        self.gate_threshold_slider.setEnabled(enabled and self.gate_enable.isChecked())
+        self.compressor_threshold_slider.setEnabled(enabled and self.compressor_enable.isChecked())
+        self.compressor_ratio_slider.setEnabled(enabled and self.compressor_enable.isChecked())
         self.file_button.setEnabled(enabled and self.source_combo.currentData() == PlutoTxFlowgraph.SRC_FILE)
 
     def _style_estop_button(self, locked: bool):
@@ -248,6 +312,31 @@ class MainWindow(QtWidgets.QMainWindow):
         gain = value / 100.0
         self.tb.set_nf_gain(gain)
         self.nf_gain_label.setText(f"{value} %")
+
+    def _on_gate_enabled_changed(self, checked):
+        self.tb.set_gate_enabled(checked)
+        self.gate_threshold_slider.setEnabled(checked and self.gate_enable.isEnabled())
+
+    def _on_gate_threshold_changed(self, value):
+        self.tb.set_gate_threshold(float(value))
+        self.gate_threshold_label.setText(f"{value} dB")
+
+    def _on_compressor_enabled_changed(self, checked):
+        self.tb.set_compressor_enabled(checked)
+        enabled = checked and self.compressor_enable.isEnabled()
+        self.compressor_threshold_slider.setEnabled(enabled)
+        self.compressor_ratio_slider.setEnabled(enabled)
+
+    def _on_compressor_threshold_changed(self, value):
+        self.tb.set_compressor_threshold(float(value))
+        self.compressor_threshold_label.setText(f"{value} dB")
+
+    def _on_compressor_ratio_changed(self, value):
+        self.tb.set_compressor_ratio(float(value))
+        self.compressor_ratio_label.setText(f"{value}:1")
+
+    def _on_limiter_enabled_changed(self, checked):
+        self.tb.set_limiter_enabled(checked)
 
     def _on_mode_changed(self, idx):
         self.tb.set_mode(self.mode_combo.currentData())
@@ -389,6 +478,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.compressor_gr_label.setText("GR: 0.0 dB")
         self.status_label.setText("Disconnected.")
 
     def _connect(self, uri_text):
@@ -440,6 +530,17 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
+        # Reapply dynamics-processing settings -- a fresh flowgraph starts at
+        # config.py's defaults, which would otherwise silently diverge from
+        # what these controls still visually show after any rebuild (device
+        # reconnect or WAV file swap), the same state-sync gap nf_gain above
+        # already avoids.
+        new_tb.set_gate_threshold(float(self.gate_threshold_slider.value()))
+        new_tb.set_gate_enabled(self.gate_enable.isChecked())
+        new_tb.set_compressor_threshold(float(self.compressor_threshold_slider.value()))
+        new_tb.set_compressor_ratio(float(self.compressor_ratio_slider.value()))
+        new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
+        new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
         self._wav_path = new_tb.wav_path
         self.tb = new_tb
         self._embed_waterfall(new_tb)
@@ -483,6 +584,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         except Exception as e:
             self.hw_status_label.setText(f"HW status read failed: {e}")
+        self.compressor_gr_label.setText(f"GR: {self.tb.compressor.gain_reduction_db():.1f} dB")
 
     # --- shutdown lifecycle -------------------------------------------
     def closeEvent(self, event):
