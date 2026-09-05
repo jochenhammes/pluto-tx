@@ -10,7 +10,7 @@ import sys
 from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
-from .flowgraph import PlutoTxFlowgraph, _gr_atten
+from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, _gr_atten
 from .netutil import probe_uri_with_timeout, scan_devices_with_timeout
 
 
@@ -81,6 +81,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItem("FM", PlutoTxFlowgraph.MODE_FM)
         self.mode_combo.addItem("SSB (USB)", PlutoTxFlowgraph.MODE_SSB)
+        self.mode_combo.addItem("M17", PlutoTxFlowgraph.MODE_M17)
+        if not M17_AVAILABLE:
+            # gr-m17 is an optional, from-source dependency (see
+            # install-m17.sh) -- grey out rather than hide, so the operator
+            # can see the mode exists and why it's unavailable.
+            m17_item_idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_M17)
+            item = self.mode_combo.model().item(m17_item_idx)
+            item.setEnabled(False)
+            self.mode_combo.setItemData(
+                m17_item_idx, "gr-m17 is not installed -- see install-m17.sh / README", QtCore.Qt.ToolTipRole
+            )
+        # Sync to the flowgraph's ACTUAL mode before wiring the change
+        # signal -- otherwise the combo always shows "FM" regardless of
+        # what mode tb was actually constructed with (e.g. --mode ssb, or
+        # M17 passed in directly), and connecting the signal first would
+        # fire _on_mode_changed() -> tb.set_mode() before tb.start() has
+        # run, which raises (blocks.selector's ninputs isn't known yet).
+        initial_idx = self.mode_combo.findData(tb.mode)
+        if initial_idx >= 0:
+            self.mode_combo.setCurrentIndex(initial_idx)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self.mode_combo)
 
@@ -96,6 +116,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_button.clicked.connect(self._on_pick_file)
         mode_row.addWidget(self.file_button)
         layout.addLayout(mode_row)
+
+        # --- M17 callsigns (only meaningful/enabled in M17 mode) -----------
+        m17_row = QtWidgets.QHBoxLayout()
+        m17_row.addWidget(QtWidgets.QLabel("M17 Src Callsign:"))
+        self.m17_src_edit = QtWidgets.QLineEdit(tb.m17_src_callsign)
+        self.m17_src_edit.setMaxLength(config.M17_CALLSIGN_MAX_LEN)
+        self.m17_src_edit.setPlaceholderText("e.g. DA2JH")
+        self.m17_src_edit.textChanged.connect(self._on_m17_src_callsign_changed)
+        m17_row.addWidget(self.m17_src_edit)
+        m17_row.addWidget(QtWidgets.QLabel("Dst Callsign:"))
+        self.m17_dst_edit = QtWidgets.QLineEdit(tb.m17_dst_callsign)
+        self.m17_dst_edit.setMaxLength(config.M17_CALLSIGN_MAX_LEN)
+        self.m17_dst_edit.textChanged.connect(self._on_m17_dst_callsign_changed)
+        m17_row.addWidget(self.m17_dst_edit)
+        m17_row.addStretch(1)
+        layout.addLayout(m17_row)
+        self._update_m17_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
         power_row = QtWidgets.QHBoxLayout()
@@ -281,6 +318,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compressor_threshold_slider.setEnabled(enabled and self.compressor_enable.isChecked())
         self.compressor_ratio_slider.setEnabled(enabled and self.compressor_enable.isChecked())
         self.file_button.setEnabled(enabled and self.source_combo.currentData() == PlutoTxFlowgraph.SRC_FILE)
+        self._m17_connected = enabled
+        self._update_m17_controls_enabled()
+
+    def _update_m17_controls_enabled(self):
+        enabled = getattr(self, "_m17_connected", True) and self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17
+        self.m17_src_edit.setEnabled(enabled)
+        self.m17_dst_edit.setEnabled(enabled)
 
     def _style_estop_button(self, locked: bool):
         self.estop_button.setText("Re-arm" if locked else "E-STOP")
@@ -299,6 +343,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_indicator_on_air(self):
         self.tx_indicator.setText("ON AIR")
         self.tx_indicator.setStyleSheet("background-color: #c0392b; color: white; font-size: 18pt; font-weight: bold;")
+
+    def _set_indicator_ending(self):
+        # M17 only: shown during the brief EOT tail after PTT release, while
+        # RF is intentionally still up so the receiver gets a clean end-of-
+        # stream instead of a hard cutoff.
+        self.tx_indicator.setText("ENDING...")
+        self.tx_indicator.setStyleSheet("background-color: #e67e22; color: white; font-size: 18pt; font-weight: bold;")
 
     # --- slots ------------------------------------------------------
     def _on_freq_changed(self, mhz):
@@ -340,6 +391,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_mode_changed(self, idx):
         self.tb.set_mode(self.mode_combo.currentData())
+        self._update_m17_controls_enabled()
+
+    def _on_m17_src_callsign_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_m17_src_callsign(text)
+
+    def _on_m17_dst_callsign_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_m17_dst_callsign(text)
 
     def _on_source_changed(self, idx):
         source = self.source_combo.currentData()
@@ -372,8 +432,7 @@ class MainWindow(QtWidgets.QMainWindow):
         semantics. Switching modes while keyed would leave the RF on with no
         way to release it under the new mode's signals -- always unkey first."""
         if self.tb.keyed:
-            self.tb.unkey_ptt()
-            self._set_indicator_idle()
+            self._release_ptt()
 
         for signal in (self.ptt_button.toggled, self.ptt_button.pressed, self.ptt_button.released):
             try:
@@ -411,9 +470,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ptt_button.setText("PTT (click to stop)")
             self._set_indicator_on_air()
         else:
-            self.tb.unkey_ptt()
             self.ptt_button.setText("PTT (click to send)")
-            self._set_indicator_idle()
+            self._release_ptt()
 
     def _on_ptt_pressed(self):
         if not self._armed:
@@ -424,7 +482,27 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_ptt_released(self):
         if not self.tb.keyed:
             return
+        self._release_ptt()
+
+    def _release_ptt(self):
+        """Shared PTT-release handling (both PTT interaction modes, plus the
+        safety-unkey when switching between them). M17 can't cut RF
+        instantly: unkey_ptt() sends EOT but deliberately leaves attenuation
+        up for its tail (see flowgraph.py's unkey_ptt() docstring), so the
+        indicator shows an intermediate state instead of jumping straight
+        back to READY, and a bounded timer finishes the job. E-STOP is
+        NOT routed through here -- it calls tb.unkey_ptt() + force_safe_state()
+        directly, an unconditional override of any pending M17 tail."""
         self.tb.unkey_ptt()
+        if self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17:
+            self._set_indicator_ending()
+            QtCore.QTimer.singleShot(int(config.M17_EOT_HOLD_S * 1000), self._finish_m17_unkey)
+        else:
+            self._set_indicator_idle()
+
+    def _finish_m17_unkey(self):
+        if self.tb is not None:
+            self.tb.finish_unkey_m17()
         self._set_indicator_idle()
 
     def _on_connect_clicked(self):
@@ -520,6 +598,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 mode=self.mode_combo.currentData(),
                 source=self.source_combo.currentData(),
                 enable_waterfall=True,
+                m17_src_callsign=self.m17_src_edit.text(),
+                m17_dst_callsign=self.m17_dst_edit.text(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {uri}: {e}")

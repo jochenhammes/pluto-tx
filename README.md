@@ -29,14 +29,26 @@ Nicht Teil des Skripts (bewusst manuell, da hardware-/setup-abhängig):
 - Der Pluto selbst muss bereits per Netzwerk (Ethernet/`ip:...`) oder USB (`usb:...`) erreichbar sein — siehe Geräte-Scan/-Auswahl unten.
 - Bei einer USB-Verbindung ggf. nötige udev-Regeln für Nicht-root-Zugriff auf das USB-Gerät (in diesem Projekt bisher nicht gebraucht/getestet, siehe ToDo unten).
 
+### Optional: M17 Digitalsprache
+
+`install.sh` installiert bewusst NICHT `gnuradio.m17` — das ist kein apt-/PyPI-Paket, sondern braucht einen echten C++/CMake-Build ([gr-m17](https://github.com/M17-Project/gr-m17)). Ohne das ist `pluto_tx` voll funktionsfähig (FM/SSB), nur der "M17"-Moduseintrag ist ausgegraut. Wer M17 senden will:
+
+```
+./install-m17.sh
+```
+
+Baut `gr-m17` (gepinnt auf einen verifizierten Commit) lokal nach `$HOME/.local` — kein `sudo` für den eigentlichen Build nötig, nur für ggf. fehlende `cmake`/`make`/`doxygen`. Regeneriert danach den `pluto-tx`-Starter aus `install.sh` so, dass `LD_LIBRARY_PATH` automatisch gesetzt wird (keine Shell-rc-Änderungen nötig). Siehe [M17 Digitalsprache (TX)](#m17-digitalsprache-tx) unten für Details zur Signalkette.
+
 ## Struktur
 
 ```
 install.sh                  # siehe Installation oben
+install-m17.sh               # optional: gr-m17-Build, siehe Installation oben
 pluto_tx/
-├── config.py      # Konstanten: Dämpfungsgrenzen, Samplerates, DE-Bandplan
+├── config.py      # Konstanten: Dämpfungsgrenzen, Samplerates, DE-Bandplan, NF-Dynamik, M17
 ├── safety.py       # PlutoSafety: rohes python3-libiio, unabhängig von gr-iio
-├── flowgraph.py     # PlutoTxFlowgraph(gr.top_block): FM/SSB-Signalkette
+├── flowgraph.py     # PlutoTxFlowgraph(gr.top_block): FM/SSB/M17-Signalkette
+├── dynamics.py      # DynamicsProcessor(gr.sync_block): Kompressor/Limiter, siehe NF-Verarbeitung unten
 ├── gui.py             # PyQt5 GUI
 ├── app.py              # CLI-Einstieg (--gui für die GUI)
 └── da2jh-test.wav        # Standard-Testaufnahme (Rufzeichen, gesprochen)
@@ -97,6 +109,13 @@ python3 -m pluto_advanced_rx.app --freq 432150000
 
 TX ohne `--gui`: headless CLI-Test (fester Carrier für `--duration` Sekunden, oder `--interactive` für Enter-zum-Keyen).
 
+**M17 direkt so gestartet (nicht über den `pluto-tx`-Starter) bleibt ausgegraut**, wenn `install-m17.sh` gelaufen ist: `LD_LIBRARY_PATH` wird nur vom generierten `~/.local/bin/pluto-tx`-Starter gesetzt, nicht vom direkten `python3 -m pluto_tx.app`-Aufruf. Entweder den Starter benutzen (`pluto-tx --freq ...`), oder vorher selbst setzen:
+
+```
+export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+python3 -m pluto_tx.app --freq 432150000 --gui
+```
+
 ## Sicherheitsdesign
 
 Kernproblem, das diesen Eigenbau motiviert hat: der AD9361-Treiber (libiio) trennt Buffer-Streaming komplett von Dämpfung (`hardwaregain`) und LO-Zustand (`powerdown`) — keine SDR-Software, die wir getestet haben (SDRangel eingeschlossen), setzt diese beim Stoppen automatisch zurück. Deshalb: `PlutoSafety` (in `safety.py`) verwaltet TX-Dämpfung und LO-Powerdown komplett unabhängig von GNU Radio über rohes `python3-libiio`. `force_safe_state()` (Dämpfung auf Minimum + LO aus) ist die einzige Funktion, auf die jeder Shutdown-Pfad läuft: normales Programmende, Fenster schließen, SIGINT/SIGTERM, unbehandelte Exceptions. Die GUI zeigt zusätzlich alle 500ms den tatsächlichen Hardware-Zustand an (nicht nur den vermuteten App-Zustand) und hat einen NOTAUS-Button.
@@ -117,6 +136,30 @@ ptt_mute -> nf_filter (Bandpass) -> gate -> agc -> compressor -> nf_gain -> limi
 - Kein separater Makeup-Gain-Regler: `nf_gain` ("Audio Gain") bleibt bewusst der einzige Ansteuerungsregler, jetzt direkt hinter dem Kompressor. Das heißt konkret: Kompression allein macht die Modulation NICHT automatisch lauter (reduziert nur die Dynamik/Spitzen) — erst wer danach "Audio Gain" hochdreht, nutzt den neu gewonnenen Headroom tatsächlich aus. Gemessen (offline, `da2jh-test.wav`): bei gleicher Audio-Gain-Einstellung sinkt die Hard-Clip-Rate von 0,28 % auf 0 %; bei 3× höherer Audio-Gain (spürbar lauter als vorher) bleibt sie mit 0,13 % immer noch unter der alten Rate.
 
 Alle drei Stufen einzeln per Checkbox aktivierbar/deaktivierbar, Einstellungen bleiben über Geräte-Reconnect und Datei-Wechsel erhalten (wie alle anderen Regler). Startwerte in `config.py` sind allgemeine Rundfunk-/Sprachprozessor-Konvention, gegen `da2jh-test.wav` grob validiert, aber nicht mikrofonspezifisch feinjustiert — je nach Mikrofon/Pegel ggf. nachregeln.
+
+## M17 Digitalsprache (TX)
+
+Dritter Modus in `pluto_tx` (neben FM/SSB), für den offenen [M17](https://m17project.org/)-Digitalsprachstandard. Nur TX — Demodulation/Empfang (`pluto_advanced_rx`) ist bewusst noch nicht Teil dieser Änderung, siehe ToDo unten. Braucht `gnuradio.m17` ([gr-m17](https://github.com/M17-Project/gr-m17), nicht auf apt/PyPI) — siehe [Optional: M17 Digitalsprache](#optional-m17-digitalsprache) oben. Ohne installiertes `gr-m17` ist der Moduseintrag in der GUI ausgegraut (mit Tooltip), der Rest der App (FM/SSB) läuft unverändert weiter — reiner Lazy-Import mit einem Modul-Flag (`M17_AVAILABLE`), kein hartes Dependency.
+
+Signalkette (`pluto_tx/flowgraph.py`, eigener Zweig parallel zu FM/SSB):
+
+```
+ptt_mute -> m17_audio_resampler (48k->8k) -> m17_float_to_short -> m17_codec2_encoder
+         -> m17_coder (gr-m17: Codec2-Bytes -> 4800 Sym/s Baseband) -> m17_rrc (Root-Raised-Cosine, Formfilter)
+         -> m17_fm_mod (analog.frequency_modulator_fc, ±800 Hz Deviation) -> m17_tx_resampler (48k -> QUAD_RATE)
+         -> tx_gain
+```
+
+- **Zapft `ptt_mute` direkt an** — läuft bewusst NICHT durch die NF-Dynamik-Kette (Gate/AGC/Kompressor/Limiter, siehe oben): `m17_codec2_encoder` erwartet einen für Codec2 typischen Sprachpegel, kein für analoge FM/SSB-Modulation optimiertes, bereits komprimiertes Signal — ein zusätzlicher Kompressor davor hätte hier keinen klaren Nutzen und nur eine weitere Fehlerquelle/Abstimmungsvariable hinzugefügt.
+- **Geht NICHT durch `mode_selector`** (der bleibt reines FM/SSB, 2 statt 3 Eingänge) — `m17_tx_resampler` speist `tx_gain` direkt, umgeschaltet per `lock()`/`connect()`/`disconnect()` beim Wechsel in/aus M17-Modus (kurze Pause nur bei diesem Wechsel, FM<->SSB bleibt beliebig schnell). Grund, real auf Hardware gemessen: `m17_coder` erzwingt `output_multiple(192)` und expandiert danach um ~Faktor 520 (RRC x10, Resampler x~52) — durch `blocks.selector` gemeinsam mit den FM/SSB-Zweigen geroutet, verhandelte GNU Radios Scheduler die Puffergrößen für den echten Hardware-Sink nie erfolgreich: `m17_coder`s eigene `general_work()` wurde nach PTT-Druck kein einziges Mal mehr aufgerufen (per Stufe-für-Stufe-Sonde auf echter Hardware bestätigt: 0 Symbole an jeder Stufe, obwohl SOT nachweislich ankam) — reiner Dauerträger auf der Luftschnittstelle, kein Overrun. Größere Puffer (`set_max_output_buffer`) beheben das nicht (GNU Radio kappt sie deutlich unter dem nötigen Wert) — dieselbe Fehlerklasse wie der bereits dokumentierte `pluto_advanced_rx`-15/20-MHz-Scheduler-Deadlock oben. Direkt an den echten Sink angeschlossen (ohne `mode_selector`) lief dieselbe Kette dagegen sofort fehlerfrei — daher die dedizierte Verbindung statt eines dritten Selector-Eingangs.
+- **`m17_coder`** hat kein internes Echtzeit-Timing — ungedrosselt läuft er weit schneller als die nominellen 4800 Sym/s. Die tatsächliche Sendegeschwindigkeit entsteht dadurch, dass `pluto_sink` (AD9361-DAC) das Baseband am Ende mit fester Samplerate abnimmt — der Coder selbst braucht (und bekommt) keine Drosselung.
+- **PTT ist bei M17 nachrichtenbasiert (SOT/EOT), nicht sofort aus wie bei FM/SSB**: `key_ptt()` sendet `"SOT"` an `m17_coder`/`m17_codec2_encoder` (Start-of-Transmission). `unkey_ptt()` mutet die NF sofort, sendet aber `"EOT"` (End-of-Transmission) und lässt den Sender absichtlich noch `M17_EOT_HOLD_S` (Default 0,4s, real gegen echte Hardware auf ~424-440ms EOT-Tail-Dauer gemessen) weiterlaufen, damit der Coder seinen Abschluss-Frame + EOT-Frames noch aussenden kann (theoretisches Minimum ~80ms bei Default-Einstellungen) — erst danach wird die Dämpfung tatsächlich hochgefahren. Die GUI zeigt das als eigenen Zustand `"ENDING..."` (orange) zwischen `"ON AIR"` und `"READY"`. Der NOTAUS-Button umgeht diesen Ablauf bewusst komplett (sofortiges `unkey_ptt()`, kein Warten auf den Tail) — `shutdown_safe()`/`force_safe_state()` bleiben davon unabhängig immer die letzte, unbedingte Sicherheitsebene.
+- **Rufzeichen** (Quelle/Ziel, Standard-Ziel `@ALL`) sind eigene GUI-Felder, nur aktiv/eingeblendet wenn Modus = M17 und verbunden; Änderungen wirken direkt auf `m17_coder.set_src_id()`/`set_dst_id()`, kein Flowgraph-Rebuild nötig.
+- **Root-Raised-Cosine-Formfilter** (`filter.interp_fir_filter_fff`, `firdes.root_raised_cosine(...)`) ist NICHT Teil von `m17_coder` selbst, sondern eine eigene Stufe danach — Standard-Pulsformung für ein bandbegrenztes M17-Signal, `gain` bewusst gleich dem Interpolationsfaktor (10) gesetzt, um den Amplitudenverlust der Nullstellen-Interpolation auszugleichen.
+
+**Verifiziert:** Offline Coder→Decoder-Loopback-Test (korrekter Rufzeichen-Roundtrip, keine RF), echter Low-Power-PTT-Test auf Flowgraph-Ebene und nochmal auf voller GUI-Ebene (Klick-Toggle- und Hold-to-Talk-PTT), jeweils mit `da2jh-test.wav` als Quelle (korrekte Stationskennung, keine Live-Mikrofonaufnahme) — alle mit expliziter Freigabe vor jeder echten Sendung. Zusätzlich, nach Auffinden und Beheben des `mode_selector`-Deadlocks oben: reale Basisband-Messung (Instantanfrequenz variiert korrekt, ~1,8 kHz RMS / ~3,5 kHz Spitze Deviation, kein Dauerträger mehr), ein realer Low-Power-Sendetest, per RTL-SDR vom Betreiber selbst als sauber moduliertes Signal bestätigt (nicht nur Träger) — und schließlich mit SDR++'s eigenem M17-Demodulator tatsächlich erfolgreich empfangen/demoduliert, also eine echte, unabhängige Bestätigung eines standardkonformen M17-Signals (nicht nur "sieht moduliert aus").
+
+Der von `pluto_advanced_rx` unabhängige "schwacher Träger ohne PTT"-Effekt (LO-Leckage bei angeschlossenem, aber nicht gesendetem Zustand) ist NICHT M17-spezifisch und kein neuer Bug — siehe [Sicherheitsdesign](#sicherheitsdesign) oben.
 
 ## Bekannte Einschränkungen
 
@@ -144,3 +187,4 @@ Der eigentliche Verbindungsaufbau (`iio.Context`) hat kein eingebautes Timeout u
 - **Nativer USB-Backend nicht getestet** — der Geräte-Scan (siehe oben) findet auch USB-Contexts, aber ob eine echte USB-Verbindung (`usb:...`) durchgängig funktioniert, ist ungetestet — inklusive ob dafür auf einem frischen Rechner erst noch udev-Regeln für Nicht-root-Zugriff auf das USB-Gerät nötig sind (`install.sh` richtet das bewusst nicht ein). Der native USB-Backend könnte außerdem den RX-Durchsatz über die aktuell gemessenen ~4,7-4,9 MSa/s (IIOD-Netzwerkprotokoll) hinaus verbessern und 5/10-MHz-RX-Bandbreiten wieder nutzbar machen.
 - **GUI besser/cooler aussehen lassen** — aktuell rein funktional (Standard-Qt-Widgets). Eventuell Inspiration von anderer SDR-Software (SDR++, SDRangel) oder modernen Ham-Radio-Interfaces holen.
 - **`pluto_advanced_rx`: mehrstufige IF-Dezimation für 15/20-MHz-Presets.** Aktuell dezimiert `flowgraph.py`'s IF-Stufe in einem einzigen `rational_resampler_ccf`-Schritt von der RX-Bandbreite direkt auf `DEMOD_IF_RATE` (50 kHz). Das funktioniert bis 10 MHz (Dezimation 200:1), aber bei 15/20 MHz (400:1) wird der automatisch entworfene Filter >13.000 Taps lang und der GNU-Radio-Scheduler kann den Block nicht mehr beliefern (`ninput_items_required` > `max_possible_items_available`) — Ergebnis: keine Daten, nicht nur Overruns. Größere Puffer (`set_max_output_buffer`) alleine beheben das nachweislich nicht (getestet). Lösung wäre eine kaskadierte Dezimation (z.B. mehrere `rational_resampler_ccf`-Stufen mit je kleinerem Verhältnis statt einer einzigen mit riesigem Filter) — Standardtechnik bei großen Dezimationsverhältnissen, aber echter Umbau, kein Config-Change. Selbst mit funktionierendem Filter bliebe bei 15/20 MHz vermutlich trotzdem die Netzwerk-Durchsatzgrenze (~4,7-4,9 MSa/s) ein Problem, siehe den USB-Backend-ToDo-Punkt oben.
+- **M17-Demodulation in `pluto_advanced_rx`.** TX ist fertig (siehe [M17 Digitalsprache (TX)](#m17-digitalsprache-tx) oben), RX war ursprünglich mitgeplant, aber bewusst noch nicht umgesetzt. Wichtig für den Einstieg: `m17.symbol_sync` ist im gr-m17-Quellcode vorhanden, aber vom Maintainer bewusst aus dem Build entfernt (`lib/CMakeLists.txt`/`python/m17/bindings/CMakeLists.txt`, auskommentiert, Commit-Message "hide the symbol sync block for now") — RX muss stattdessen GNU Radios eigenen `digital.symbol_sync_ff` nutzen, genau wie gr-m17s eigenes Referenzbeispiel das schon macht. `m17.m17_decoder` exponiert `set_msg_handler` nicht direkt nach Python; zum Empfang seiner Message-Ports (z.B. Rufzeichen/Payload) ist ein kleiner eigener `gr.basic_block` mit registriertem Message-Port nötig (`msg_connect(decoder, "fields", eigener_sink, "in")`), analog zum in dieser Session gebauten (nicht committeten) Test-Sink.

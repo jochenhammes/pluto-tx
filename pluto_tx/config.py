@@ -71,6 +71,39 @@ LIMITER_KNEE_DB = 1.0
 LIMITER_ATTACK_MS = 1.0
 LIMITER_RELEASE_MS = 60.0
 
+# --- M17 digital voice (optional -- needs gr-m17, see install-m17.sh) ------
+# Parameters below are taken from gr-m17's own real reference flowgraphs
+# (examples/transmitterPLUTOSDR.grc), not re-derived from the M17 spec, and
+# verified this session by an actual offline m17_coder->m17_decoder
+# round-trip (encoded test bytes decoded correctly, including src/dst
+# callsigns recovered from the LSF). The M17 branch deliberately bypasses
+# nf_filter/gate/agc/compressor/nf_gain/limiter_smooth/limiter (the analog-
+# modulation dynamics chain) -- it taps ptt_mute's output directly. Codec2
+# has its own internal level handling; a broadcast-style compressor ahead of
+# a low-bitrate vocoder is more likely to hurt intelligibility than help.
+M17_CODEC2_RATE = 8_000  # codec2's fixed input rate
+M17_SYMBOL_RATE = 4_800  # M17's native baud rate
+M17_RRC_ALPHA = 0.5
+M17_RRC_NTAPS = 81
+M17_RRC_SPS = 10  # samples/symbol after RRC pulse shaping
+M17_BASEBAND_RATE = M17_SYMBOL_RATE * M17_RRC_SPS  # 48,000 Hz, post-RRC/pre-FM-mod
+M17_DEVIATION_HZ = 800.0  # FM deviation for the outer (+-1) symbol level
+
+M17_DEFAULT_DST_CALLSIGN = "@ALL"  # standard M17 broadcast destination
+M17_CALLSIGN_MAX_LEN = 9  # m17_coder truncates to this; GUI should validate the same
+
+# unkey_ptt() in M17 mode can't cut RF instantly like FM/SSB -- the encoder
+# needs a short tail (>= 1 final frame + eot_cnt EOT frames, ~80ms minimum
+# with defaults) to actually transmit a clean EOT so the receiver doesn't
+# hang. M17_EOT_HOLD_S is how long the GUI waits before lowering
+# attenuation; M17_EOT_HOLD_WATCHDOG_S is a hard ceiling in case something
+# goes wrong. Both are conservative placeholders -- gr-m17's real-hardware
+# tail latency (scheduling/USB/IIOD buffering on top of the ~80ms
+# theoretical minimum) is unmeasured; needs calibration against a real PTT
+# release, which requires explicit operator approval to test (see README).
+M17_EOT_HOLD_S = 0.4
+M17_EOT_HOLD_WATCHDOG_S = 2.0
+
 # German amateur radio band edges reachable by the Pluto's TX LO range
 # (46.875 MHz - 6 GHz), used only for a non-blocking sanity warning in the GUI.
 DE_AMATEUR_BANDS_HZ = [

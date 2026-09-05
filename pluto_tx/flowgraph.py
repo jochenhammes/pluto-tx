@@ -27,6 +27,20 @@ from . import config
 from . import dynamics
 from .safety import PlutoSafety
 
+# M17 digital voice is optional: gr-m17 is a from-source build (see
+# install-m17.sh), not something every pluto_tx user necessarily has. The
+# app must stay fully usable for FM/SSB without it -- import lazily and let
+# the GUI grey out the M17 mode entry when unavailable, rather than a hard
+# top-level ImportError that would break the whole app.
+try:
+    from gnuradio import m17 as _m17
+    import pmt as _pmt
+    M17_AVAILABLE = True
+except ImportError:
+    _m17 = None
+    _pmt = None
+    M17_AVAILABLE = False
+
 _PLACEHOLDER_WAV = os.path.join(os.path.dirname(__file__), "_silence.wav")
 _DEFAULT_WAV = os.path.join(os.path.dirname(__file__), "da2jh-test.wav")
 
@@ -61,10 +75,12 @@ class PlutoTxFlowgraph(gr.top_block):
     SRC_FILE = 1
     MODE_FM = 0
     MODE_SSB = 1
+    MODE_M17 = 2
 
     def __init__(self, uri=config.DEFAULT_URI, frequency=config.DEFAULT_FREQUENCY,
                  atten_ceiling_db=config.DEFAULT_ATTEN_CEILING, audio_device="",
-                 wav_path=None, mode=MODE_FM, source=SRC_MIC, enable_waterfall=False):
+                 wav_path=None, mode=MODE_FM, source=SRC_MIC, enable_waterfall=False,
+                 m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN):
         super().__init__("PlutoTxFlowgraph")
 
         self.uri = uri
@@ -73,6 +89,17 @@ class PlutoTxFlowgraph(gr.top_block):
         self.atten_ceiling_db = atten_ceiling_db
         self.target_atten_db = atten_ceiling_db
         self._keyed = False
+        self._m17_ending = False  # True during the brief EOT tail after unkey_ptt() in M17 mode
+
+        if mode == self.MODE_M17 and not M17_AVAILABLE:
+            # mode_selector below would otherwise be constructed pointing at
+            # an input that's never connected (the M17 branch only gets
+            # wired if M17_AVAILABLE) -- fall back rather than build a
+            # broken flowgraph.
+            mode = self.MODE_FM
+        self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
+        # to sync mode_combo's initial selection, otherwise it always shows
+        # "FM" regardless of what mode the flowgraph was actually built with.
 
         # Safety layer first: attenuation to minimum, LO up -- BEFORE the GR
         # sink (which enables TX channels at construction time) exists.
@@ -171,10 +198,84 @@ class PlutoTxFlowgraph(gr.top_block):
             taps=[], fractional_bw=0.4,
         )
 
-        self.mode_selector = blocks.selector(gr.sizeof_gr_complex, mode, 0)
+        # --- M17 branch (optional, only if gr-m17 is installed): deliberately
+        # bypasses the entire analog dynamics chain above (nf_filter/gate/
+        # agc/compressor/nf_gain/limiter_smooth/limiter) -- it taps
+        # ptt_mute's output directly. Codec2 has its own internal level
+        # handling; a broadcast-style compressor ahead of a low-bitrate
+        # vocoder is more likely to hurt intelligibility than help.
+        # ptt_mute is still reused (defense in depth: no mic audio flows
+        # even before m17_coder's own SOT/EOT-gated _active state is
+        # considered). Parameters/topology are taken from gr-m17's own
+        # examples/transmitterPLUTOSDR.grc reference flowgraph and verified
+        # this session with a real offline m17_coder->m17_decoder round-trip
+        # (encoded test bytes and src/dst callsigns both decoded correctly).
+        self.m17_src_callsign = m17_src_callsign
+        self.m17_dst_callsign = m17_dst_callsign or config.M17_DEFAULT_DST_CALLSIGN
+        if M17_AVAILABLE:
+            g_m17 = math.gcd(config.AUDIO_RATE, config.M17_CODEC2_RATE)
+            self.m17_audio_resampler = filter.rational_resampler_fff(
+                interpolation=config.M17_CODEC2_RATE // g_m17, decimation=config.AUDIO_RATE // g_m17,
+                taps=[], fractional_bw=0.4,
+            )
+            self.m17_float_to_short = blocks.float_to_short(1, 32767.0)
+            self.m17_codec2_encoder = _m17.codec2_encoder()
+            # type=2 (Voice), no encryption/signing/CAN -- verified this
+            # session via a real offline coder->decoder loopback (payload
+            # and src/dst callsigns both round-tripped correctly with these
+            # exact parameters).
+            self.m17_coder = _m17.m17_coder(
+                self.m17_src_callsign, self.m17_dst_callsign, 2, 0, 0, 0, 0,
+                "", "", "", False, False, "", 1,
+            )
+            # gain=M17_RRC_SPS compensates for interp_fir_filter_fff's
+            # zero-stuffing interpolation (an interpolating FIR needs its
+            # taps scaled by the interpolation factor to preserve amplitude,
+            # otherwise the output is attenuated by ~1/interpolation) --
+            # matches gr-m17's own reference example's gain=10 exactly.
+            self._m17_rrc_taps = firdes.root_raised_cosine(
+                config.M17_RRC_SPS, config.M17_BASEBAND_RATE, config.M17_SYMBOL_RATE,
+                config.M17_RRC_ALPHA, config.M17_RRC_NTAPS,
+            )
+            self.m17_rrc = filter.interp_fir_filter_fff(config.M17_RRC_SPS, self._m17_rrc_taps)
+            self.m17_fm_mod = analog.frequency_modulator_fc(
+                2 * math.pi * config.M17_DEVIATION_HZ / config.M17_BASEBAND_RATE
+            )
+            g_m17_tx = math.gcd(config.QUAD_RATE, config.M17_BASEBAND_RATE)
+            self.m17_tx_resampler = filter.rational_resampler_ccf(
+                interpolation=config.QUAD_RATE // g_m17_tx, decimation=config.M17_BASEBAND_RATE // g_m17_tx,
+                taps=[], fractional_bw=0.4,
+            )
+
+        # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
+        # deliberately NOT a third selector input. Measured this session:
+        # m17_coder's unusual output_multiple(192)-plus-large-downstream-
+        # expansion (RRC x10, resampler x~52) starves completely when routed
+        # through blocks.selector alongside sibling FM/SSB inputs (confirmed
+        # via a stage-by-stage probe on real hardware: m17_coder's own
+        # general_work() was never even called once PTT was pressed, zero
+        # output at every stage) -- while the identical M17 chain connected
+        # DIRECTLY to the real hardware sink (no selector) worked perfectly
+        # (proper symbol stream, correct EOT tail, no underruns). No buffer-
+        # size tuning fixed the selector case (set_max_output_buffer gets
+        # silently capped well below what's needed) -- this is a structural
+        # scheduler incompatibility, not a tunable parameter, so M17 gets
+        # its own dedicated tx_gain connection instead, swapped via
+        # lock()/connect()/disconnect() in set_mode() when entering/leaving
+        # M17 mode (see set_mode() below). FM<->SSB switching is completely
+        # unaffected -- still the original fast mode_selector.set_input_index().
+        self.mode_selector = blocks.selector(gr.sizeof_gr_complex, 1 if mode == self.MODE_SSB else 0, 0)
         self.mode_selector.set_enabled(True)
 
         self.tx_gain = blocks.multiply_const_cc(1.0 + 0j)
+
+        # Whichever of {mode_selector, m17_tx_resampler} is NOT currently
+        # feeding tx_gain must still drain into something -- GNU Radio
+        # requires every output port to be connected. null_sink is a
+        # standard no-op drain for exactly this purpose.
+        self._null_sink_selector = blocks.null_sink(gr.sizeof_gr_complex)
+        if M17_AVAILABLE:
+            self._null_sink_m17 = blocks.null_sink(gr.sizeof_gr_complex)
 
         # --- Live view of the modulated baseband actually fed to the sink.
         # Optional: a qtgui sink is a real Qt widget and needs a
@@ -215,7 +316,29 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.ssb_mod, self.ssb_resampler)
         self.connect(self.ssb_resampler, (self.mode_selector, self.MODE_SSB))
 
-        self.connect(self.mode_selector, self.tx_gain)
+        if M17_AVAILABLE:
+            # Taps ptt_mute directly (bypasses the analog dynamics chain --
+            # see the M17 branch construction comment above).
+            self.connect(self.ptt_mute, self.m17_audio_resampler)
+            self.connect(self.m17_audio_resampler, self.m17_float_to_short)
+            self.connect(self.m17_float_to_short, self.m17_codec2_encoder)
+            self.connect(self.m17_codec2_encoder, self.m17_coder)
+            self.connect(self.m17_coder, self.m17_rrc)
+            self.connect(self.m17_rrc, self.m17_fm_mod)
+            self.connect(self.m17_fm_mod, self.m17_tx_resampler)
+            # m17_tx_resampler feeds tx_gain directly ONLY while in M17 mode
+            # (NOT through mode_selector -- see the comment above
+            # mode_selector's construction). Whichever path isn't active
+            # drains into a null_sink instead.
+            if mode == self.MODE_M17:
+                self.connect(self.m17_tx_resampler, self.tx_gain)
+                self.connect(self.mode_selector, self._null_sink_selector)
+            else:
+                self.connect(self.mode_selector, self.tx_gain)
+                self.connect(self.m17_tx_resampler, self._null_sink_m17)
+        else:
+            self.connect(self.mode_selector, self.tx_gain)
+
         self.connect(self.tx_gain, self.pluto_sink)
         if self.waterfall is not None:
             self.connect(self.tx_gain, self.waterfall)
@@ -254,11 +377,52 @@ class PlutoTxFlowgraph(gr.top_block):
         self.source_selector.set_input_index(source)
 
     def set_mode(self, mode: int):
-        self.mode_selector.set_input_index(mode)
+        prev_mode = self.mode
+        was_m17 = M17_AVAILABLE and prev_mode == self.MODE_M17
+        is_m17 = M17_AVAILABLE and mode == self.MODE_M17
+        self.mode = mode
+
+        if is_m17 != was_m17:
+            # Entering or leaving M17 mode: reroute tx_gain's upstream
+            # connection (mode_selector <-> m17_tx_resampler direct feed --
+            # see the comment above mode_selector's construction for why
+            # M17 can't go through mode_selector). Brief pause (lock/
+            # unlock), same graph-reconfiguration pattern already used
+            # elsewhere in this app (e.g. WAV file changes). FM<->SSB
+            # switching below is completely unaffected by this branch.
+            self.lock()
+            try:
+                if is_m17:
+                    self.disconnect(self.mode_selector, self.tx_gain)
+                    self.disconnect(self.m17_tx_resampler, self._null_sink_m17)
+                    self.connect(self.m17_tx_resampler, self.tx_gain)
+                    self.connect(self.mode_selector, self._null_sink_selector)
+                else:
+                    self.disconnect(self.m17_tx_resampler, self.tx_gain)
+                    self.disconnect(self.mode_selector, self._null_sink_selector)
+                    self.connect(self.mode_selector, self.tx_gain)
+                    self.connect(self.m17_tx_resampler, self._null_sink_m17)
+            finally:
+                self.unlock()
+
+        if is_m17:
+            return  # M17 bypasses the NF filter/dynamics chain entirely, nothing to retap
+
+        self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[preset]
         taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter.set_taps(taps)
+
+    def set_m17_src_callsign(self, callsign: str):
+        self.m17_src_callsign = callsign
+        if M17_AVAILABLE:
+            self.m17_coder.set_src_id(callsign)
+
+    def set_m17_dst_callsign(self, callsign: str):
+        self.m17_dst_callsign = callsign or config.M17_DEFAULT_DST_CALLSIGN
+        if M17_AVAILABLE:
+            self.m17_coder.set_dst_id(self.m17_dst_callsign)
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
@@ -303,15 +467,47 @@ class PlutoTxFlowgraph(gr.top_block):
         return self._keyed
 
     def key_ptt(self):
-        """PTT press: unmute audio, then raise RF power."""
+        """PTT press: unmute audio, then raise RF power. In M17 mode, also
+        sends SOT (start of transmission) -- without it m17_coder silently
+        discards all input and emits nothing (verified this session)."""
+        self._m17_ending = False
+        if self.mode == self.MODE_M17:
+            self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
+            self.m17_codec2_encoder.post(_pmt.intern("state_reset"), _pmt.intern("SOT"))
         self.ptt_mute.set_k(1.0)
         self.pluto_sink.set_attenuation(0, _gr_atten(self.target_atten_db))
         self._keyed = True
 
     def unkey_ptt(self):
-        """PTT release: kill RF power FIRST, then mute audio (order is safety-critical)."""
+        """PTT release. FM/SSB: kill RF power FIRST, then mute audio (order
+        is safety-critical). M17 is different: muting audio and sending EOT
+        happen immediately, but RF must stay up briefly afterward for the
+        encoder's EOT tail (final frame + EOT frames, ~80ms minimum) to
+        actually transmit -- cutting RF instantly would leave the receiver
+        hanging with no clean end-of-stream. self._keyed stays True and
+        self._m17_ending is set; the GUI drives finish_unkey_m17() after a
+        bounded delay to actually lower power. This tail is NOT a safety
+        gap: force_safe_state() (E-STOP, shutdown_safe()) forces attenuation
+        down immediately regardless, via the independent PlutoSafety layer,
+        at any point during the tail."""
+        if self.mode == self.MODE_M17:
+            self.ptt_mute.set_k(0.0)
+            self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("EOT"))
+            self._m17_ending = True
+        else:
+            self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
+            self.ptt_mute.set_k(0.0)
+            self._keyed = False
+
+    def finish_unkey_m17(self):
+        """Called by the GUI a bounded delay after unkey_ptt() in M17 mode,
+        once the EOT tail has had time to actually transmit. No-op if the
+        operator already keyed up again in the meantime (key_ptt() clears
+        _m17_ending, making a stale pending call here harmless)."""
+        if not self._m17_ending:
+            return
         self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
-        self.ptt_mute.set_k(0.0)
+        self._m17_ending = False
         self._keyed = False
 
     def shutdown_safe(self):
