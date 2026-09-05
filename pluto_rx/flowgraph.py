@@ -70,16 +70,23 @@ class PlutoRxFlowgraph(gr.top_block):
             )
             self.connect(self.pluto_source, self.waterfall)
 
-        # --- IF stage: real-tap low-pass, decimating from the RX bandwidth
-        # preset down to the fixed DEMOD_IF_RATE. Wide enough to pass the
-        # widest branch's needs (FM); SSB narrows further downstream.
+        # --- IF stage: decimate from the RX bandwidth preset down to the
+        # fixed DEMOD_IF_RATE. Uses rational_resampler_ccf (interpolation=1,
+        # i.e. pure decimation) with auto-designed taps -- same established
+        # pattern as pluto_tx's resamplers -- rather than a manually
+        # firdes.low_pass'd filter with a fixed ABSOLUTE Hz transition width:
+        # designing an absolute-Hz transition at the FULL pre-decimation rate
+        # made the filter thousands of taps long at the wider presets (e.g.
+        # 8031 taps at 10 MSps for a 3 kHz transition), needlessly expensive
+        # for no accuracy benefit. The auto-designed filter's cutoff/transition
+        # scale with the decimation ratio instead, staying cheap at every
+        # preset while still using the full available IF bandwidth as the
+        # anti-alias cutoff.
         decim = max(1, round(sample_rate / config.DEMOD_IF_RATE))
         self.if_rate = sample_rate / decim
-        if_taps = firdes.low_pass(
-            1.0, sample_rate, config.DEMOD_IF_BANDWIDTH_HZ, config.DEMOD_IF_TRANS_WIDTH_HZ,
-            window.WIN_HAMMING,
+        self.if_filter = filter.rational_resampler_ccf(
+            interpolation=1, decimation=decim, taps=[], fractional_bw=0.4,
         )
-        self.if_filter = filter.fir_filter_ccf(decim, if_taps)
         self.connect(self.pluto_source, self.if_filter)
 
         # --- FM branch: quadrature demod, then an audio low-pass to clean

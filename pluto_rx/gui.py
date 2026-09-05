@@ -113,6 +113,9 @@ class MainWindow(QtWidgets.QMainWindow):
         zoom_row.addWidget(self.fft_size_combo)
         layout.addLayout(zoom_row)
 
+        self.status_label = QtWidgets.QLabel()
+        layout.addWidget(self.status_label)
+
         # --- Waterfall (in its own sub-layout so it can be swapped out on
         # an RX-bandwidth change, which rebuilds the flowgraph) -------------
         self.waterfall_container = QtWidgets.QVBoxLayout()
@@ -130,12 +133,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"{hz/1e6:g} MHz" if hz >= 1_000_000 else f"{hz/1e3:g} kHz"
 
     def _embed_waterfall(self, tb):
+        # Only detach the old widget from our layout, never delete it: the
+        # underlying Qt widget is owned by its gr-qtgui sink block (part of
+        # the OLD flowgraph object), not by this sip.wrapinstance() wrapper.
+        # Calling deleteLater() here raced the old flowgraph's own C++
+        # teardown and crashed the process (verified: SIGSEGV during a real
+        # bandwidth-switch test). Just unparent it; it's freed for real when
+        # the old PlutoRxFlowgraph itself gets garbage collected.
         while self.waterfall_container.count():
             item = self.waterfall_container.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
-                widget.deleteLater()
         if tb.waterfall is not None:
             widget = sip.wrapinstance(tb.waterfall.qwidget(), QtWidgets.QWidget)
             widget.setMinimumHeight(400)
@@ -181,17 +190,32 @@ class MainWindow(QtWidgets.QMainWindow):
         nf_gain = self.nf_gain_slider.value() / 100.0
         fft_size = self.fft_size_combo.currentData()
 
-        self.tb.shutdown()
-        new_tb = PlutoRxFlowgraph(
-            uri=self.tb.uri, frequency=freq, sample_rate=new_rate, gain_mode=gain_mode,
-            manual_gain_db=gain_db, demod_mode=demod_mode, nf_gain=nf_gain, enable_waterfall=True,
-        )
+        # Construct the REPLACEMENT flowgraph before touching the current
+        # one: gr-iio only creates/holds its RX buffer once tb.start() runs,
+        # not at construction, so building new_tb here is safe while the old
+        # one is still running -- and if construction fails (e.g. a bad
+        # sample rate the hardware rejects), the old one is untouched and
+        # RX keeps working instead of being left dead.
+        try:
+            new_tb = PlutoRxFlowgraph(
+                uri=self.tb.uri, frequency=freq, sample_rate=new_rate, gain_mode=gain_mode,
+                manual_gain_db=gain_db, demod_mode=demod_mode, nf_gain=nf_gain, enable_waterfall=True,
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not switch to {self._format_hz(new_rate)}: {e}")
+            self.bandwidth_combo.blockSignals(True)
+            self.bandwidth_combo.setCurrentIndex(config.RX_BANDWIDTH_PRESETS.index(int(self.tb.sample_rate)))
+            self.bandwidth_combo.blockSignals(False)
+            return
+
         new_tb.set_fine_offset(fine)
         new_tb.set_fft_size(fft_size)
 
+        self.tb.shutdown()
         self.tb = new_tb
         self._embed_waterfall(new_tb)
         self.tb.start()
+        self.status_label.setText(f"Switched to {self._format_hz(new_rate)}.")
 
     def closeEvent(self, event):
         self.tb.shutdown()
