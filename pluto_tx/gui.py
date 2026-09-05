@@ -130,7 +130,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mode_row.addWidget(self.file_button)
         layout.addLayout(mode_row)
 
-        # --- M17 callsigns (only meaningful/enabled in M17 mode) -----------
+        # --- M17 callsigns -- only VISIBLE in M17 mode (not just enabled/
+        # disabled like the other controls), per explicit request: these
+        # settings are meaningless outside M17 mode, so hide the whole row
+        # rather than just greying it out. Wrapped in a QWidget because
+        # QLayout itself has no setVisible() -- only widgets do.
         m17_row = QtWidgets.QHBoxLayout()
         m17_row.addWidget(QtWidgets.QLabel("M17 Src Callsign:"))
         self.m17_src_edit = QtWidgets.QLineEdit(tb.m17_src_callsign)
@@ -144,21 +148,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m17_dst_edit.textChanged.connect(self._on_m17_dst_callsign_changed)
         m17_row.addWidget(self.m17_dst_edit)
         m17_row.addStretch(1)
-        layout.addLayout(m17_row)
+        self.m17_row_widget = QtWidgets.QWidget()
+        self.m17_row_widget.setLayout(m17_row)
+        layout.addWidget(self.m17_row_widget)
         self._update_m17_controls_enabled()
 
-        # --- FreeDV variant + callsign row. The callsign field is
-        # PERMANENTLY DISABLED (not wired to _update_freedv_controls_enabled
-        # like the variant combo): linking FreeDV's reliable_text station-ID
-        # sideband (which this field would feed) crashes the packaged
-        # libcodec2 (1.2.0-4) with a confirmed, deterministic SIGFPE inside
-        # freedv_comptx_2020() -- see pluto_tx/freedv_ctypes.py's
-        # FreeDVSession docstring and the FreeDV section of README.md for
-        # the full writeup. Kept visible (not hidden) so the operator can
-        # see the feature exists and why it's off, rather than silently
-        # doing nothing -- station ID must be handled some other way
-        # (e.g. voice ID before/after a FreeDV transmission) until this is
-        # resolved upstream.
+        # --- FreeDV variant + callsign row -- only VISIBLE in FreeDV mode,
+        # same reasoning as the M17 row above (settings meaningless outside
+        # that mode). The callsign field itself is separately PERMANENTLY
+        # DISABLED whenever the row IS visible (not wired to
+        # _update_freedv_controls_enabled like the variant combo): linking
+        # FreeDV's reliable_text station-ID sideband (which this field would
+        # feed) crashes the packaged libcodec2 (1.2.0-4) with a confirmed,
+        # deterministic SIGFPE inside freedv_comptx_2020() -- see
+        # pluto_tx/freedv_ctypes.py's FreeDVSession docstring and the FreeDV
+        # section of README.md for the full writeup. Kept visible-but-
+        # disabled (not hidden) so the operator can see the feature exists
+        # and why it's off, rather than silently doing nothing -- station ID
+        # must be handled some other way (e.g. voice ID before/after a
+        # FreeDV transmission) until this is resolved upstream.
         freedv_row = QtWidgets.QHBoxLayout()
         freedv_row.addWidget(QtWidgets.QLabel("FreeDV Variant:"))
         self.freedv_variant_combo = QtWidgets.QComboBox()
@@ -180,7 +188,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freedv_callsign_edit.setEnabled(False)
         freedv_row.addWidget(self.freedv_callsign_edit)
         freedv_row.addStretch(1)
-        layout.addLayout(freedv_row)
+        self.freedv_row_widget = QtWidgets.QWidget()
+        self.freedv_row_widget.setLayout(freedv_row)
+        layout.addWidget(self.freedv_row_widget)
         self._update_freedv_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
@@ -373,13 +383,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_freedv_controls_enabled()
 
     def _update_m17_controls_enabled(self):
-        enabled = getattr(self, "_m17_connected", True) and self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17
-        self.m17_src_edit.setEnabled(enabled)
-        self.m17_dst_edit.setEnabled(enabled)
+        # Visibility follows the selected mode (row hidden entirely outside
+        # M17); enabled state within a visible row still follows connection
+        # state, same as every other control in the app.
+        is_m17_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17
+        self.m17_row_widget.setVisible(is_m17_mode)
+        connected = getattr(self, "_m17_connected", True)
+        self.m17_src_edit.setEnabled(connected)
+        self.m17_dst_edit.setEnabled(connected)
 
     def _update_freedv_controls_enabled(self):
-        enabled = getattr(self, "_freedv_connected", True) and self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_FREEDV
-        self.freedv_variant_combo.setEnabled(enabled)
+        # Visibility follows the selected mode (row hidden entirely outside
+        # FreeDV); enabled state within a visible row still follows
+        # connection state, same as every other control in the app.
+        is_freedv_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_FREEDV
+        self.freedv_row_widget.setVisible(is_freedv_mode)
+        connected = getattr(self, "_freedv_connected", True)
+        self.freedv_variant_combo.setEnabled(connected)
         # freedv_callsign_edit is NOT touched here -- it's permanently
         # disabled at construction (see the comment above its creation):
         # linking FreeDV's reliable_text station-ID sideband crashes this
