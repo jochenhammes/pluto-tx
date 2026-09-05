@@ -9,6 +9,8 @@ import sys
 
 from PyQt5 import QtCore, QtWidgets, sip
 
+from pluto_tx.netutil import probe_uri_with_timeout
+
 from . import config
 from .flowgraph import PlutoRxFlowgraph
 
@@ -22,6 +24,22 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
+
+        # --- Device (network/USB URI) -----------------------------------
+        device_row = QtWidgets.QHBoxLayout()
+        device_row.addWidget(QtWidgets.QLabel("Device (hostname or IP):"))
+        self.uri_edit = QtWidgets.QLineEdit(tb.uri)
+        self.uri_edit.setEnabled(False)  # editable only while disconnected
+        self.uri_edit.setToolTip(
+            "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
+            "URI like usb:1.5.5 to pick a specific device when more than one "
+            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed automatically."
+        )
+        device_row.addWidget(self.uri_edit)
+        self.connect_button = QtWidgets.QPushButton("Disconnect")
+        self.connect_button.clicked.connect(self._on_connect_clicked)
+        device_row.addWidget(self.connect_button)
+        layout.addLayout(device_row)
 
         # --- Frequency + fine tune ---------------------------------
         freq_row = QtWidgets.QHBoxLayout()
@@ -145,35 +163,101 @@ class MainWindow(QtWidgets.QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
-        if tb.waterfall is not None:
+        if tb is not None and tb.waterfall is not None:
             widget = sip.wrapinstance(tb.waterfall.qwidget(), QtWidgets.QWidget)
             widget.setMinimumHeight(400)
             self.waterfall_container.addWidget(widget)
 
+    def _set_connected_controls_enabled(self, enabled: bool):
+        for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.gain_mode_combo,
+                  self.nf_gain_slider, self.bandwidth_combo, self.fft_size_combo):
+            w.setEnabled(enabled)
+        self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
+
+    def _on_connect_clicked(self):
+        if self.tb is not None:
+            self._disconnect()
+        else:
+            self._connect(self.uri_edit.text())
+
+    def _disconnect(self):
+        self.tb.shutdown()
+        self.tb = None
+        self._embed_waterfall(None)
+        self._set_connected_controls_enabled(False)
+        self.connect_button.setText("Connect")
+        self.uri_edit.setEnabled(True)
+        self.status_label.setText("Disconnected.")
+
+    def _connect(self, uri_text):
+        uri = config.normalize_uri(uri_text)
+        if not uri:
+            self.status_label.setText("Please enter a device hostname, IP, or URI.")
+            return
+        self.status_label.setText(f"Connecting to {uri}...")
+        QtWidgets.QApplication.processEvents()
+        probe_error = probe_uri_with_timeout(uri)
+        if probe_error is not None:
+            self.status_label.setText(f"Could not connect to {uri}: {probe_error}")
+            return
+        try:
+            new_tb = PlutoRxFlowgraph(
+                uri=uri,
+                frequency=self.freq_spin.value() * 1e6,
+                sample_rate=self.bandwidth_combo.currentData(),
+                gain_mode=self.gain_mode_combo.currentData(),
+                manual_gain_db=float(self.gain_slider.value()),
+                demod_mode=self.demod_combo.currentData(),
+                nf_gain=self.nf_gain_slider.value() / 100.0,
+                enable_waterfall=True,
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not connect to {uri}: {e}")
+            return
+        new_tb.set_fine_offset(float(self.fine_slider.value()))
+        new_tb.set_fft_size(self.fft_size_combo.currentData())
+        self.tb = new_tb
+        self._embed_waterfall(new_tb)
+        new_tb.start()
+        self._set_connected_controls_enabled(True)
+        self.connect_button.setText("Disconnect")
+        self.uri_edit.setEnabled(False)
+        self.status_label.setText(f"Connected to {uri}.")
+
     def _on_freq_changed(self, mhz):
+        if self.tb is None:
+            return
         self.tb.set_frequency(mhz * 1e6)
 
     def _on_fine_changed(self, value):
-        self.tb.set_fine_offset(float(value))
+        if self.tb is not None:
+            self.tb.set_fine_offset(float(value))
         self.fine_label.setText(f"{value} Hz")
 
     def _on_demod_changed(self, idx):
+        if self.tb is None:
+            return
         self.tb.set_demod_mode(self.demod_combo.currentData())
 
     def _on_gain_mode_changed(self, idx):
         mode = self.gain_mode_combo.currentData()
-        self.tb.set_gain_mode(mode)
+        if self.tb is not None:
+            self.tb.set_gain_mode(mode)
         self.gain_slider.setEnabled(mode == "manual")
 
     def _on_gain_changed(self, value):
-        self.tb.set_manual_gain(float(value))
+        if self.tb is not None:
+            self.tb.set_manual_gain(float(value))
         self.gain_label.setText(f"{value} dB")
 
     def _on_nf_gain_changed(self, value):
-        self.tb.set_nf_gain(value / 100.0)
+        if self.tb is not None:
+            self.tb.set_nf_gain(value / 100.0)
         self.nf_gain_label.setText(f"{value} %")
 
     def _on_fft_size_changed(self, idx):
+        if self.tb is None:
+            return
         self.tb.set_fft_size(self.fft_size_combo.currentData())
 
     def _on_bandwidth_changed(self, idx):
@@ -181,6 +265,8 @@ class MainWindow(QtWidgets.QMainWindow):
         can't change their decimation ratio at runtime, so this rebuilds the
         whole flowgraph from scratch, carrying over every other current
         setting, and swaps in the new waterfall widget."""
+        if self.tb is None:
+            return
         new_rate = self.bandwidth_combo.currentData()
         freq = self.tb.nominal_freq_hz
         fine = self.tb.fine_offset_hz
@@ -218,7 +304,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText(f"Switched to {self._format_hz(new_rate)}.")
 
     def closeEvent(self, event):
-        self.tb.shutdown()
+        if self.tb is not None:
+            self.tb.shutdown()
         event.accept()
 
 
@@ -234,7 +321,8 @@ def run_gui(build_tb):
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down...")
-        window.tb.shutdown()
+        if window.tb is not None:
+            window.tb.shutdown()
         qapp.quit()
 
     signal.signal(signal.SIGINT, sig_handler)
@@ -244,7 +332,8 @@ def run_gui(build_tb):
 
     def excepthook(exc_type, exc_value, exc_tb):
         print("Uncaught exception, stopping flowgraph...", file=sys.stderr)
-        window.tb.shutdown()
+        if window.tb is not None:
+            window.tb.shutdown()
         orig_excepthook(exc_type, exc_value, exc_tb)
 
     sys.excepthook = excepthook
@@ -252,4 +341,5 @@ def run_gui(build_tb):
     try:
         return qapp.exec_()
     finally:
-        window.tb.shutdown()
+        if window.tb is not None:
+            window.tb.shutdown()

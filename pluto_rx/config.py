@@ -1,5 +1,5 @@
 """Shared constants for the PlutoSDR RX app."""
-from pluto_tx.config import DEFAULT_URI, DE_AMATEUR_BANDS_HZ, in_amateur_band  # noqa: F401 (re-exported)
+from pluto_tx.config import DEFAULT_URI, DE_AMATEUR_BANDS_HZ, in_amateur_band, normalize_uri  # noqa: F401 (re-exported)
 
 # RX baseband ("quadrature") rate presets -- these double as the waterfall's
 # "zoom levels": each is the actual AD9361 RX sample rate (and, in "Auto"

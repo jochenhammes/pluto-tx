@@ -2,6 +2,21 @@
 
 DEFAULT_URI = "ip:plutoplus.local"
 
+_URI_SCHEMES = ("ip:", "usb:", "local:", "xml:")
+
+
+def normalize_uri(text: str) -> str:
+    """Accept a bare hostname/IP (e.g. 'plutoplus.local', '192.168.1.50') and
+    turn it into a libiio network context URI ('ip:...'). An already explicit
+    scheme (ip:/usb:/local:/xml:) is left untouched, so typing 'usb:1.5.5'
+    still targets a specific USB device directly -- useful when more than one
+    Pluto is reachable (e.g. two on the same LAN, or one on USB + one on
+    Ethernet)."""
+    text = text.strip()
+    if not text or text.startswith(_URI_SCHEMES):
+        return text
+    return f"ip:{text}"
+
 # AD9361 TX attenuation range (dB, 0 = max power, more negative = less power).
 MIN_ATTEN = -89.75
 MAX_ATTEN = 0.0

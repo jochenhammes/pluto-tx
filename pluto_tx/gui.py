@@ -11,6 +11,7 @@ from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
 from .flowgraph import PlutoTxFlowgraph, _gr_atten
+from .netutil import probe_uri_with_timeout
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -19,10 +20,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb = tb
         self.setWindowTitle("PlutoSDR TX")
         self._armed = True  # False after emergency stop, until re-armed
+        self._atten_ceiling_db = tb.atten_ceiling_db  # fixed for the session, carried across reconnects
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
+
+        # --- Device (network/USB URI) -----------------------------------
+        device_row = QtWidgets.QHBoxLayout()
+        device_row.addWidget(QtWidgets.QLabel("Device (hostname or IP):"))
+        self.uri_edit = QtWidgets.QLineEdit(tb.uri)
+        self.uri_edit.setEnabled(False)  # editable only while disconnected
+        self.uri_edit.setToolTip(
+            "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
+            "URI like usb:1.5.5 to pick a specific device when more than one "
+            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed automatically."
+        )
+        device_row.addWidget(self.uri_edit)
+        self.connect_button = QtWidgets.QPushButton("Disconnect")
+        self.connect_button.clicked.connect(self._on_connect_clicked)
+        device_row.addWidget(self.connect_button)
+        layout.addLayout(device_row)
 
         # --- Frequency + fine tune ---------------------------------
         freq_row = QtWidgets.QHBoxLayout()
@@ -139,11 +157,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label = QtWidgets.QLabel()
         layout.addWidget(self.status_label)
 
-        # --- Live TX waterfall -------------------------------------------
-        if tb.waterfall is not None:
-            waterfall_widget = sip.wrapinstance(tb.waterfall.qwidget(), QtWidgets.QWidget)
-            waterfall_widget.setMinimumHeight(300)
-            layout.addWidget(waterfall_widget)
+        # --- Live TX waterfall (own sub-layout so it can be swapped out on
+        # a device reconnect, which rebuilds the flowgraph) -----------------
+        self.waterfall_container = QtWidgets.QVBoxLayout()
+        layout.addLayout(self.waterfall_container)
+        self._embed_waterfall(tb)
 
         # --- Lifecycle: periodic tick doubles as (a) Ctrl-C responsiveness
         # for Qt's event loop and (b) a live hardware-state readback, so the
@@ -160,6 +178,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if os.path.abspath(wav_path) == os.path.abspath(_PLACEHOLDER_WAV):
             return "Choose File"
         return os.path.basename(wav_path)
+
+    def _embed_waterfall(self, tb):
+        # Only detach the old widget from our layout, never delete it: the
+        # underlying Qt widget is owned by its gr-qtgui sink block (part of
+        # the OLD flowgraph object), not by this sip.wrapinstance() wrapper --
+        # deleteLater() here would race the old flowgraph's own C++ teardown
+        # (see pluto_rx/gui.py's identical note, verified by a real crash there).
+        while self.waterfall_container.count():
+            item = self.waterfall_container.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        if tb is not None and tb.waterfall is not None:
+            widget = sip.wrapinstance(tb.waterfall.qwidget(), QtWidgets.QWidget)
+            widget.setMinimumHeight(300)
+            self.waterfall_container.addWidget(widget)
+
+    def _set_connected_controls_enabled(self, enabled: bool):
+        for w in (self.freq_spin, self.fine_slider, self.mode_combo, self.source_combo,
+                  self.power_slider, self.unlock_full_power, self.nf_gain_slider,
+                  self.ptt_button, self.ptt_mode_button, self.estop_button):
+            w.setEnabled(enabled)
+        self.file_button.setEnabled(enabled and self.source_combo.currentData() == PlutoTxFlowgraph.SRC_FILE)
 
     def _style_estop_button(self, locked: bool):
         self.estop_button.setText("Re-arm" if locked else "E-STOP")
@@ -280,6 +321,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb.unkey_ptt()
         self._set_indicator_idle()
 
+    def _on_connect_clicked(self):
+        if self.tb is not None:
+            self._disconnect()
+        else:
+            self._connect(self.uri_edit.text())
+
+    def _disconnect(self):
+        self.tb.shutdown_safe()
+        self.tb = None
+        self._embed_waterfall(None)
+        self._reset_ptt_button_visual()
+        self.estop_button.blockSignals(True)
+        self.estop_button.setChecked(False)
+        self.estop_button.blockSignals(False)
+        self._style_estop_button(locked=False)
+        self._armed = True
+        self._set_indicator_idle()
+        self._set_connected_controls_enabled(False)
+        self.connect_button.setText("Connect")
+        self.uri_edit.setEnabled(True)
+        self.status_label.setText("Disconnected.")
+
+    def _connect(self, uri_text):
+        uri = config.normalize_uri(uri_text)
+        if not uri:
+            self.status_label.setText("Please enter a device hostname, IP, or URI.")
+            return
+        self.status_label.setText(f"Connecting to {uri}...")
+        QtWidgets.QApplication.processEvents()
+        probe_error = probe_uri_with_timeout(uri)
+        if probe_error is not None:
+            self.status_label.setText(f"Could not connect to {uri}: {probe_error}")
+            return
+        try:
+            new_tb = PlutoTxFlowgraph(
+                uri=uri,
+                frequency=self.freq_spin.value() * 1e6,
+                atten_ceiling_db=self._atten_ceiling_db,
+                mode=self.mode_combo.currentData(),
+                source=self.source_combo.currentData(),
+                enable_waterfall=True,
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not connect to {uri}: {e}")
+            return
+        new_tb.set_fine_offset(float(self.fine_slider.value()))
+        new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
+        new_tb.set_target_power(float(self.power_slider.value()))
+        self.tb = new_tb
+        self._embed_waterfall(new_tb)
+        self.file_button.setText(self._file_button_text(new_tb.wav_path))
+        new_tb.start()
+        self._set_connected_controls_enabled(True)
+        self.connect_button.setText("Disconnect")
+        self.uri_edit.setEnabled(False)
+        self.status_label.setText(f"Connected to {uri}.")
+
     def _on_estop_toggled(self, checked):
         """checked=True: E-STOP triggered. checked=False: re-armed. One
         toggle button covers both directions instead of two separate ones."""
@@ -302,6 +400,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText("Re-armed.")
 
     def _tick(self):
+        if self.tb is None:
+            self.status_label.setText("Not connected.")
+            return
         try:
             state = self.tb.safety.read_state()
             self.status_label.setText(
@@ -313,7 +414,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- shutdown lifecycle -------------------------------------------
     def closeEvent(self, event):
-        self.tb.shutdown_safe()
+        if self.tb is not None:
+            self.tb.shutdown_safe()
         event.accept()
 
 
@@ -329,7 +431,8 @@ def run_gui(build_tb):
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down safely...")
-        tb.shutdown_safe()
+        if window.tb is not None:
+            window.tb.shutdown_safe()
         qapp.quit()
 
     signal.signal(signal.SIGINT, sig_handler)
@@ -339,7 +442,8 @@ def run_gui(build_tb):
 
     def excepthook(exc_type, exc_value, exc_tb):
         print("Uncaught exception, forcing safe state...", file=sys.stderr)
-        tb.shutdown_safe()
+        if window.tb is not None:
+            window.tb.shutdown_safe()
         orig_excepthook(exc_type, exc_value, exc_tb)
 
     sys.excepthook = excepthook
@@ -347,4 +451,5 @@ def run_gui(build_tb):
     try:
         return qapp.exec_()
     finally:
-        tb.shutdown_safe()
+        if window.tb is not None:
+            window.tb.shutdown_safe()
