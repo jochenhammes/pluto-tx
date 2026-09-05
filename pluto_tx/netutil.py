@@ -49,3 +49,30 @@ def probe_uri_with_timeout(uri, timeout_s=CONNECT_TIMEOUT_S):
     if thread.is_alive():
         return TimeoutError(f"no response after {timeout_s:g}s")
     return result.get("error")
+
+
+def scan_devices_with_timeout(timeout_s=CONNECT_TIMEOUT_S):
+    """Enumerate reachable libiio contexts (mDNS-discovered network devices,
+    USB, and this machine's own local IIO devices) on a background thread,
+    bounded by timeout_s. Returns (devices, None) on success -- a dict of
+    uri -> human-readable description, exactly iio.scan_contexts()'s own
+    return shape -- or (None, exception) on failure/timeout. Never touches
+    Qt, so it's always safe to run off the main thread. In practice this
+    scan is fast (~1s, mDNS + USB + local); the timeout is just a backstop."""
+    result = {}
+
+    def worker():
+        try:
+            result["devices"] = iio.scan_contexts()
+        except BaseException as e:
+            result["error"] = e
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+
+    if thread.is_alive():
+        return None, TimeoutError(f"no response after {timeout_s:g}s")
+    if "error" in result:
+        return None, result["error"]
+    return result["devices"], None

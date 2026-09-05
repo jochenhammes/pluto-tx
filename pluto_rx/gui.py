@@ -9,7 +9,7 @@ import sys
 
 from PyQt5 import QtCore, QtWidgets, sip
 
-from pluto_tx.netutil import probe_uri_with_timeout
+from pluto_tx.netutil import probe_uri_with_timeout, scan_devices_with_timeout
 
 from . import config
 from .flowgraph import PlutoRxFlowgraph
@@ -28,14 +28,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Device (network/USB URI) -----------------------------------
         device_row = QtWidgets.QHBoxLayout()
         device_row.addWidget(QtWidgets.QLabel("Device (hostname or IP):"))
-        self.uri_edit = QtWidgets.QLineEdit(tb.uri)
-        self.uri_edit.setEnabled(False)  # editable only while disconnected
-        self.uri_edit.setToolTip(
+        self.uri_combo = QtWidgets.QComboBox()
+        self.uri_combo.setEditable(True)
+        self.uri_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.uri_combo.addItem(tb.uri)
+        self.uri_combo.setEnabled(False)  # editable only while disconnected
+        self.uri_combo.setToolTip(
             "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
             "URI like usb:1.5.5 to pick a specific device when more than one "
-            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed automatically."
+            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
+            "automatically. Use Scan to discover devices on the network/USB."
         )
-        device_row.addWidget(self.uri_edit)
+        device_row.addWidget(self.uri_combo, 1)
+        self.scan_button = QtWidgets.QPushButton("Scan")
+        self.scan_button.clicked.connect(self._on_scan_clicked)
+        device_row.addWidget(self.scan_button)
         self.connect_button = QtWidgets.QPushButton("Disconnect")
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
@@ -178,7 +185,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self._disconnect()
         else:
-            self._connect(self.uri_edit.text())
+            self._connect(self.uri_combo.currentText())
+
+    def _on_scan_clicked(self):
+        self.status_label.setText("Scanning for devices...")
+        QtWidgets.QApplication.processEvents()
+        devices, error = scan_devices_with_timeout()
+        if error is not None:
+            self.status_label.setText(f"Scan failed: {error}")
+            return
+        devices.pop("local:", None)  # this machine's own sensors, never a Pluto
+        current = self.uri_combo.currentText()
+        self.uri_combo.blockSignals(True)
+        self.uri_combo.clear()
+        for uri, desc in devices.items():
+            idx = self.uri_combo.count()
+            self.uri_combo.addItem(uri)
+            self.uri_combo.setItemData(idx, desc, QtCore.Qt.ToolTipRole)
+        if current and self.uri_combo.findText(current) < 0:
+            self.uri_combo.addItem(current)
+        if current:
+            self.uri_combo.setCurrentText(current)
+        self.uri_combo.blockSignals(False)
+        self.status_label.setText(f"Found {len(devices)} device(s)." if devices else "No devices found.")
 
     def _disconnect(self):
         self.tb.shutdown()
@@ -186,7 +215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._embed_waterfall(None)
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
-        self.uri_edit.setEnabled(True)
+        self.uri_combo.setEnabled(True)
         self.status_label.setText("Disconnected.")
 
     def _connect(self, uri_text):
@@ -221,7 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.start()
         self._set_connected_controls_enabled(True)
         self.connect_button.setText("Disconnect")
-        self.uri_edit.setEnabled(False)
+        self.uri_combo.setEnabled(False)
         self.status_label.setText(f"Connected to {uri}.")
 
     def _on_freq_changed(self, mhz):
@@ -318,6 +347,11 @@ def run_gui(build_tb):
     window = MainWindow(tb)
     window.show()
     tb.start()
+    del tb  # window.tb is now the only reference -- a stray one here would
+    # keep the old flowgraph (and its AD9361 buffer claim) alive forever,
+    # breaking every reconnect after the first with "Unable to create
+    # buffer: -16" (EBUSY). Same bug, verified on pluto_tx's identical
+    # run_gui() shape; fixed the same way here for consistency.
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down...")

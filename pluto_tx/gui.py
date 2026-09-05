@@ -11,7 +11,7 @@ from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
 from .flowgraph import PlutoTxFlowgraph, _gr_atten
-from .netutil import probe_uri_with_timeout
+from .netutil import probe_uri_with_timeout, scan_devices_with_timeout
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -21,6 +21,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("PlutoSDR TX")
         self._armed = True  # False after emergency stop, until re-armed
         self._atten_ceiling_db = tb.atten_ceiling_db  # fixed for the session, carried across reconnects
+        self._wav_path = tb.wav_path  # carried across reconnects; updated on a file pick
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -29,14 +30,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Device (network/USB URI) -----------------------------------
         device_row = QtWidgets.QHBoxLayout()
         device_row.addWidget(QtWidgets.QLabel("Device (hostname or IP):"))
-        self.uri_edit = QtWidgets.QLineEdit(tb.uri)
-        self.uri_edit.setEnabled(False)  # editable only while disconnected
-        self.uri_edit.setToolTip(
+        self.uri_combo = QtWidgets.QComboBox()
+        self.uri_combo.setEditable(True)
+        self.uri_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.uri_combo.addItem(tb.uri)
+        self.uri_combo.setEnabled(False)  # editable only while disconnected
+        self.uri_combo.setToolTip(
             "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
             "URI like usb:1.5.5 to pick a specific device when more than one "
-            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed automatically."
+            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
+            "automatically. Use Scan to discover devices on the network/USB."
         )
-        device_row.addWidget(self.uri_edit)
+        device_row.addWidget(self.uri_combo, 1)
+        self.scan_button = QtWidgets.QPushButton("Scan")
+        self.scan_button.clicked.connect(self._on_scan_clicked)
+        device_row.addWidget(self.scan_button)
         self.connect_button = QtWidgets.QPushButton("Disconnect")
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
@@ -157,6 +165,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label = QtWidgets.QLabel()
         layout.addWidget(self.status_label)
 
+        # Separate from status_label on purpose: this is overwritten every
+        # 500ms by _tick()'s HW readback, which would otherwise clobber a
+        # connect/disconnect/scan message before the operator ever sees it
+        # (that's exactly what happened -- the message was there, just
+        # invisible, making Connect look like it silently did nothing).
+        self.hw_status_label = QtWidgets.QLabel()
+        layout.addWidget(self.hw_status_label)
+
         # --- Live TX waterfall (own sub-layout so it can be swapped out on
         # a device reconnect, which rebuilds the flowgraph) -----------------
         self.waterfall_container = QtWidgets.QVBoxLayout()
@@ -243,13 +259,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_pick_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose Audio File", "", "WAV files (*.wav)")
-        if path:
-            # blocks.wavfile_source has no runtime file-swap in this GNU
-            # Radio build; a real file change needs tb.lock()/reconnect,
-            # left as a documented follow-up. The button label intentionally
-            # stays on the currently ACTUALLY loaded file, not this pick, so
-            # it never claims a file is active that isn't.
-            self.status_label.setText(f"Note: runtime file swap is not implemented yet ({path})")
+        if not path or self.tb is None:
+            return
+        # blocks.wavfile_source has no runtime file-swap API in this GNU
+        # Radio build, so loading a different file needs a full flowgraph
+        # rebuild -- exactly the same rebuild _rebuild() already does for a
+        # device reconnect, just keeping the current uri and swapping the
+        # wav_path instead.
+        self._rebuild(self.tb.uri, path)
 
     def _on_power_changed(self, value):
         self.tb.set_target_power(float(value))
@@ -325,12 +342,37 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self._disconnect()
         else:
-            self._connect(self.uri_edit.text())
+            self._connect(self.uri_combo.currentText())
 
-    def _disconnect(self):
-        self.tb.shutdown_safe()
-        self.tb = None
-        self._embed_waterfall(None)
+    def _on_scan_clicked(self):
+        self.status_label.setText("Scanning for devices...")
+        QtWidgets.QApplication.processEvents()
+        devices, error = scan_devices_with_timeout()
+        if error is not None:
+            self.status_label.setText(f"Scan failed: {error}")
+            return
+        devices.pop("local:", None)  # this machine's own sensors, never a Pluto
+        current = self.uri_combo.currentText()
+        self.uri_combo.blockSignals(True)
+        self.uri_combo.clear()
+        for uri, desc in devices.items():
+            idx = self.uri_combo.count()
+            self.uri_combo.addItem(uri)
+            self.uri_combo.setItemData(idx, desc, QtCore.Qt.ToolTipRole)
+        if current and self.uri_combo.findText(current) < 0:
+            self.uri_combo.addItem(current)
+        if current:
+            self.uri_combo.setCurrentText(current)
+        self.uri_combo.blockSignals(False)
+        self.status_label.setText(f"Found {len(devices)} device(s)." if devices else "No devices found.")
+
+    def _reset_session_ui_state(self):
+        """Reset PTT/E-STOP visuals to a fresh, safe, unkeyed, re-armed
+        state. Used both on a full disconnect and on any flowgraph rebuild
+        (device reconnect, file swap) -- the underlying tb is always brand
+        new and starts unkeyed/re-armed (PlutoSafety.prepare_for_start()
+        runs in its constructor), so the GUI must never show stale
+        checked/locked visuals left over from the flowgraph it replaced."""
         self._reset_ptt_button_visual()
         self.estop_button.blockSignals(True)
         self.estop_button.setChecked(False)
@@ -338,9 +380,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._style_estop_button(locked=False)
         self._armed = True
         self._set_indicator_idle()
+
+    def _disconnect(self):
+        self.tb.shutdown_safe()
+        self.tb = None
+        self._embed_waterfall(None)
+        self._reset_session_ui_state()
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
-        self.uri_edit.setEnabled(True)
+        self.uri_combo.setEnabled(True)
         self.status_label.setText("Disconnected.")
 
     def _connect(self, uri_text):
@@ -348,34 +396,58 @@ class MainWindow(QtWidgets.QMainWindow):
         if not uri:
             self.status_label.setText("Please enter a device hostname, IP, or URI.")
             return
+        self._rebuild(uri, self._wav_path)
+
+    def _rebuild(self, uri, wav_path):
+        """Tear down the current flowgraph (if any) and build a fresh one at
+        `uri` loading `wav_path`, carrying over every other current GUI
+        setting. Shared by device reconnects (Connect button) and WAV file
+        swaps (File button) -- both need the exact same "safely stop the old
+        TX chain, then build and start a new one" sequence; a stray
+        reference to the old flowgraph here would leak its AD9361 buffer
+        claim and break the next connect with 'Unable to create buffer'
+        (see run_gui()'s 'del tb' fix for the same underlying issue)."""
+        if self.tb is not None:
+            self.tb.shutdown_safe()
+            self.tb = None
+            self._embed_waterfall(None)
+            self._reset_session_ui_state()
         self.status_label.setText(f"Connecting to {uri}...")
         QtWidgets.QApplication.processEvents()
         probe_error = probe_uri_with_timeout(uri)
         if probe_error is not None:
             self.status_label.setText(f"Could not connect to {uri}: {probe_error}")
+            self._set_connected_controls_enabled(False)
+            self.connect_button.setText("Connect")
+            self.uri_combo.setEnabled(True)
             return
         try:
             new_tb = PlutoTxFlowgraph(
                 uri=uri,
                 frequency=self.freq_spin.value() * 1e6,
                 atten_ceiling_db=self._atten_ceiling_db,
+                wav_path=wav_path,
                 mode=self.mode_combo.currentData(),
                 source=self.source_combo.currentData(),
                 enable_waterfall=True,
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {uri}: {e}")
+            self._set_connected_controls_enabled(False)
+            self.connect_button.setText("Connect")
+            self.uri_combo.setEnabled(True)
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
+        self._wav_path = new_tb.wav_path
         self.tb = new_tb
         self._embed_waterfall(new_tb)
         self.file_button.setText(self._file_button_text(new_tb.wav_path))
         new_tb.start()
         self._set_connected_controls_enabled(True)
         self.connect_button.setText("Disconnect")
-        self.uri_edit.setEnabled(False)
+        self.uri_combo.setEnabled(False)
         self.status_label.setText(f"Connected to {uri}.")
 
     def _on_estop_toggled(self, checked):
@@ -401,16 +473,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _tick(self):
         if self.tb is None:
-            self.status_label.setText("Not connected.")
+            self.hw_status_label.setText("")
             return
         try:
             state = self.tb.safety.read_state()
-            self.status_label.setText(
+            self.hw_status_label.setText(
                 f"HW: hardwaregain={state['hardwaregain_db']:.2f} dB, "
                 f"LO powerdown={state['lo_powerdown']}"
             )
         except Exception as e:
-            self.status_label.setText(f"HW status read failed: {e}")
+            self.hw_status_label.setText(f"HW status read failed: {e}")
 
     # --- shutdown lifecycle -------------------------------------------
     def closeEvent(self, event):
@@ -428,6 +500,11 @@ def run_gui(build_tb):
     window = MainWindow(tb)
     window.show()
     tb.start()
+    del tb  # window.tb is now the only reference -- see MainWindow._disconnect's
+    # note: a stray reference here would keep the old flowgraph (and its
+    # AD9361 buffer claim) alive forever, since Python never garbage-collects
+    # it, breaking every reconnect after the first with "Unable to create
+    # buffer: -16" (EBUSY). Verified: this reproduced the exact bug.
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down safely...")
