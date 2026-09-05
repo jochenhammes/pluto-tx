@@ -104,6 +104,23 @@ M17_CALLSIGN_MAX_LEN = 9  # m17_coder truncates to this; GUI should validate the
 M17_EOT_HOLD_S = 0.4
 M17_EOT_HOLD_WATCHDOG_S = 2.0
 
+# --- FreeDV 2020/2020B digital voice (needs libcodec2 with LPCNet support --
+# already a transitive dependency of the `gnuradio` apt package via
+# libgnuradio-vocoder, confirmed this session; no separate install script
+# needed, unlike M17). freedv_tx() outputs a plain modulated AUDIO waveform
+# (not IQ symbols like M17), so the FreeDV branch reuses this app's existing
+# Hilbert-based USB modulation technique (its own dedicated instances) --
+# see pluto_tx/flowgraph.py. Like M17, bypasses the analog dynamics chain
+# (nf_filter/gate/agc/compressor/nf_gain/limiter_smooth/limiter): compressing/
+# AGC-ing an already-modulated OFDM waveform would corrupt it.
+FREEDV_SPEECH_RATE = 16_000  # freedv_get_speech_sample_rate(), fixed for 2020/2020B
+FREEDV_MODEM_RATE = 8_000  # freedv_get_modem_sample_rate(), fixed for 2020/2020B
+# Mirrors freedv_ctypes.FREEDV_MODE_2020 (kept as a plain int here so config.py
+# stays free of the gnuradio/ctypes import, matching M17's constants above).
+FREEDV_DEFAULT_MODE = 8  # FREEDV_MODE_2020 (vs. FREEDV_MODE_2020B = 16)
+
+FREEDV_CALLSIGN_MAX_LEN = 9  # matches M17_CALLSIGN_MAX_LEN; reliable_text itself allows more
+
 # German amateur radio band edges reachable by the Pluto's TX LO range
 # (46.875 MHz - 6 GHz), used only for a non-blocking sanity warning in the GUI.
 DE_AMATEUR_BANDS_HZ = [

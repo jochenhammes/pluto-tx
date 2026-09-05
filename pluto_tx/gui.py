@@ -10,7 +10,8 @@ import sys
 from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
-from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, _gr_atten
+from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, _gr_atten
+from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 from .netutil import probe_uri_with_timeout, scan_devices_with_timeout
 
 
@@ -92,6 +93,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mode_combo.setItemData(
                 m17_item_idx, "gr-m17 is not installed -- see install-m17.sh / README", QtCore.Qt.ToolTipRole
             )
+        self.mode_combo.addItem("FreeDV", PlutoTxFlowgraph.MODE_FREEDV)
+        if not FREEDV_AVAILABLE:
+            # Unlike M17, this normally shouldn't trigger -- libcodec2 with
+            # 2020/2020B support is already a transitive dependency of the
+            # `gnuradio` apt package (see config.py's FreeDV comment).
+            # Still grey out defensively for an older libcodec2 build.
+            freedv_item_idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_FREEDV)
+            item = self.mode_combo.model().item(freedv_item_idx)
+            item.setEnabled(False)
+            self.mode_combo.setItemData(
+                freedv_item_idx, "libcodec2 on this system lacks FreeDV 2020/2020B support", QtCore.Qt.ToolTipRole
+            )
         # Sync to the flowgraph's ACTUAL mode before wiring the change
         # signal -- otherwise the combo always shows "FM" regardless of
         # what mode tb was actually constructed with (e.g. --mode ssb, or
@@ -133,6 +146,42 @@ class MainWindow(QtWidgets.QMainWindow):
         m17_row.addStretch(1)
         layout.addLayout(m17_row)
         self._update_m17_controls_enabled()
+
+        # --- FreeDV variant + callsign row. The callsign field is
+        # PERMANENTLY DISABLED (not wired to _update_freedv_controls_enabled
+        # like the variant combo): linking FreeDV's reliable_text station-ID
+        # sideband (which this field would feed) crashes the packaged
+        # libcodec2 (1.2.0-4) with a confirmed, deterministic SIGFPE inside
+        # freedv_comptx_2020() -- see pluto_tx/freedv_ctypes.py's
+        # FreeDVSession docstring and the FreeDV section of README.md for
+        # the full writeup. Kept visible (not hidden) so the operator can
+        # see the feature exists and why it's off, rather than silently
+        # doing nothing -- station ID must be handled some other way
+        # (e.g. voice ID before/after a FreeDV transmission) until this is
+        # resolved upstream.
+        freedv_row = QtWidgets.QHBoxLayout()
+        freedv_row.addWidget(QtWidgets.QLabel("FreeDV Variant:"))
+        self.freedv_variant_combo = QtWidgets.QComboBox()
+        self.freedv_variant_combo.addItem("2020", FREEDV_MODE_2020)
+        self.freedv_variant_combo.addItem("2020B", FREEDV_MODE_2020B)
+        initial_variant_idx = self.freedv_variant_combo.findData(tb.freedv_variant)
+        if initial_variant_idx >= 0:
+            self.freedv_variant_combo.setCurrentIndex(initial_variant_idx)
+        self.freedv_variant_combo.currentIndexChanged.connect(self._on_freedv_variant_changed)
+        freedv_row.addWidget(self.freedv_variant_combo)
+        freedv_row.addWidget(QtWidgets.QLabel("Callsign:"))
+        self.freedv_callsign_edit = QtWidgets.QLineEdit(tb.freedv_callsign)
+        self.freedv_callsign_edit.setMaxLength(config.FREEDV_CALLSIGN_MAX_LEN)
+        self.freedv_callsign_edit.setPlaceholderText("disabled -- libcodec2 bug, see README")
+        self.freedv_callsign_edit.setToolTip(
+            "Disabled: linking FreeDV's station-ID text sideband crashes this system's "
+            "libcodec2 (confirmed upstream bug). ID by voice before/after instead."
+        )
+        self.freedv_callsign_edit.setEnabled(False)
+        freedv_row.addWidget(self.freedv_callsign_edit)
+        freedv_row.addStretch(1)
+        layout.addLayout(freedv_row)
+        self._update_freedv_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
         power_row = QtWidgets.QHBoxLayout()
@@ -320,11 +369,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_button.setEnabled(enabled and self.source_combo.currentData() == PlutoTxFlowgraph.SRC_FILE)
         self._m17_connected = enabled
         self._update_m17_controls_enabled()
+        self._freedv_connected = enabled
+        self._update_freedv_controls_enabled()
 
     def _update_m17_controls_enabled(self):
         enabled = getattr(self, "_m17_connected", True) and self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17
         self.m17_src_edit.setEnabled(enabled)
         self.m17_dst_edit.setEnabled(enabled)
+
+    def _update_freedv_controls_enabled(self):
+        enabled = getattr(self, "_freedv_connected", True) and self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_FREEDV
+        self.freedv_variant_combo.setEnabled(enabled)
+        # freedv_callsign_edit is NOT touched here -- it's permanently
+        # disabled at construction (see the comment above its creation):
+        # linking FreeDV's reliable_text station-ID sideband crashes this
+        # system's libcodec2.
 
     def _style_estop_button(self, locked: bool):
         self.estop_button.setText("Re-arm" if locked else "E-STOP")
@@ -392,6 +451,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_mode_changed(self, idx):
         self.tb.set_mode(self.mode_combo.currentData())
         self._update_m17_controls_enabled()
+        self._update_freedv_controls_enabled()
 
     def _on_m17_src_callsign_changed(self, text):
         if self.tb is not None:
@@ -400,6 +460,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_m17_dst_callsign_changed(self, text):
         if self.tb is not None:
             self.tb.set_m17_dst_callsign(text)
+
+    def _on_freedv_variant_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_freedv_variant(self.freedv_variant_combo.currentData())
+
+    def _on_freedv_callsign_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_freedv_callsign(text)
 
     def _on_source_changed(self, idx):
         source = self.source_combo.currentData()
@@ -600,6 +668,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 enable_waterfall=True,
                 m17_src_callsign=self.m17_src_edit.text(),
                 m17_dst_callsign=self.m17_dst_edit.text(),
+                freedv_variant=self.freedv_variant_combo.currentData(),
+                freedv_callsign=self.freedv_callsign_edit.text(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {uri}: {e}")

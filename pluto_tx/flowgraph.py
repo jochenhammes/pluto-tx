@@ -41,6 +41,17 @@ except ImportError:
     _pmt = None
     M17_AVAILABLE = False
 
+# FreeDV 2020/2020B is also optional in principle, but unlike gr-m17 it
+# needs no separate install step: libcodec2 (with full LPCNet/2020/2020B
+# support) is already a transitive dependency of the `gnuradio` apt package
+# via libgnuradio-vocoder -- confirmed this session (apt-cache rdepends,
+# and a direct runtime freedv_open()/freedv_tx() smoke test, both on a
+# fresh install.sh-only system). FREEDV_AVAILABLE is therefore a defensive
+# check (older libcodec2 without 2020 support), not an expected path.
+from . import freedv_ctypes as _freedv_ctypes
+from .freedv import FreeDVEncoder
+FREEDV_AVAILABLE = _freedv_ctypes.FREEDV_AVAILABLE
+
 _PLACEHOLDER_WAV = os.path.join(os.path.dirname(__file__), "_silence.wav")
 _DEFAULT_WAV = os.path.join(os.path.dirname(__file__), "da2jh-test.wav")
 
@@ -76,11 +87,13 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_FM = 0
     MODE_SSB = 1
     MODE_M17 = 2
+    MODE_FREEDV = 3
 
     def __init__(self, uri=config.DEFAULT_URI, frequency=config.DEFAULT_FREQUENCY,
                  atten_ceiling_db=config.DEFAULT_ATTEN_CEILING, audio_device="",
                  wav_path=None, mode=MODE_FM, source=SRC_MIC, enable_waterfall=False,
-                 m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN):
+                 m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
+                 freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign=""):
         super().__init__("PlutoTxFlowgraph")
 
         self.uri = uri
@@ -96,6 +109,8 @@ class PlutoTxFlowgraph(gr.top_block):
             # an input that's never connected (the M17 branch only gets
             # wired if M17_AVAILABLE) -- fall back rather than build a
             # broken flowgraph.
+            mode = self.MODE_FM
+        if mode == self.MODE_FREEDV and not FREEDV_AVAILABLE:
             mode = self.MODE_FM
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
@@ -247,6 +262,40 @@ class PlutoTxFlowgraph(gr.top_block):
                 taps=[], fractional_bw=0.4,
             )
 
+        # --- FreeDV 2020/2020B branch (optional, only if libcodec2 has
+        # 2020/2020B support -- see FREEDV_AVAILABLE above). Also bypasses
+        # the NF dynamics chain, same reasoning as M17: compressing/AGC-ing
+        # an already-modulated OFDM waveform would corrupt it. Architecturally
+        # much simpler than M17: freedv_tx() outputs a plain AUDIO-band
+        # modulated waveform (8kHz PCM) meant to be fed into an ordinary SSB
+        # transmitter's mic input -- exactly how real FreeDV operation works
+        # (freedv-gui feeds a real radio's mic-in the same way) -- so this
+        # reuses the EXACT same Hilbert-based USB modulation technique as
+        # the ssb_mod/ssb_resampler above, just as separate dedicated
+        # instances (avoids any runtime-switching complexity between normal
+        # voice and FreeDV-modem audio sharing one Hilbert block).
+        self.freedv_callsign = freedv_callsign
+        self.freedv_variant = freedv_variant
+        if FREEDV_AVAILABLE:
+            g_fdv_down = math.gcd(config.AUDIO_RATE, config.FREEDV_SPEECH_RATE)
+            self.freedv_audio_resampler = filter.rational_resampler_fff(
+                interpolation=config.FREEDV_SPEECH_RATE // g_fdv_down, decimation=config.AUDIO_RATE // g_fdv_down,
+                taps=[], fractional_bw=0.4,
+            )
+            self.freedv_float_to_short = blocks.float_to_short(1, 32767.0)
+            self.freedv_encoder = FreeDVEncoder(mode=self.freedv_variant, text=self.freedv_callsign)
+            self.freedv_short_to_float = blocks.short_to_float(1, 32767.0)
+            g_fdv_up = math.gcd(config.AUDIO_RATE, config.FREEDV_MODEM_RATE)
+            self.freedv_audio_resampler_up = filter.rational_resampler_fff(
+                interpolation=config.AUDIO_RATE // g_fdv_up, decimation=config.FREEDV_MODEM_RATE // g_fdv_up,
+                taps=[], fractional_bw=0.4,
+            )
+            self.freedv_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+            self.freedv_ssb_resampler = filter.rational_resampler_ccf(
+                interpolation=config.QUAD_RATE // g, decimation=config.AUDIO_RATE // g,
+                taps=[], fractional_bw=0.4,
+            )
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -269,13 +318,17 @@ class PlutoTxFlowgraph(gr.top_block):
 
         self.tx_gain = blocks.multiply_const_cc(1.0 + 0j)
 
-        # Whichever of {mode_selector, m17_tx_resampler} is NOT currently
-        # feeding tx_gain must still drain into something -- GNU Radio
-        # requires every output port to be connected. null_sink is a
-        # standard no-op drain for exactly this purpose.
+        # Whichever of {mode_selector, m17_tx_resampler, freedv_ssb_resampler}
+        # is NOT currently feeding tx_gain must still drain into something --
+        # GNU Radio requires every output port to be connected. null_sink is
+        # a standard no-op drain for exactly this purpose. Same reasoning as
+        # M17 above applies to FreeDV: gets its own dedicated tx_gain
+        # connection rather than a 3rd/4th mode_selector input.
         self._null_sink_selector = blocks.null_sink(gr.sizeof_gr_complex)
         if M17_AVAILABLE:
             self._null_sink_m17 = blocks.null_sink(gr.sizeof_gr_complex)
+        if FREEDV_AVAILABLE:
+            self._null_sink_freedv = blocks.null_sink(gr.sizeof_gr_complex)
 
         # --- Live view of the modulated baseband actually fed to the sink.
         # Optional: a qtgui sink is a real Qt widget and needs a
@@ -326,18 +379,29 @@ class PlutoTxFlowgraph(gr.top_block):
             self.connect(self.m17_coder, self.m17_rrc)
             self.connect(self.m17_rrc, self.m17_fm_mod)
             self.connect(self.m17_fm_mod, self.m17_tx_resampler)
-            # m17_tx_resampler feeds tx_gain directly ONLY while in M17 mode
-            # (NOT through mode_selector -- see the comment above
-            # mode_selector's construction). Whichever path isn't active
-            # drains into a null_sink instead.
-            if mode == self.MODE_M17:
-                self.connect(self.m17_tx_resampler, self.tx_gain)
-                self.connect(self.mode_selector, self._null_sink_selector)
-            else:
-                self.connect(self.mode_selector, self.tx_gain)
-                self.connect(self.m17_tx_resampler, self._null_sink_m17)
-        else:
-            self.connect(self.mode_selector, self.tx_gain)
+
+        if FREEDV_AVAILABLE:
+            # Taps ptt_mute directly -- see the FreeDV branch construction
+            # comment above.
+            self.connect(self.ptt_mute, self.freedv_audio_resampler)
+            self.connect(self.freedv_audio_resampler, self.freedv_float_to_short)
+            self.connect(self.freedv_float_to_short, self.freedv_encoder)
+            self.connect(self.freedv_encoder, self.freedv_short_to_float)
+            self.connect(self.freedv_short_to_float, self.freedv_audio_resampler_up)
+            self.connect(self.freedv_audio_resampler_up, self.freedv_ssb_mod)
+            self.connect(self.freedv_ssb_mod, self.freedv_ssb_resampler)
+
+        # Exactly one of {mode_selector, m17_tx_resampler, freedv_ssb_resampler}
+        # feeds tx_gain at a time -- the rest drain into their null_sinks.
+        # See _tx_gain_producer_map()/set_mode() for the runtime swap logic
+        # (same lock()/connect()/disconnect() pattern proven on real
+        # hardware for M17 this session, reused here for FreeDV).
+        producers = self._tx_gain_producer_map()
+        active_producer = producers[self.mode]
+        self.connect(active_producer, self.tx_gain)
+        for producer in set(producers.values()):
+            if producer is not active_producer:
+                self.connect(producer, self._null_sink_for(producer))
 
         self.connect(self.tx_gain, self.pluto_sink)
         if self.waterfall is not None:
@@ -376,43 +440,80 @@ class PlutoTxFlowgraph(gr.top_block):
     def set_source(self, source: int):
         self.source_selector.set_input_index(source)
 
+    def _tx_gain_producer_map(self):
+        """mode -> the block that should feed tx_gain in that mode. FM/SSB
+        share mode_selector (fast index switch, no reconnect); M17/FreeDV
+        each get their own dedicated producer (see the comment above
+        mode_selector's construction for why they can't share it)."""
+        producers = {self.MODE_FM: self.mode_selector, self.MODE_SSB: self.mode_selector}
+        if M17_AVAILABLE:
+            producers[self.MODE_M17] = self.m17_tx_resampler
+        if FREEDV_AVAILABLE:
+            producers[self.MODE_FREEDV] = self.freedv_ssb_resampler
+        return producers
+
+    def _null_sink_for(self, producer):
+        if producer is self.mode_selector:
+            return self._null_sink_selector
+        if M17_AVAILABLE and producer is self.m17_tx_resampler:
+            return self._null_sink_m17
+        if FREEDV_AVAILABLE and producer is self.freedv_ssb_resampler:
+            return self._null_sink_freedv
+        raise ValueError(f"no null_sink registered for producer {producer!r}")
+
     def set_mode(self, mode: int):
         prev_mode = self.mode
-        was_m17 = M17_AVAILABLE and prev_mode == self.MODE_M17
-        is_m17 = M17_AVAILABLE and mode == self.MODE_M17
+        producers = self._tx_gain_producer_map()
+        prev_producer = producers[prev_mode]
+        new_producer = producers[mode]
         self.mode = mode
 
-        if is_m17 != was_m17:
-            # Entering or leaving M17 mode: reroute tx_gain's upstream
-            # connection (mode_selector <-> m17_tx_resampler direct feed --
-            # see the comment above mode_selector's construction for why
-            # M17 can't go through mode_selector). Brief pause (lock/
+        if new_producer is not prev_producer:
+            # Entering/leaving a dedicated-producer mode (M17, FreeDV):
+            # reroute tx_gain's upstream connection. Brief pause (lock/
             # unlock), same graph-reconfiguration pattern already used
-            # elsewhere in this app (e.g. WAV file changes). FM<->SSB
-            # switching below is completely unaffected by this branch.
+            # elsewhere in this app (e.g. WAV file changes) and proven on
+            # real hardware for M17 this session. FM<->SSB switching never
+            # hits this branch (both map to the same mode_selector producer).
             self.lock()
             try:
-                if is_m17:
-                    self.disconnect(self.mode_selector, self.tx_gain)
-                    self.disconnect(self.m17_tx_resampler, self._null_sink_m17)
-                    self.connect(self.m17_tx_resampler, self.tx_gain)
-                    self.connect(self.mode_selector, self._null_sink_selector)
-                else:
-                    self.disconnect(self.m17_tx_resampler, self.tx_gain)
-                    self.disconnect(self.mode_selector, self._null_sink_selector)
-                    self.connect(self.mode_selector, self.tx_gain)
-                    self.connect(self.m17_tx_resampler, self._null_sink_m17)
+                self.disconnect(prev_producer, self.tx_gain)
+                self.disconnect(new_producer, self._null_sink_for(new_producer))
+                self.connect(new_producer, self.tx_gain)
+                self.connect(prev_producer, self._null_sink_for(prev_producer))
             finally:
                 self.unlock()
 
-        if is_m17:
-            return  # M17 bypasses the NF filter/dynamics chain entirely, nothing to retap
+        if mode in (self.MODE_M17, self.MODE_FREEDV):
+            return  # both bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[preset]
         taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter.set_taps(taps)
+
+    def set_freedv_variant(self, freedv_variant: int):
+        """Switch between FreeDV 2020/2020B at runtime. Frame sizes differ
+        between the two (2020: 2880->1440, 2020B: 1440->720 samples/call --
+        measured this session), so this rebuilds the FreeDVEncoder instance
+        rather than attempting to reconfigure output_multiple/relative_rate
+        on an already-scheduled live block (uncertain, unverified territory)
+        -- same lock()/connect()/disconnect() swap pattern as set_mode()."""
+        if not FREEDV_AVAILABLE or freedv_variant == self.freedv_variant:
+            return
+        self.lock()
+        try:
+            old_encoder = self.freedv_encoder
+            self.disconnect(self.freedv_float_to_short, old_encoder)
+            self.disconnect(old_encoder, self.freedv_short_to_float)
+            self.freedv_encoder = FreeDVEncoder(mode=freedv_variant, text=self.freedv_callsign)
+            self.connect(self.freedv_float_to_short, self.freedv_encoder)
+            self.connect(self.freedv_encoder, self.freedv_short_to_float)
+        finally:
+            self.unlock()
+        old_encoder.close()
+        self.freedv_variant = freedv_variant
 
     def set_m17_src_callsign(self, callsign: str):
         self.m17_src_callsign = callsign
@@ -423,6 +524,11 @@ class PlutoTxFlowgraph(gr.top_block):
         self.m17_dst_callsign = callsign or config.M17_DEFAULT_DST_CALLSIGN
         if M17_AVAILABLE:
             self.m17_coder.set_dst_id(self.m17_dst_callsign)
+
+    def set_freedv_callsign(self, callsign: str):
+        self.freedv_callsign = callsign
+        if FREEDV_AVAILABLE:
+            self.freedv_encoder.set_text(callsign)
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
