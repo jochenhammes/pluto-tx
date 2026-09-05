@@ -33,6 +33,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_spin.setSingleStep(0.001)
         self.freq_spin.setValue(tb.nominal_freq_hz / 1e6)
         self.freq_spin.valueChanged.connect(self._on_freq_changed)
+        freq_font = self.freq_spin.font()
+        freq_font.setPointSize(freq_font.pointSize() + 6)
+        self.freq_spin.setFont(freq_font)
         freq_row.addWidget(self.freq_spin)
 
         freq_row.addWidget(QtWidgets.QLabel("Fine tune (Hz):"))
@@ -46,10 +49,6 @@ class MainWindow(QtWidgets.QMainWindow):
         freq_row.addWidget(self.fine_label)
         layout.addLayout(freq_row)
 
-        self.band_label = QtWidgets.QLabel()
-        layout.addWidget(self.band_label)
-        self._update_band_label()
-
         # --- Mode + source -------------------------------------------
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.addWidget(QtWidgets.QLabel("Mode:"))
@@ -61,25 +60,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mode_row.addWidget(QtWidgets.QLabel("Source:"))
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItem("Mikrofon", PlutoTxFlowgraph.SRC_MIC)
-        self.source_combo.addItem("Audiodatei", PlutoTxFlowgraph.SRC_FILE)
+        self.source_combo.addItem("Microphone", PlutoTxFlowgraph.SRC_MIC)
+        self.source_combo.addItem("Audio File", PlutoTxFlowgraph.SRC_FILE)
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         mode_row.addWidget(self.source_combo)
 
-        self.file_button = QtWidgets.QPushButton("Datei wählen…")
+        self.file_button = QtWidgets.QPushButton(self._file_button_text(tb.wav_path))
         self.file_button.setEnabled(False)
         self.file_button.clicked.connect(self._on_pick_file)
         mode_row.addWidget(self.file_button)
         layout.addLayout(mode_row)
 
-        self.file_label = QtWidgets.QLabel(f"Datei: {os.path.basename(tb.wav_path)}")
-        layout.addWidget(self.file_label)
-
         # --- Power / attenuation ---------------------------------------
         power_row = QtWidgets.QHBoxLayout()
-        power_row.addWidget(QtWidgets.QLabel("TX Power (Dämpfung, dB):"))
+        power_row.addWidget(QtWidgets.QLabel("TX Power (Attenuation, dB):"))
         self.power_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.unlock_full_power = QtWidgets.QCheckBox("volle Leistung freischalten")
+        self.unlock_full_power = QtWidgets.QCheckBox("Unlock full power")
         self._refresh_power_slider_range()
         self.power_slider.valueChanged.connect(self._on_power_changed)
         self.unlock_full_power.stateChanged.connect(self._on_unlock_changed)
@@ -92,7 +88,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- NF (audio) gain -------------------------------------------
         nf_row = QtWidgets.QHBoxLayout()
-        nf_row.addWidget(QtWidgets.QLabel("NF-Verstärkung:"))
+        nf_row.addWidget(QtWidgets.QLabel("Audio Gain:"))
         self.nf_gain_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.nf_gain_slider.setRange(0, 300)  # percent
         self.nf_gain_slider.setValue(int(config.DEFAULT_NF_GAIN * 100))
@@ -102,28 +98,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nf_gain_label.setMinimumWidth(50)
         nf_row.addWidget(self.nf_gain_label)
         layout.addLayout(nf_row)
+        layout.addSpacing(16)
 
         # --- PTT + emergency stop + status -------------------------------
         btn_row = QtWidgets.QHBoxLayout()
-        self.ptt_button = QtWidgets.QPushButton("PTT (klicken zum Senden)")
+        self.ptt_button = QtWidgets.QPushButton()
         self.ptt_button.setMinimumHeight(60)
-        self.ptt_button.setCheckable(True)
-        self.ptt_button.toggled.connect(self._on_ptt_toggled)
-        btn_row.addWidget(self.ptt_button)
+        self.ptt_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        btn_row.addWidget(self.ptt_button, 3)
 
-        self.estop_button = QtWidgets.QPushButton("NOTAUS")
+        btn_row.addStretch(1)
+
+        # Plain action button, not a persistent toggle -- the PTT button's
+        # own label already reflects the current mode (see
+        # _reset_ptt_button_visual), so this one doesn't need to.
+        self.ptt_mode_button = QtWidgets.QPushButton("Toggle PTT Mode")
+        self.ptt_mode_button.setMinimumHeight(60)
+        self.ptt_mode_button.clicked.connect(self._on_ptt_mode_toggle_clicked)
+        btn_row.addWidget(self.ptt_mode_button)
+
+        # Toggle: one button covers both E-STOP (unchecked -> checked) and
+        # re-arm (checked -> unchecked) -- see _on_estop_toggled.
+        self.estop_button = QtWidgets.QPushButton("E-STOP")
         self.estop_button.setMinimumHeight(60)
-        self.estop_button.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold;")
-        self.estop_button.clicked.connect(self._on_emergency_stop)
+        self.estop_button.setCheckable(True)
+        self.estop_button.toggled.connect(self._on_estop_toggled)
+        self._style_estop_button(locked=False)
         btn_row.addWidget(self.estop_button)
-
-        self.rearm_button = QtWidgets.QPushButton("Wieder scharf schalten")
-        self.rearm_button.setEnabled(False)
-        self.rearm_button.clicked.connect(self._on_rearm)
-        btn_row.addWidget(self.rearm_button)
         layout.addLayout(btn_row)
 
-        self.tx_indicator = QtWidgets.QLabel("BEREIT")
+        # Wires up the PTT button's signals for the default mode (click-toggle).
+        self._configure_ptt_button(hold_mode=False)
+
+        self.tx_indicator = QtWidgets.QLabel("READY")
         self.tx_indicator.setAlignment(QtCore.Qt.AlignCenter)
         self.tx_indicator.setMinimumHeight(40)
         self._set_indicator_idle()
@@ -147,22 +154,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.start(500)
 
     # --- helpers ------------------------------------------------------
-    def _update_band_label(self):
-        freq_hz = self.freq_spin.value() * 1e6
-        band = config.in_amateur_band(freq_hz)
-        if band:
-            self.band_label.setText(f"Im Amateurfunkband: {band}")
-            self.band_label.setStyleSheet("")
-        else:
-            self.band_label.setText("WARNUNG: außerhalb der bekannten DE-Amateurfunkbänder")
-            self.band_label.setStyleSheet("color: #c0392b; font-weight: bold;")
+    @staticmethod
+    def _file_button_text(wav_path):
+        from .flowgraph import _PLACEHOLDER_WAV
+        if os.path.abspath(wav_path) == os.path.abspath(_PLACEHOLDER_WAV):
+            return "Choose File"
+        return os.path.basename(wav_path)
+
+    def _style_estop_button(self, locked: bool):
+        self.estop_button.setText("Re-arm" if locked else "E-STOP")
+        color = "#7f8c8d" if locked else "#c0392b"
+        self.estop_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
 
     def _refresh_power_slider_range(self):
         ceiling = 0 if self.unlock_full_power.isChecked() else config.DEFAULT_ATTEN_CEILING
         self.power_slider.setRange(int(round(config.MIN_ATTEN)), int(round(ceiling)))
 
     def _set_indicator_idle(self):
-        self.tx_indicator.setText("BEREIT" if self._armed else "NOTAUS - GESPERRT")
+        self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")
         color = "#27ae60" if self._armed else "#7f8c8d"
         self.tx_indicator.setStyleSheet(f"background-color: {color}; color: white; font-size: 18pt; font-weight: bold;")
 
@@ -173,7 +182,6 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- slots ------------------------------------------------------
     def _on_freq_changed(self, mhz):
         self.tb.set_frequency(mhz * 1e6)
-        self._update_band_label()
 
     def _on_fine_changed(self, value):
         self.tb.set_fine_offset(float(value))
@@ -193,12 +201,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_button.setEnabled(source == PlutoTxFlowgraph.SRC_FILE)
 
     def _on_pick_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Audiodatei wählen", "", "WAV files (*.wav)")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose Audio File", "", "WAV files (*.wav)")
         if path:
             # blocks.wavfile_source has no runtime file-swap in this GNU
             # Radio build; a real file change needs tb.lock()/reconnect,
-            # left as a documented follow-up. For now just record the path.
-            self.status_label.setText(f"Hinweis: Datei-Wechsel zur Laufzeit ist noch nicht implementiert ({path})")
+            # left as a documented follow-up. The button label intentionally
+            # stays on the currently ACTUALLY loaded file, not this pick, so
+            # it never claims a file is active that isn't.
+            self.status_label.setText(f"Note: runtime file swap is not implemented yet ({path})")
 
     def _on_power_changed(self, value):
         self.tb.set_target_power(float(value))
@@ -206,6 +216,42 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_unlock_changed(self, _state):
         self._refresh_power_slider_range()
+
+    def _on_ptt_mode_toggle_clicked(self):
+        self._configure_ptt_button(hold_mode=not self._ptt_hold_mode)
+
+    def _configure_ptt_button(self, hold_mode: bool):
+        """Rewire the PTT button between click-toggle and press-and-hold
+        semantics. Switching modes while keyed would leave the RF on with no
+        way to release it under the new mode's signals -- always unkey first."""
+        if self.tb.keyed:
+            self.tb.unkey_ptt()
+            self._set_indicator_idle()
+
+        for signal in (self.ptt_button.toggled, self.ptt_button.pressed, self.ptt_button.released):
+            try:
+                signal.disconnect()
+            except TypeError:
+                pass  # nothing was connected yet
+
+        self._ptt_hold_mode = hold_mode
+        self.ptt_button.setCheckable(not hold_mode)
+        self._reset_ptt_button_visual()
+
+        if hold_mode:
+            self.ptt_button.pressed.connect(self._on_ptt_pressed)
+            self.ptt_button.released.connect(self._on_ptt_released)
+        else:
+            self.ptt_button.toggled.connect(self._on_ptt_toggled)
+
+    def _reset_ptt_button_visual(self):
+        self.ptt_button.blockSignals(True)
+        if self._ptt_hold_mode:
+            self.ptt_button.setText("PTT (hold to send)")
+        else:
+            self.ptt_button.setChecked(False)
+            self.ptt_button.setText("PTT (click to send)")
+        self.ptt_button.blockSignals(False)
 
     def _on_ptt_toggled(self, checked):
         if checked and not self._armed:
@@ -215,34 +261,45 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if checked:
             self.tb.key_ptt()
-            self.ptt_button.setText("PTT (klicken zum Stoppen)")
+            self.ptt_button.setText("PTT (click to stop)")
             self._set_indicator_on_air()
         else:
             self.tb.unkey_ptt()
-            self.ptt_button.setText("PTT (klicken zum Senden)")
+            self.ptt_button.setText("PTT (click to send)")
             self._set_indicator_idle()
 
-    def _on_emergency_stop(self):
-        self.tb.unkey_ptt()
-        self.tb.safety.force_safe_state()
-        self._armed = False
-        self.ptt_button.blockSignals(True)
-        self.ptt_button.setChecked(False)
-        self.ptt_button.setText("PTT (klicken zum Senden)")
-        self.ptt_button.blockSignals(False)
-        self.ptt_button.setEnabled(False)
-        self.rearm_button.setEnabled(True)
-        self._set_indicator_idle()
-        self.status_label.setText("NOTAUS ausgelöst: Dämpfung minimal, LO abgeschaltet.")
+    def _on_ptt_pressed(self):
+        if not self._armed:
+            return
+        self.tb.key_ptt()
+        self._set_indicator_on_air()
 
-    def _on_rearm(self):
-        self.tb.safety.prepare_for_start()
-        self.tb.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
-        self._armed = True
-        self.ptt_button.setEnabled(True)
-        self.rearm_button.setEnabled(False)
+    def _on_ptt_released(self):
+        if not self.tb.keyed:
+            return
+        self.tb.unkey_ptt()
         self._set_indicator_idle()
-        self.status_label.setText("Wieder scharf geschaltet.")
+
+    def _on_estop_toggled(self, checked):
+        """checked=True: E-STOP triggered. checked=False: re-armed. One
+        toggle button covers both directions instead of two separate ones."""
+        if checked:
+            self.tb.unkey_ptt()
+            self.tb.safety.force_safe_state()
+            self._armed = False
+            self._reset_ptt_button_visual()
+            self.ptt_button.setEnabled(False)
+            self._set_indicator_idle()
+            self._style_estop_button(locked=True)
+            self.status_label.setText("E-STOP triggered: attenuation at minimum, LO powered down.")
+        else:
+            self.tb.safety.prepare_for_start()
+            self.tb.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
+            self._armed = True
+            self.ptt_button.setEnabled(True)
+            self._set_indicator_idle()
+            self._style_estop_button(locked=False)
+            self.status_label.setText("Re-armed.")
 
     def _tick(self):
         try:
@@ -252,7 +309,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"LO powerdown={state['lo_powerdown']}"
             )
         except Exception as e:
-            self.status_label.setText(f"HW-Statusabfrage fehlgeschlagen: {e}")
+            self.status_label.setText(f"HW status read failed: {e}")
 
     # --- shutdown lifecycle -------------------------------------------
     def closeEvent(self, event):
