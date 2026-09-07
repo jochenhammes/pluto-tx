@@ -32,6 +32,16 @@ AUDIO_RATE = 48_000
 DEFAULT_FREQUENCY = 432_150_000  # Hz, matches today's verified carrier test; valid for every device backend
 FINE_TUNE_RANGE_HZ = 2_000  # +/- range of the fine-tune spinbox
 
+# Displayed span of the TX waterfall (flowgraph.py's waterfall_zoom_resampler
+# decimates the device's full quad_rate down to this before the qtgui
+# waterfall sink) -- deliberately much narrower than any device's quad_rate,
+# so the actual modulated signal (a few kHz to ~10kHz wide for any mode this
+# app supports) fills a meaningful fraction of the display instead of being
+# a barely visible sliver, with the resolution improvement coming from the
+# narrower span (same 1024-point FFT, far fewer Hz/bin) rather than a bigger
+# FFT computed across the full bandwidth.
+WATERFALL_ZOOM_BANDWIDTH_HZ = 50_000
+
 # NF (audio) band-pass filter presets, (f_lo, f_hi, trans_width) in Hz.
 NF_FILTER_PRESETS = {
     "FM": (300.0, 3000.0, 300.0),

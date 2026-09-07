@@ -353,14 +353,30 @@ class PlutoTxFlowgraph(gr.top_block):
         if FREEDV_AVAILABLE:
             self._null_sink_freedv = blocks.null_sink(gr.sizeof_gr_complex)
 
-        # --- Live view of the modulated baseband actually fed to the sink.
-        # Optional: a qtgui sink is a real Qt widget and needs a
-        # QApplication to already exist -- only requested by the GUI, so
-        # headless CLI use (stage 1/2 style) stays Qt-free.
+        # --- Live view of the modulated baseband actually fed to the sink,
+        # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
+        # rather than the device's full quad_rate -- at quad_rate itself
+        # (2.5-8+ MHz), the actual modulated signal (a few kHz to ~10kHz
+        # wide for any mode this app supports) is a barely visible sliver.
+        # A cheap decimating resampler ahead of the waterfall crops the
+        # displayed span down, instead of raising the FFT size across the
+        # full bandwidth -- much cheaper, and the resolution improvement
+        # (same FFT size, far fewer Hz/bin) comes for free from the
+        # narrower span, no bigger FFT needed. Optional: a qtgui sink is a
+        # real Qt widget and needs a QApplication to already exist -- only
+        # requested by the GUI, so headless CLI use (stage 1/2 style) stays
+        # Qt-free.
         self.waterfall = None
+        self.waterfall_zoom_resampler = None
         if enable_waterfall:
+            g_wf = math.gcd(config.WATERFALL_ZOOM_BANDWIDTH_HZ, quad_rate)
+            self.waterfall_zoom_resampler = filter.rational_resampler_ccf(
+                interpolation=config.WATERFALL_ZOOM_BANDWIDTH_HZ // g_wf, decimation=quad_rate // g_wf,
+                taps=[], fractional_bw=0.4,
+            )
             self.waterfall = qtgui.waterfall_sink_c(
-                1024, window.WIN_BLACKMAN_hARRIS, 0, quad_rate, "TX Basisband (vor Geraete-Sink)", 1
+                1024, window.WIN_BLACKMAN_hARRIS, 0, config.WATERFALL_ZOOM_BANDWIDTH_HZ,
+                "TX Basisband (vor Geraete-Sink)", 1
             )
 
         # --- Device sink: build_sink() ALWAYS constructs at the device's
@@ -430,7 +446,8 @@ class PlutoTxFlowgraph(gr.top_block):
 
         self.connect(self.tx_gain, self._device_sink)
         if self.waterfall is not None:
-            self.connect(self.tx_gain, self.waterfall)
+            self.connect(self.tx_gain, self.waterfall_zoom_resampler)
+            self.connect(self.waterfall_zoom_resampler, self.waterfall)
 
         # Idle state once construction is done (e.g. Pluto: LO powered back
         # down -- its sink constructor needs the LO up to initialize, see
