@@ -1,108 +1,73 @@
 # pluto-tx
 
-Eigene FM/SSB(USB)-Sendesoftware für den ADALM-PLUTO (Pluto+, Tezuka-Firmware), gebaut mit GNU Radio, weil fertige Software (SDRangel) den TX-Zweig beim "Stop" nicht wirklich abschaltet — siehe [Sicherheitsdesign](#sicherheitsdesign).
+Eigene FM/SSB(USB)-Sendesoftware für den ADALM-PLUTO (Pluto+, Tezuka-Firmware) und HackRF One, gebaut mit GNU Radio. Dazu `pluto_rx`/`pluto_advanced_rx` als Empfänger-Apps.
 
-Sendebetriebn nur mit einer gültigen Amateurfunklizenz möglich. Verantwortung für Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
+Sendebetrieb nur mit gültiger Amateurfunklizenz. Verantwortung für Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 
-## Installation (auf einem anderen Rechner)
-
-Repo auf den Zielrechner bringen (klonen oder kopieren), dann:
+## Installation
 
 ```
 ./install.sh
 ```
 
-Das Skript ist für Debian/Ubuntu-artige Systeme (`apt-get`) gedacht und installiert alles, was die Apps tatsächlich brauchen:
+Für Debian/Ubuntu (`apt-get`). Installiert:
 
-- **`gnuradio`** — das Debian/Ubuntu-Paket zieht dabei automatisch `gr-iio` (die `iio`-Blöcke, z.B. `iio.fmcomms2_sink_fc32`/`fmcomms2_source_fc32`) und `python3-pyqt5` als harte Abhängigkeiten mit.
-- **`python3-libiio`** — die *rohen* libiio-Python-Bindings (`import iio`), getrennt von `gnuradio.iio` oben. Wird direkt von `pluto_tx/safety.py` (TX-Dämpfung/LO-Powerdown, unabhängig von GNU Radio) und `pluto_tx/netutil.py` (Verbindungs-Timeout, Geräte-Scan) gebraucht — `gnuradio` allein bringt das NICHT mit.
-- **`libiio-utils`** — `iio_info`/`iio_attr`, nicht zwingend nötig für die Apps selbst, aber praktisch zum manuellen Nachschauen auf der Kommandozeile.
-- **`avahi-daemon`** — löst `*.local`-mDNS-Hostnamen wie `plutoplus.local` tatsächlich auf. Wichtig: `libiio0` zieht zwar automatisch die Avahi-*Client*-Bibliotheken mit (harte Abhängigkeit), der eigentliche Daemon ist aber nur ein apt-„Suggests" — ohne dieses Paket würde `plutoplus.local` auf einem frisch installierten Rechner NICHT auflösbar sein, nur eine nackte IP-Adresse. Das Skript aktiviert den Dienst danach auch gleich per `systemctl enable --now`.
-- **`python3-pyqtgraph`** — für `pluto_advanced_rx`'s interaktives Wasserfall-Widget. Auch das ist nur ein apt-„Recommends" von `gnuradio`, kein hartes Dependency — deshalb explizit gelistet.
-- **`soapysdr-module-hackrf`, `hackrf`, `python3-soapysdr`** — für `pluto_tx`'s HackRF-One-TX-Backend (siehe [Geräte-Abstraktionsschicht](#geräte-abstraktionsschicht-plutosdr--hackrf-one) unten). `gnuradio.soapy` selbst steckt schon in `gnuradio` oben; diese drei sind der fehlende Rest (der eigentliche Soapy-HackRF-Treiber, `hackrf_info` zur Fehlersuche, und die rohen SoapySDR-Python-Bindings für die Geräte-Enumeration im Scan-Button). Ohne installiertes HackRF ist der "HackRF One"-Eintrag im Gerätetyp-Dropdown trotzdem da, `Connect` schlägt dann nur mit einer Fehlermeldung fehl — PlutoSDR ist davon unberührt.
-- **`git`** — zum Klonen/Updaten dieses Repos, falls noch nicht vorhanden.
+- `gnuradio` (zieht `gr-iio` und `python3-pyqt5` mit)
+- `python3-libiio` — rohe libiio-Python-Bindings, für `pluto_tx/safety.py` (TX-Sicherheitsschicht) und `pluto_tx/netutil.py` (Verbindungs-Timeout/Scan)
+- `libiio-utils` — `iio_info`/`iio_attr` zur manuellen Fehlersuche
+- `avahi-daemon` — löst `*.local`-Hostnamen wie `plutoplus.local` auf (wird aktiviert per `systemctl enable --now`)
+- `python3-pyqtgraph` — für `pluto_advanced_rx`s Wasserfall
+- `soapysdr-module-hackrf`, `hackrf`, `python3-soapysdr` — für HackRF-Unterstützung in `pluto_tx`
+- `git`
 
-Danach prüft das Skript per echtem Python-Import (`from gnuradio import iio, qtgui, ...`, `import iio`, `from PyQt5 import ...`, `import pyqtgraph`), ob alles sauber importierbar ist, und legt drei Kommandozeilen-Starter unter `~/.local/bin/` an: `pluto-tx` (startet die GUI, `--gui` ist schon eingebaut), `pluto-rx` und `pluto-advanced-rx`. Ist `~/.local/bin` noch nicht im `PATH`, sagt das Skript das am Ende explizit dazu.
+Prüft danach per echtem Python-Import, ob alles verfügbar ist, und legt `~/.local/bin/pluto-tx`, `pluto-rx`, `pluto-advanced-rx` an. Beliebig oft wiederholbar.
 
-Das Skript ist beliebig oft wiederholbar (`apt-get install` auf bereits installierte Pakete ist ein No-Op) — z.B. auch einfach erneut ausführen, um nur die Starter-Skripte neu anzulegen oder den Python-Import-Test erneut laufen zu lassen.
+Nicht Teil des Skripts: der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:...`) erreichbar sein; bei USB ggf. eigene udev-Regeln für Nicht-root-Zugriff (ungetestet).
 
-Nicht Teil des Skripts (bewusst manuell, da hardware-/setup-abhängig):
-- Der Pluto selbst muss bereits per Netzwerk (Ethernet/`ip:...`) oder USB (`usb:...`) erreichbar sein — siehe Geräte-Scan/-Auswahl unten.
-- Bei einer USB-Verbindung ggf. nötige udev-Regeln für Nicht-root-Zugriff auf das USB-Gerät (in diesem Projekt bisher nicht gebraucht/getestet, siehe ToDo unten).
+### Optional: M17
 
-### Optional: M17 Digitalsprache
-
-`install.sh` installiert bewusst NICHT `gnuradio.m17` — das ist kein apt-/PyPI-Paket, sondern braucht einen echten C++/CMake-Build ([gr-m17](https://github.com/M17-Project/gr-m17)). Ohne das ist `pluto_tx` voll funktionsfähig (FM/SSB), nur der "M17"-Moduseintrag ist ausgegraut. Wer M17 senden will:
+`install.sh` installiert bewusst kein `gnuradio.m17` (kein apt-Paket, braucht C++/CMake-Build, [gr-m17](https://github.com/M17-Project/gr-m17)). Ohne das ist der M17-Moduseintrag ausgegraut, Rest der App läuft normal.
 
 ```
 ./install-m17.sh
 ```
 
-Baut `gr-m17` (gepinnt auf einen verifizierten Commit) lokal nach `$HOME/.local` — kein `sudo` für den eigentlichen Build nötig, nur für ggf. fehlende `cmake`/`make`/`doxygen`. Regeneriert danach den `pluto-tx`-Starter aus `install.sh` so, dass `LD_LIBRARY_PATH` automatisch gesetzt wird (keine Shell-rc-Änderungen nötig). Siehe [M17 Digitalsprache (TX)](#m17-digitalsprache-tx) unten für Details zur Signalkette.
+Baut `gr-m17` (gepinnter Commit) nach `$HOME/.local`, regeneriert den `pluto-tx`-Starter mit passendem `LD_LIBRARY_PATH`.
 
-### FreeDV 2020/2020B braucht KEIN separates Skript
+### FreeDV braucht kein separates Skript
 
-Im Gegensatz zu M17 ist FreeDV 2020/2020B nach einem normalen `./install.sh` bereits nutzbar — `libcodec2` (mit vollem LPCNet/2020/2020B-Support) ist eine transitive Abhängigkeit des `gnuradio`-Pakets (über `libgnuradio-vocoder`). Siehe [FreeDV 2020/2020B Digitalsprache (TX)](#freedv-20202020b-digitalsprache-tx) unten.
+`libcodec2` mit LPCNet/2020/2020B-Support ist bereits transitive Abhängigkeit von `gnuradio`.
 
 ## Struktur
 
 ```
-install.sh                  # siehe Installation oben
-install-m17.sh               # optional: gr-m17-Build, siehe Installation oben
+install.sh / install-m17.sh
 pluto_tx/
-├── config.py      # geräteunabhängige Konstanten: Audio-Rate, DE-Bandplan, NF-Dynamik, M17, FreeDV
-├── devices/        # Geräte-Abstraktionsschicht, siehe Geräte-Abstraktionsschicht-Abschnitt unten
-│   ├── base.py       # TxDevice-ABC, PowerStage-Dataclass
-│   ├── pluto.py       # PlutoDevice: gr-iio + PlutoSafety (aus safety.py), plus Plutos eigene Konstanten (MIN_ATTEN etc. teils noch in config.py, siehe unten)
-│   └── hackrf.py       # HackRFDevice: gr-soapy (driver=hackrf), VGA+AMP-Gain-Modell
-├── safety.py       # PlutoSafety: rohes python3-libiio, unabhängig von gr-iio -- NUR für PlutoDevice, siehe unten
-├── flowgraph.py     # PlutoTxFlowgraph(gr.top_block): FM/SSB/M17/FreeDV-Signalkette, geräteunabhängig bis auf self.device
-├── dynamics.py      # DynamicsProcessor(gr.sync_block): Kompressor/Limiter, siehe NF-Verarbeitung unten
-├── freedv_ctypes.py # ctypes-Wrapper um libcodec2s freedv_api (FreeDV 2020/2020B), siehe FreeDV-Abschnitt unten
-├── freedv.py        # FreeDVEncoder(gr.basic_block): freedv_tx() als GNU-Radio-Block, siehe FreeDV-Abschnitt unten
-├── gui.py             # PyQt5 GUI (inkl. Gerätetyp-Dropdown, siehe Geräte-Abstraktionsschicht unten)
-├── app.py              # CLI-Einstieg (--gui für die GUI)
-└── da2jh-test.wav        # Standard-Testaufnahme (Rufzeichen, gesprochen)
-pluto_rx/
-├── config.py      # RX-Konstanten (importiert Bandplan/URI-Default aus pluto_tx.config)
-├── flowgraph.py     # PlutoRxFlowgraph(gr.top_block): AD9361-RX -> FM/SSB-Demod -> Audio + Wasserfall
-├── gui.py             # PyQt5 GUI: Frequenz, Feintuning, Gain, NF-Gain, RX-Bandbreite/Zoom, Wasserfall
-└── app.py              # CLI-Einstieg
-pluto_advanced_rx/
-├── config.py      # eigenständige Kopie der RX-Konstanten (siehe unten) + Wasserfall-Konstanten
-├── fft_probe.py    # FftProbe(gr.sync_block): numpy-FFT-Zeilen für das interaktive Wasserfall-Widget
-├── flowgraph.py     # AdvancedRxFlowgraph(gr.top_block): 1:1-Kopie der pluto_rx-Demod-Kette + FftProbe-Tap
-├── waterfall_widget.py  # AdvancedWaterfallWidget(QWidget): pyqtgraph-Wasserfall, Klick-zum-Tunen, Marker, Bandbreiten-Anzeige
-├── gui.py             # PyQt5 GUI: wie pluto_rx, plus interaktives Wasserfall-Widget
-└── app.py              # CLI-Einstieg
-pluto_tx_carrier.py         # einfaches iio_attr/iio_writedev Carrier-Test-Skript (Fallback/Referenz)
+├── config.py         # geräteunabhängige Konstanten
+├── devices/           # Geräte-Abstraktionsschicht (siehe unten)
+│   ├── base.py          # TxDevice-ABC, PowerStage
+│   ├── pluto.py          # PlutoDevice (gr-iio + safety.py)
+│   └── hackrf.py          # HackRFDevice (gr-soapy)
+├── safety.py          # PlutoSafety: rohes python3-libiio, unabhängig von GNU Radio
+├── flowgraph.py        # PlutoTxFlowgraph: FM/SSB/M17/FreeDV-Signalkette
+├── dynamics.py         # Kompressor/Limiter
+├── freedv_ctypes.py / freedv.py   # FreeDV-Anbindung
+├── gui.py / app.py
+└── da2jh-test.wav       # Standard-Testaufnahme
+pluto_rx/                # einfacher RX (Frequenz, Gain, Wasserfall)
+pluto_advanced_rx/        # RX mit interaktivem SDR++-artigem Wasserfall (eigenständige Kopie von pluto_rx)
+pluto_tx_carrier.py        # Carrier-Test-Skript (Fallback/Referenz)
 ```
 
-`pluto_rx` und `pluto_advanced_rx` sind bewusst unabhängig von `pluto_tx`: der RX-Zweig kann nicht senden, braucht also keine der TX-Safety-Mechanismen (`safety.py`) und ist nur lose über die gemeinsamen Konstanten (Bandplan, Default-URI) gekoppelt. `pluto_advanced_rx` ist außerdem bewusst eine **eigenständige Kopie** von `pluto_rx` (nicht Ersatz, nicht Import) — die Demod-Kette und die RX-Konstanten sind dupliziert, damit `pluto_advanced_rx` frei weiterentwickelt werden kann, ohne die stabile `pluto_rx`-App zu berühren.
+`pluto_rx`/`pluto_advanced_rx` sind unabhängig von `pluto_tx` (RX kann nicht senden, braucht keine TX-Sicherheitsschicht), teilen sich aber Bandplan/URI-Konstanten. `pluto_advanced_rx` ist eine eigenständige Kopie von `pluto_rx`, nicht dessen Ersatz — kann frei weiterentwickelt werden, ohne die stabile `pluto_rx`-App zu berühren.
 
 ### `pluto_advanced_rx`: interaktiver Wasserfall
 
-`pluto_rx`'s Wasserfall ist GNU Radios eigenes `qtgui.waterfall_sink_c`-Widget — ein reines C++/Qt-Objekt ohne jede Marker-/Klick-/Overlay-API. `pluto_advanced_rx` ersetzt das durch ein selbstgebautes, interaktives [pyqtgraph](https://www.pyqtgraph.org/)-Widget (`waterfall_widget.py`), im Stil von SDR++:
+Eigenes [pyqtgraph](https://www.pyqtgraph.org/)-Widget (`waterfall_widget.py`) statt GNU Radios `qtgui.waterfall_sink_c`: Live-Spektrum gekoppelt mit dem Wasserfall, Klick-zum-Tunen, Tuning-Marker, Demod-Bandbreiten-Anzeige, Zoom/Pan, einstellbare Floor/Ceiling-Slider für die Farbskala. Die Demodulator-Breite (`Width (Hz)`) ist ein echter, zur Laufzeit änderbarer Filter (FM: Tiefpass vor dem Demod; SSB: Breite des Bandpass-Demodulators selbst), keine reine Anzeige. Ein eigener `gr.sync_block` (`fft_probe.py`) berechnet die FFT und hält sie für einen `QTimer`-Poll bereit, da `qtgui`-Blöcke keinen Datenausgang haben.
 
-- **Live-Spektrumlinie oberhalb des Wasserfalls**, X-Achse (Frequenz, mit MHz-Beschriftung statt Rohwerten) mit der Wasserfall-Ansicht gekoppelt (`setXLink`) — das ist die "live Frequenzdarstellung".
-- **Klick-zum-Tunen**: Klick auf Spektrum oder Wasserfall (per `ViewBox.mapSceneToView`, demselben Muster, das GNU Radios eigene gr-filter-GUI intern für Klick-Handling nutzt) retunt direkt.
-- **Tuning-Marker** (senkrechte Linie) und **Demod-Bandbreiten-Anzeige** (schattierte Region um die getunte Frequenz) — beide zeigen die tatsächlich eingestellte Demodulator-Breite (siehe unten), keine Schätzung.
-- **Zoom/Pan per Standard-Maus-Interaktion** (Ziehen zum Verschieben, Scrollen zum Zoomen), auf die Frequenzachse beschränkt.
-- **Floor/Ceiling-Slider** (vertikal, rechts neben Spektrum+Wasserfall, übereinander): verschieben live die dB-Grenzen von Spektrum-Y-Achse und Wasserfall-Farbskala — der Rauschgrund ist je nach Antenne/Standort/Gain sehr unterschiedlich, deshalb einstellbar statt fest.
-
-**Demodulator-Breite** (`Width (Hz)`-Regler neben der Modus-Auswahl) ist ein echter, zur Laufzeit änderbarer Filter, keine reine Anzeige: bei FM ein reelles Tiefpassfilter (`firdes.low_pass`, symmetrisch um 0 Hz auf das komplexe IF-Signal angewandt — Standardtechnik zur Bandbegrenzung eines komplexen Signals) VOR `quadrature_demod_cf`, Standard 12,5 kHz (übliche NBFM-Kanalbreite); bei SSB die Breite des bestehenden `complex_band_pass`-Demodulationsfilters selbst (untere Kante bleibt bei 300 Hz fest, die Breite verschiebt die obere Kante), Standard 3 kHz. Beide über `set_taps()` zur Laufzeit änderbar, kein Flowgraph-Rebuild nötig (dieselbe Technik, die `pluto_tx.set_mode()` schon für seinen NF-Filter nutzt).
-
-Datenfluss: Da GNU Radios `qtgui`-Blöcke keinen Daten-Ausgang haben, berechnet ein eigener, reiner Python-`gr.sync_block` (`fft_probe.py`) die FFT direkt (numpy, gedrosselt auf `config.FFT_COMPUTE_RATE_HZ`, unabhängig von Samplerate/FFT-Größe) und hält die letzte Zeile hinter einem Lock für einen `QTimer`-Poll (`config.WATERFALL_POLL_INTERVAL_MS`) bereit.
-
-Architektonischer Vorteil gegenüber `pluto_rx`: Da das Wasserfall-Widget ein reines Python/PyQt-Objekt ist (kein `sip.wrapinstance()`-gewrapptes C++-Objekt einer gr-qtgui-Sink), entfällt die fragile "nie `deleteLater()`, nur `setParent(None)`"-Regel aus `pluto_rx/gui.py` (dort Ursache eines echten SIGSEGV) komplett — das Widget wird einmalig gebaut und bleibt über Geräte-Reconnects UND RX-Bandbreiten-Rebuilds hinweg einfach bestehen, kein Swap-Out nötig.
-
-RX-Bandbreiten-Presets reichen bis 10 MHz (`1/2,5/5/8/10 MHz`) — mehr als bei `pluto_rx`, aber weniger als ursprünglich angefragt (bis 20 MHz): 5/8/10 MHz laufen, zeigen aber echte Buffer-Overruns (bekannte ~4,7-4,9 MSa/s-Durchsatzgrenze der aktuellen `ip:plutoplus.local`-Verbindung, siehe unten). 15/20 MHz wurden getestet und bewusst NICHT aufgenommen: bei diesem Dezimationsverhältnis (400:1 auf `DEMOD_IF_RATE`) wird der automatisch entworfene IF-Filter >13.000 Taps lang, was den GNU-Radio-Scheduler-Puffer sprengt — kein Overrun, sondern ein Scheduler-Fehler und komplett keine Daten. Größere Puffer alleine beheben das nachweislich nicht; siehe ToDo unten.
-
-Gilt identisch wie bei `pluto_rx`: der geteilte AD9361-RX/TX-Takt (siehe "Bekannte Einschränkungen" oben) betrifft auch `pluto_advanced_rx`, da RX-Bandbreiten-Presets ebenfalls die RX-Samplerate ändern.
+RX-Bandbreiten-Presets bis 10 MHz (`1/2,5/5/8/10 MHz`); 15/20 MHz sind bewusst nicht enthalten — bei diesem Dezimationsverhältnis wird der IF-Filter zu lang für den GNU-Radio-Scheduler (siehe ToDo).
 
 ## Start
-
-Nach `./install.sh` (siehe Installation oben), mit den dabei angelegten Kurzbefehlen:
 
 ```
 pluto-tx
@@ -110,17 +75,9 @@ pluto-rx
 pluto-advanced-rx
 ```
 
-Oder direkt, ohne die Starter-Skripte, aus dem Repo-Verzeichnis:
+Oder direkt: `python3 -m pluto_tx.app --freq 432150000 --gui` (analog für `pluto_rx`/`pluto_advanced_rx`). TX ohne `--gui`: headless CLI-Test.
 
-```
-python3 -m pluto_tx.app --freq 432150000 --gui
-python3 -m pluto_rx.app --freq 432150000
-python3 -m pluto_advanced_rx.app --freq 432150000
-```
-
-TX ohne `--gui`: headless CLI-Test (fester Carrier für `--duration` Sekunden, oder `--interactive` für Enter-zum-Keyen).
-
-**M17 direkt so gestartet (nicht über den `pluto-tx`-Starter) bleibt ausgegraut**, wenn `install-m17.sh` gelaufen ist: `LD_LIBRARY_PATH` wird nur vom generierten `~/.local/bin/pluto-tx`-Starter gesetzt, nicht vom direkten `python3 -m pluto_tx.app`-Aufruf. Entweder den Starter benutzen (`pluto-tx --freq ...`), oder vorher selbst setzen:
+**M17 direkt gestartet (nicht über den `pluto-tx`-Starter) bleibt ausgegraut** — `LD_LIBRARY_PATH` wird nur vom generierten Starter gesetzt:
 
 ```
 export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
@@ -129,130 +86,86 @@ python3 -m pluto_tx.app --freq 432150000 --gui
 
 ## Sicherheitsdesign
 
-Kernproblem, das diesen Eigenbau motiviert hat: der AD9361-Treiber (libiio) trennt Buffer-Streaming komplett von Dämpfung (`hardwaregain`) und LO-Zustand (`powerdown`) — keine SDR-Software, die wir getestet haben (SDRangel eingeschlossen), setzt diese beim Stoppen automatisch zurück. Deshalb: `PlutoSafety` (in `safety.py`) verwaltet TX-Dämpfung und LO-Powerdown komplett unabhängig von GNU Radio über rohes `python3-libiio`. `force_safe_state()` (Dämpfung auf Minimum + LO aus) ist die einzige Funktion, auf die jeder Shutdown-Pfad läuft: normales Programmende, Fenster schließen, SIGINT/SIGTERM, unbehandelte Exceptions. Die GUI zeigt zusätzlich alle 500ms den tatsächlichen Hardware-Zustand an (nicht nur den vermuteten App-Zustand) und hat einen NOTAUS-Button.
+Der AD9361-Treiber (libiio) trennt Buffer-Streaming von Dämpfung (`hardwaregain`) und LO-Zustand (`powerdown`) — keine getestete SDR-Software setzt diese beim Stoppen automatisch zurück. `PlutoSafety` (`safety.py`) verwaltet TX-Dämpfung und LO-Powerdown deshalb komplett unabhängig von GNU Radio über rohes `python3-libiio`. `force_safe_state()` (Dämpfung Minimum + LO aus) ist die einzige Funktion, auf die jeder Shutdown-Pfad läuft: normales Programmende, Fenster schließen, SIGINT/SIGTERM, unbehandelte Exceptions. Die GUI zeigt alle 500ms den tatsächlichen Hardware-Zustand an und hat einen NOTAUS-Button.
 
-PTT schaltet nur die Dämpfung (schnell, kein LO-Relock), nicht den LO-Powerdown — der ist für App-Start/-Ende reserviert.
+PTT ist in jedem Modus und auf jedem Gerät hart mit dem tatsächlichen HF-Abschalten verknüpft, nicht nur mit einer Pegelabsenkung: bei Pluto zusätzlich LO-Powerdown (reine Dämpfung unterdrückt LO-Leckage nicht ausreichend), bei HackRF ein Neuaufbau der Geräteverbindung (Nullen der Gain-Register allein stoppt die Sendung nachweislich nicht). `tx_gain` (letzter Block vor dem Gerät) startet stumm und wird nur während einer aktiven Sendung entstummt — wichtig, weil z.B. FM-Modulation von Stille mathematisch ein voller Träger ist, kein Nullsignal.
 
-## Geräte-Abstraktionsschicht (PlutoSDR + HackRF One)
+## Geräte-Abstraktion (`pluto_tx/devices/`)
 
-`pluto_tx` unterstützt neben der PlutoSDR jetzt auch ein HackRF One als TX-Gerät, über eine eigene Abstraktionsschicht (`pluto_tx/devices/`), damit weitere SoapySDR-fähige Hardware später mit überschaubarem Aufwand dazukommen kann (eine neue Datei + eine Registry-Zeile + ein GUI-Widget-Paar, keine Änderung an `flowgraph.py`).
+`TxDevice` (`devices/base.py`) kapselt gerätespezifisches Verhalten: `build_sink()` liefert den GNU-Radio-Block, `power_stages`/`set_power()` das Pegelmodell, `pre_key()`/`post_unkey()` die PTT-Hooks, `force_safe_state()`/`read_hw_state()` Sicherheit und Status. Ein neues Backend braucht nur eine neue Datei + Registry-Eintrag, keine Änderung an `flowgraph.py`.
 
-**`TxDevice`** (`devices/base.py`) ist die abstrakte Basisklasse: `build_sink()` konstruiert den ans `tx_gain` anzuschließenden GNU-Radio-Block, `set_power(stage_name, value)`/`power_stages` (eine Liste von `PowerStage`s, genau eine mit `is_primary=True`) modellieren das Pegel-/Gain-Konzept des jeweiligen Geräts, `pre_key()`/`post_unkey()` sind die Hooks, die `flowgraph.py`s `key_ptt()`/`unkey_ptt()` bei jedem PTT-Zyklus aufruft, `force_safe_state()` ist der NOTAUS-Backstop, `read_hw_state()` speist die GUI-Statuszeile. Die sicherheitskritische **Reihenfolge** (Pegel-auf-Minimum-vor-dem-Hook, M17s verzögerter EOT-Tail) bleibt bewusst in `flowgraph.py`, nicht in den Backends — an einer Stelle prüfbar, unabhängig vom aktiven Gerät.
+- **PlutoDevice**: eine Dämpfungsstufe (`MIN_ATTEN`/`MAX_ATTEN` in `config.py`), 0 = volle Leistung.
+- **HackRFDevice** (`gnuradio.soapy.sink`): zwei additive Gain-Stufen — `VGA` (0–47dB, kontinuierlich, IF Gain) und `AMP` (+14dB an/aus, RF Gain). Kein Pluto-Äquivalent zum LO-Powerdown verfügbar (die installierten `gnuradio.soapy`-Bindings bieten kein `activate()`/`deactivate()`) — PTT-Release baut deshalb die Geräteverbindung neu auf statt nur den Pegel zu nullen. Manuelle Frequenzkorrektur (`Freq. Correction (Hz)`, GUI, nur bei HackRF sichtbar) gleicht Kristall-Toleranz des jeweiligen Geräts aus — kein allgemeiner HackRF-Wert, pro Gerät empirisch einstellen.
 
-**`PlutoDevice`** (`devices/pluto.py`) ist ein reiner, verhaltenserhaltender Umzug des bisherigen Codes: `PlutoSafety` (`safety.py`, unverändert) plus `iio.fmcomms2_sink_fc32`, jetzt hinter dem `TxDevice`-Interface. Ein `PowerStage("attenuation", ...)`, Bereich `MIN_ATTEN`/`MAX_ATTEN` (bleiben in `config.py`, siehe unten). Nach dem Umbau erneut vollständig auf echter Hardware verifiziert: Idle-Zustand, Key/Unkey-Timing inkl. `LO_RELOCK_S`, Pegel-Ceiling/Unlock, M17-EOT-Tail, NOTAUS/Re-Arm — alle bit-identisch zum Verhalten vor dem Umbau.
-
-**`HackRFDevice`** (`devices/hackrf.py`) nutzt `gnuradio.soapy.sink("driver=hackrf", ...)` — `gnuradio.soapy` ist bereits Teil des `gnuradio`-apt-Pakets, nur der eigentliche HackRF-Treiber (`soapysdr-module-hackrf`) und `python3-soapysdr` (für die Geräte-Enumeration) müssen dazu, siehe Installation oben. HackRFs Pegelmodell ist grundlegend anders als Plutos einzelne Dämpfungsstufe: zwei **additive** Gain-Stufen (mehr = mehr Leistung, umgekehrtes Vorzeichen zu Plutos Dämpfung) — `VGA` (0-47 dB, kontinuierlich, die primäre Stufe, GUI-Slider) und `AMP` (grob, +14 dB an/aus, GUI-Checkbox, nur bei Gerätetyp "HackRF One" sichtbar). Auf echter Hardware bestätigt per `get_gain_range(0,"AMP")`: intern ein `float`-Wertebereich (0.0/14.0), kein natives bool — `read_hw_state()`s `amp_on` leitet sich per `get_gain(...) > 0` daraus ab.
-
-**Bekannte, bewusste Einschränkung — kein Pluto-Äquivalent zum LO-Powerdown:** Die auf diesem System installierten `gnuradio.soapy`-Python-Bindings binden nachweislich kein `activate()`/`deactivate()` oder sonstiges Pro-Stream-Lifecycle-Kommando (geprüft per `dir(soapy.sink)`) — der einzige zwischen Sendungen verfügbare Hebel sind die beiden Gain-Stufen selbst. `HackRFDevice.post_unkey()` schaltet `AMP` aus (der primäre `VGA`-Wert wird ohnehin schon generisch von `flowgraph.py` genullt) — das ist nicht "die beste Näherung", sondern der einzig verfügbare Hebel über diesen API-Pfad. Ebenso besitzt `HackRFDevice` **keine** von GNU Radio unabhängige Sicherheitsschicht wie `PlutoSafety` (die bewusst einen eigenen `iio.Context` hält, damit sie auch nach einem Absturz des GNU-Radio-Laufzeitsystems noch funktioniert) — `force_safe_state()` kann nur über den noch laufenden `soapy.sink`-Block wirken.
-
-**Verifiziert (echte Hardware, `key_ptt()`/`unkey_ptt()` tatsächlich ausgelöst, jeweils mit expliziter Freigabe des Betreibers vor jeder Sendung):** VGA- und AMP-Register ändern sich beim Keyen/Unkeyen wirklich (nicht nur Python-Buchführung), `post_unkey()` schaltet AMP zuverlässig wieder aus, `force_safe_state()` nullt beide Stufen auch mitten in einer laufenden "Sendung". Ein kurzer realer PTT-Test bei niedriger Leistung (432,15 MHz FM, VGA 10 dB, AMP aus) wurde vom Betreiber live beobachtet — ein kurzer Ausschlag war sichtbar, konnte aber mangels präziser Zeitkorrelation zwischen Sendekommando und Beobachtung nicht eindeutig als "während der Sendung" (erwartet, einfach das Signal selbst) oder "außerhalb, bei angeblich stillem Gerät" (der eigentlich interessante Befund, analog zum Pluto-LO-Leck) eingeordnet werden. **Nicht abschließend geklärt** — siehe ToDo unten.
+Der TX-Wasserfall zeigt einen auf 50 kHz gezoomten Ausschnitt statt der vollen Geräte-Samplerate (2,5–8+ MHz), damit das eigentliche Signal sichtbar groß ist.
 
 ## NF-Verarbeitung (Noise Gate, Kompressor, Limiter)
-
-Signalkette (`pluto_tx/flowgraph.py`):
 
 ```
 ptt_mute -> nf_filter (Bandpass) -> gate -> agc -> compressor -> nf_gain -> limiter_smooth -> limiter (Hard-Clip)
 ```
 
-- **`gate`** (`analog.pwr_squelch_ff`): unterdrückt Rauschen/Raumhall zwischen Wortgruppen, bevor es die AGC erreicht — verhindert, dass die AGC in Sprechpausen hochpumpt.
-- **`compressor`** (`pluto_tx/dynamics.py`, eigener `gr.sync_block`, kein fertiger GNU-Radio-Block existiert dafür): Standard-Soft-Knee-Kompressor (Threshold/Ratio/Knie/Attack/Release), macht die Modulation im Schnitt gleichmäßiger/lauter. Regler: Threshold + Ratio; Attack/Release/Knie sind feste, abgestimmte Werte.
-- **`limiter_smooth`**: dieselbe Klasse, als schneller/hoher-Ratio-Limiter parametriert — fängt Transienten ab, *bevor* sie den bestehenden Hard-Clip (`limiter`, `analog.rail_ff`) erreichen. Der Hard-Clip bleibt unverändert als letztes Sicherheitsnetz bestehen (nicht ersetzt) — er soll dadurch seltener/nie mehr tatsächlich eingreifen müssen.
-- Kein separater Makeup-Gain-Regler: `nf_gain` ("Audio Gain") bleibt bewusst der einzige Ansteuerungsregler, jetzt direkt hinter dem Kompressor. Das heißt konkret: Kompression allein macht die Modulation NICHT automatisch lauter (reduziert nur die Dynamik/Spitzen) — erst wer danach "Audio Gain" hochdreht, nutzt den neu gewonnenen Headroom tatsächlich aus. Gemessen (offline, `da2jh-test.wav`): bei gleicher Audio-Gain-Einstellung sinkt die Hard-Clip-Rate von 0,28 % auf 0 %; bei 3× höherer Audio-Gain (spürbar lauter als vorher) bleibt sie mit 0,13 % immer noch unter der alten Rate.
-
-Alle drei Stufen einzeln per Checkbox aktivierbar/deaktivierbar, Einstellungen bleiben über Geräte-Reconnect und Datei-Wechsel erhalten (wie alle anderen Regler). Startwerte in `config.py` sind allgemeine Rundfunk-/Sprachprozessor-Konvention, gegen `da2jh-test.wav` grob validiert, aber nicht mikrofonspezifisch feinjustiert — je nach Mikrofon/Pegel ggf. nachregeln.
+`gate` (`analog.pwr_squelch_ff`) unterdrückt Rauschen zwischen Wortgruppen vor der AGC. `compressor`/`limiter_smooth` (`pluto_tx/dynamics.py`, eigener Soft-Knee-Kompressor, da GNU Radio keinen fertigen Block dafür hat) machen die Modulation gleichmäßiger bzw. fangen Transienten ab, bevor der bestehende Hard-Clip (`limiter`) greift. `nf_gain` ("Audio Gain") bleibt der einzige Ansteuerungsregler — Kompression macht die Modulation nicht automatisch lauter, nur gleichmäßiger. Alle drei Stufen einzeln aktivierbar, Einstellungen bleiben über Reconnect/Datei-Wechsel erhalten.
 
 ## M17 Digitalsprache (TX)
 
-Dritter Modus in `pluto_tx` (neben FM/SSB), für den offenen [M17](https://m17project.org/)-Digitalsprachstandard. Nur TX — Demodulation/Empfang (`pluto_advanced_rx`) ist bewusst noch nicht Teil dieser Änderung, siehe ToDo unten. Braucht `gnuradio.m17` ([gr-m17](https://github.com/M17-Project/gr-m17), nicht auf apt/PyPI) — siehe [Optional: M17 Digitalsprache](#optional-m17-digitalsprache) oben. Ohne installiertes `gr-m17` ist der Moduseintrag in der GUI ausgegraut (mit Tooltip), der Rest der App (FM/SSB) läuft unverändert weiter — reiner Lazy-Import mit einem Modul-Flag (`M17_AVAILABLE`), kein hartes Dependency.
-
-Signalkette (`pluto_tx/flowgraph.py`, eigener Zweig parallel zu FM/SSB):
+Modus in `pluto_tx` für den offenen [M17](https://m17project.org/)-Standard. Nur TX. Braucht `gnuradio.m17` ([gr-m17](https://github.com/M17-Project/gr-m17)) — ohne das ist der Moduseintrag ausgegraut, Rest der App läuft normal.
 
 ```
-ptt_mute -> m17_audio_resampler (48k->8k) -> m17_float_to_short -> m17_codec2_encoder
-         -> m17_coder (gr-m17: Codec2-Bytes -> 4800 Sym/s Baseband) -> m17_rrc (Root-Raised-Cosine, Formfilter)
-         -> m17_fm_mod (analog.frequency_modulator_fc, ±800 Hz Deviation) -> m17_tx_resampler (48k -> QUAD_RATE)
-         -> tx_gain
+ptt_mute -> m17_audio_resampler (48k->8k) -> m17_codec2_encoder -> m17_coder (Codec2 -> 4800 Sym/s)
+         -> m17_rrc (Root-Raised-Cosine) -> m17_fm_mod (±800Hz Deviation) -> m17_tx_resampler -> tx_gain
 ```
 
-- **Zapft `ptt_mute` direkt an** — läuft bewusst NICHT durch die NF-Dynamik-Kette (Gate/AGC/Kompressor/Limiter, siehe oben): `m17_codec2_encoder` erwartet einen für Codec2 typischen Sprachpegel, kein für analoge FM/SSB-Modulation optimiertes, bereits komprimiertes Signal — ein zusätzlicher Kompressor davor hätte hier keinen klaren Nutzen und nur eine weitere Fehlerquelle/Abstimmungsvariable hinzugefügt.
-- **Geht NICHT durch `mode_selector`** (der bleibt reines FM/SSB, 2 statt 3 Eingänge) — `m17_tx_resampler` speist `tx_gain` direkt, umgeschaltet per `lock()`/`connect()`/`disconnect()` beim Wechsel in/aus M17-Modus (kurze Pause nur bei diesem Wechsel, FM<->SSB bleibt beliebig schnell). Grund, real auf Hardware gemessen: `m17_coder` erzwingt `output_multiple(192)` und expandiert danach um ~Faktor 520 (RRC x10, Resampler x~52) — durch `blocks.selector` gemeinsam mit den FM/SSB-Zweigen geroutet, verhandelte GNU Radios Scheduler die Puffergrößen für den echten Hardware-Sink nie erfolgreich: `m17_coder`s eigene `general_work()` wurde nach PTT-Druck kein einziges Mal mehr aufgerufen (per Stufe-für-Stufe-Sonde auf echter Hardware bestätigt: 0 Symbole an jeder Stufe, obwohl SOT nachweislich ankam) — reiner Dauerträger auf der Luftschnittstelle, kein Overrun. Größere Puffer (`set_max_output_buffer`) beheben das nicht (GNU Radio kappt sie deutlich unter dem nötigen Wert) — dieselbe Fehlerklasse wie der bereits dokumentierte `pluto_advanced_rx`-15/20-MHz-Scheduler-Deadlock oben. Direkt an den echten Sink angeschlossen (ohne `mode_selector`) lief dieselbe Kette dagegen sofort fehlerfrei — daher die dedizierte Verbindung statt eines dritten Selector-Eingangs.
-- **`m17_coder`** hat kein internes Echtzeit-Timing — ungedrosselt läuft er weit schneller als die nominellen 4800 Sym/s. Die tatsächliche Sendegeschwindigkeit entsteht dadurch, dass `pluto_sink` (AD9361-DAC) das Baseband am Ende mit fester Samplerate abnimmt — der Coder selbst braucht (und bekommt) keine Drosselung.
-- **PTT ist bei M17 nachrichtenbasiert (SOT/EOT), nicht sofort aus wie bei FM/SSB**: `key_ptt()` sendet `"SOT"` an `m17_coder`/`m17_codec2_encoder` (Start-of-Transmission). `unkey_ptt()` mutet die NF sofort, sendet aber `"EOT"` (End-of-Transmission) und lässt den Sender absichtlich noch `M17_EOT_HOLD_S` (Default 0,4s, real gegen echte Hardware auf ~424-440ms EOT-Tail-Dauer gemessen) weiterlaufen, damit der Coder seinen Abschluss-Frame + EOT-Frames noch aussenden kann (theoretisches Minimum ~80ms bei Default-Einstellungen) — erst danach wird die Dämpfung tatsächlich hochgefahren. Die GUI zeigt das als eigenen Zustand `"ENDING..."` (orange) zwischen `"ON AIR"` und `"READY"`. Der NOTAUS-Button umgeht diesen Ablauf bewusst komplett (sofortiges `unkey_ptt()`, kein Warten auf den Tail) — `shutdown_safe()`/`force_safe_state()` bleiben davon unabhängig immer die letzte, unbedingte Sicherheitsebene.
-- **Rufzeichen** (Quelle/Ziel, Standard-Ziel `@ALL`) sind eigene GUI-Felder, nur aktiv/eingeblendet wenn Modus = M17 und verbunden; Änderungen wirken direkt auf `m17_coder.set_src_id()`/`set_dst_id()`, kein Flowgraph-Rebuild nötig.
-- **Root-Raised-Cosine-Formfilter** (`filter.interp_fir_filter_fff`, `firdes.root_raised_cosine(...)`) ist NICHT Teil von `m17_coder` selbst, sondern eine eigene Stufe danach — Standard-Pulsformung für ein bandbegrenztes M17-Signal, `gain` bewusst gleich dem Interpolationsfaktor (10) gesetzt, um den Amplitudenverlust der Nullstellen-Interpolation auszugleichen.
+Zapft `ptt_mute` direkt an (bypasst die NF-Dynamik-Kette — Codec2 braucht keinen davorgeschalteten Sprachprozessor). Geht **nicht** über `mode_selector`: `m17_coder` expandiert das Signal um ~Faktor 520, was GNU Radios Scheduler bei gemeinsamer Führung mit FM/SSB nicht zuverlässig puffern konnte (realer Deadlock, per Stufe-für-Stufe-Sonde auf Hardware bestätigt) — stattdessen eigene, per `lock()/connect()/disconnect()` umgehängte Verbindung zu `tx_gain`.
 
-**Verifiziert:** Offline Coder→Decoder-Loopback-Test (korrekter Rufzeichen-Roundtrip, keine RF), echter Low-Power-PTT-Test auf Flowgraph-Ebene und nochmal auf voller GUI-Ebene (Klick-Toggle- und Hold-to-Talk-PTT), jeweils mit `da2jh-test.wav` als Quelle (korrekte Stationskennung, keine Live-Mikrofonaufnahme) — alle mit expliziter Freigabe vor jeder echten Sendung. Zusätzlich, nach Auffinden und Beheben des `mode_selector`-Deadlocks oben: reale Basisband-Messung (Instantanfrequenz variiert korrekt, ~1,8 kHz RMS / ~3,5 kHz Spitze Deviation, kein Dauerträger mehr), ein realer Low-Power-Sendetest, per RTL-SDR vom Betreiber selbst als sauber moduliertes Signal bestätigt (nicht nur Träger) — und schließlich mit SDR++'s eigenem M17-Demodulator tatsächlich erfolgreich empfangen/demoduliert, also eine echte, unabhängige Bestätigung eines standardkonformen M17-Signals (nicht nur "sieht moduliert aus").
+PTT ist nachrichtenbasiert (SOT/EOT): `unkey_ptt()` sendet EOT, hält die Sendung aber noch `M17_EOT_HOLD_S` (≈0,4s, real vermessen) offen, damit der Encoder sauber abschließt — GUI zeigt das als `"ENDING..."`. NOTAUS umgeht diesen Ablauf und schaltet sofort ab. Rufzeichen (Quelle/Ziel) sind eigene GUI-Felder, wirken direkt ohne Rebuild.
 
-Der von `pluto_advanced_rx` unabhängige "schwacher Träger ohne PTT"-Effekt (LO-Leckage bei angeschlossenem, aber nicht gesendetem Zustand) ist NICHT M17-spezifisch und kein neuer Bug — siehe [Sicherheitsdesign](#sicherheitsdesign) oben.
+**Verifiziert**: Offline-Loopback-Test, echte Basisband-Messung (korrekte Deviation), realer Sendetest per RTL-SDR bestätigt, unabhängig mit SDR++s M17-Demodulator erfolgreich empfangen.
 
 ## FreeDV 2020/2020B Digitalsprache (TX)
 
-Vierter Modus in `pluto_tx`, für [FreeDV](https://freedv.org/) 2020/2020B (Codec2-2020-Vokoder mit LPCNet + OFDM-Modem + LDPC-FEC, für HF-SSB-Kanäle). Nur TX, kein RX in `pluto_advanced_rx` (analog zu M17). Beide Varianten (2020 und 2020B) sind per GUI-Combo umschaltbar.
-
-**Braucht kein separates Install-Skript** (im Gegensatz zu M17): `libcodec2` mit vollem LPCNet/2020/2020B-Support ist bereits eine transitive Abhängigkeit des `gnuradio`-apt-Pakets (über `libgnuradio-vocoder`) — jeder Rechner, der `install.sh` gelaufen hat, hat das bereits. Bestätigt per `apt-cache rdepends` und einem echten `freedv_open()`/`freedv_tx()`-Laufzeittest, beide ohne ein einziges zusätzlich installiertes Paket. `pluto_tx/freedv_ctypes.py` ist ein handgeschriebener `ctypes`-Wrapper (keine fertigen Python-Bindings für die freedv_api existieren); `FREEDV_AVAILABLE` ist eine defensive Absicherung (zu alte libcodec2-Version), kein normalerweise erwarteter Fehlerfall.
-
-**Wichtiger Architekturunterschied zu M17:** `freedv_tx()` erzeugt kein rohes IQ-Baseband, sondern ein fertiges, moduliertes AUDIO-Signal (8kHz PCM) — genau das, was man normalerweise ins Mikrofon-Signal eines gewöhnlichen SSB-Transceivers einspeist (so arbeitet auch `freedv-gui`). Deshalb keine eigene RF-Modulationskette nötig — FreeDV nutzt dieselbe Hilbert-basierte USB-Modulationstechnik wie normales Sprach-SSB, nur mit eigenen dedizierten Blockinstanzen.
-
-Signalkette (`pluto_tx/flowgraph.py`, eigener Zweig):
+Modus in `pluto_tx` für [FreeDV](https://freedv.org/) 2020/2020B (Codec2/LPCNet + OFDM + LDPC-FEC, für HF-SSB-Kanäle). Nur TX. Beide Varianten per GUI-Combo umschaltbar, kein separates Install-Skript nötig.
 
 ```
-ptt_mute -> freedv_audio_resampler (48k->16k) -> freedv_float_to_short
-         -> freedv_encoder (pluto_tx/freedv.py: eigener gr.basic_block, ruft freedv_tx() -- 16k Sprache -> 8k moduliertes Audio)
-         -> freedv_short_to_float -> freedv_audio_resampler_up (8k->48k)
-         -> freedv_ssb_mod (Hilbert, 401 Taps, gleiches Design wie ssb_mod, eigene Instanz)
-         -> freedv_ssb_resampler (gleiches Design wie ssb_resampler, eigene Instanz)
-         -> tx_gain
+ptt_mute -> freedv_audio_resampler (48k->16k) -> freedv_encoder (freedv_tx(): 16k Sprache -> 8k moduliertes Audio)
+         -> freedv_audio_resampler_up (8k->48k) -> freedv_ssb_mod (Hilbert) -> freedv_ssb_resampler -> tx_gain
 ```
 
-- **Zapft `ptt_mute` direkt an**, bypasst die NF-Dynamik-Kette komplett — dieselbe Begründung wie bei M17.
-- **Geht NICHT durch `mode_selector`**, sondern hat wie M17 eine eigene, per `lock()/connect()/disconnect()` umgehängte Verbindung zu `tx_gain` (siehe M17-Abschnitt oben zur Begründung). Real auf Hardware verifiziert (ohne Leistungserhöhung): alle Stufen liefern durchgehend echte, variierende Modulation bis `tx_gain` — kein Wiederauftreten des M17-Deadlocks, wie erwartet (FreeDVs Frame-Größen sind mit 1440-2880 Samples pro `freedv_tx()`-Aufruf deutlich harmloser als M17s ~520-fache Downstream-Expansion).
-- **`FreeDVEncoder`** (eigener `gr.basic_block`) deklariert sein wahres Verhältnis explizit über `set_relative_rate()` — direkte Anwendung der M17/gr-m17-Lektion aus derselben Session (ein Block mit fester Frame-Quantisierung ohne deklarierte Rate riskiert Scheduler-Pufferverhandlungsprobleme).
-- **PTT ist bei FreeDV einfacher als bei M17**: `freedv_tx()` hat keine externe Start/Stop-Zustandsmaschine (kein SOT/EOT) — `key_ptt()`/`unkey_ptt()` schalten für FreeDV genau wie bei FM/SSB nur `ptt_mute` und die Dämpfung, kein EOT-Tail-Hold nötig.
-- **2020↔2020B-Wechsel** rebaut die `FreeDVEncoder`-Instanz (unterschiedliche Frame-Größen: 2020 = 2880→1440 Samples/Aufruf, 2020B = 1440→720), statt einen laufenden Block umzukonfigurieren — per `set_freedv_variant()`, gleiches `lock()/connect()/disconnect()`-Muster.
-- **Rufzeichen/Stationskennung: DEAKTIVIERT, echter Absturz-Bug.** `freedv_ctypes.py`s `FreeDVSession` sollte ursprünglich FreeDVs `reliable_text`-API (Low-Rate-Textkanal) für die Stationskennung nutzen — das Verknüpfen eines `reliable_text`-Objekts per `reliable_text_use_with_freedv()` bringt aber das auf diesem System installierte `libcodec2` (1.2.0-4) in einen kaputten Zustand: der NÄCHSTE `freedv_tx()`-Aufruf stürzt deterministisch mit SIGFPE (Ganzzahl-Division durch Null) tief in `freedv_comptx_2020()` ab — per `gdb`-Backtrace bestätigt, reproduzierbar mit rohem `ctypes` komplett unabhängig von dieser Wrapper-Klasse, unabhängig davon ob ein echter oder ein NULL-Callback übergeben wird, und unabhängig davon ob `set_string()` je aufgerufen wird — allein das Verknüpfen reicht. Verschwindet vollständig, sobald `reliable_text` gar nicht erst benutzt wird (`freedv_open`→`freedv_tx` allein läuft zuverlässig). Da die FreeDV-Zweige IMMER konstruiert werden (gleiches Muster wie FM/SSB/M17), crashte das die App bei JEDEM Start, nicht nur im FreeDV-Modus — gefunden und gefixt, nachdem die App genau deshalb beim Start abstürzte. `FreeDVSession.set_text()` ist jetzt ein No-Op, das GUI-Rufzeichenfeld dauerhaft deaktiviert (mit Tooltip) statt einfach nichts zu tun — bei einer echten Sendung müsste die Stationskennung bis auf Weiteres per Sprache vor/nach der FreeDV-Übertragung erfolgen. Echter Bug in der gepackten Bibliothek, nicht im Python-Code behebbar (kein Quellcode lokal zum Patchen, anders als bei gr-m17).
+Anders als M17 liefert `freedv_tx()` fertiges moduliertes AUDIO (kein rohes IQ) — genau das, was man ins Mikrofonsignal eines SSB-Transceivers einspeisen würde. Nutzt deshalb dieselbe Hilbert-basierte USB-Modulationstechnik wie normales Sprach-SSB, eigene dedizierte Blockinstanzen. Geht wie M17 nicht über `mode_selector`. PTT ist einfacher als bei M17 (kein SOT/EOT, sofortiges Muten reicht).
 
-**Verifiziert:** Offline-Blocktest (synthetischer Ton, beide Varianten, korrekt frame-ausgerichtete, variierende Modulation), Konstruktions-/Moduswechsel-Regressionstest über alle vier Modi (echte Hardware, keine PTT), stufenweise Sonde auf echter Hardware ohne Leistungserhöhung (durchgehender Datenfluss bis `tx_gain` bestätigt), realer Low-Power-PTT-Test (FreeDV 2020, `da2jh-test.wav`, Rufzeichen im Textkanal) — vom Betreiber am RTL-SDR als moduliertes FreeDV-Signal bestätigt.
+**Rufzeichen/Stationskennung ist dauerhaft deaktiviert** — ein bestätigter Bug in der gepackten `libcodec2` (1.2.0-4): das Verknüpfen von FreeDVs `reliable_text`-Textkanal bringt die Bibliothek in einen Zustand, in dem der nächste `freedv_tx()`-Aufruf deterministisch mit SIGFPE abstürzt (per `gdb` bestätigt, unabhängig von Callback/Aufruf von `set_string()`). `FreeDVSession.set_text()` ist ein No-Op, das GUI-Feld dauerhaft deaktiviert (mit Tooltip) — Stationskennung bis auf Weiteres per Sprache vor/nach der Übertragung.
 
-**Bekannte Einschränkung, vermutlich Hardware-bedingt (nicht in dieser Session behoben):** beim realen Sendetest war unterhalb der Trägerfrequenz ein breiteres, gespiegeltes Abbild des FreeDV-Signals sichtbar (echtes Seitenband-Leck, keine schmale Trägerlinie). Eine Offline-Messung der reinen digitalen Basisband-Kette (identische Blöcke wie in Produktion, echtes `da2jh-test.wav` durch den echten Codec) zeigt dagegen eine saubere USB/LSB-Unterdrückung von 65,5 dB im Band, in dem FreeDV tatsächlich Energie hat (300-2700 Hz, deckungsgleich mit dem bereits für normales Sprach-SSB gemessenen Wert) — die digitale Basisbandkette selbst ist also nicht die Ursache. Wahrscheinlichste Erklärung: IQ-Imbalance (Gain-/Phasenfehler) im analogen AD9361-DAC/Mischer-Pfad, die die Offline-Messung (rein digital, vor dem DAC) prinzipiell nicht erfassen kann — OFDM-Signale wie FreeDVs Modem sind dafür bekanntermaßen empfindlicher als einfache Sprach-SSB oder M17s FM-basiertes Signal (jede Subträger-Leckage spiegelt sich sichtbar über das ganze belegte Band, statt sich wie bei Sprache in einzelnen Formanten zu verstecken). Nicht weiter untersucht/behoben in dieser Session (bewusste Entscheidung — wäre ein eigenes, größeres Thema: IQ-Kalibrierung/Korrekturmatrix vor dem DAC). Betrifft vermutlich auch normale Sprach-SSB in geringerem Maß, nur dort bisher nicht auffällig geworden.
+**Verifiziert**: Offline-Blocktest, Konstruktions-/Moduswechsel-Regression, stufenweise Hardware-Sonde ohne Leistungserhöhung, realer Low-Power-Sendetest am RTL-SDR bestätigt.
+
+**Bekannte Einschränkung**: beim realen Sendetest war unterhalb der Trägerfrequenz ein breiteres, gespiegeltes Signalabbild sichtbar (echtes Seitenband-Leck). Die reine digitale Basisbandkette misst dagegen offline sauber (65,5dB USB/LSB-Unterdrückung im belegten Band) — vermutlich AD9361-IQ-Imbalance im analogen Pfad, die eine rein digitale Messung nicht erfasst. OFDM-Signale wie FreeDVs Modem sind dafür empfindlicher als Sprache/M17. Nicht weiter untersucht (siehe ToDo).
 
 ## Bekannte Einschränkungen
 
-- Datei-Wechsel zur Laufzeit ("Choose File") funktioniert, ist aber kein Live-Swap: `blocks.wavfile_source` hat in dieser GNU-Radio-Version (3.10.12) keine Laufzeit-Datei-Wechsel-API, deshalb baut `MainWindow._rebuild()` bei einer neuen Dateiauswahl den kompletten Flowgraph neu auf (derselbe Mechanismus wie beim Geräte-Reconnect) — kurze Unterbrechung, aber sicher (schaltet vorher automatisch ab).
-- Die Audiodatei loopt im Hintergrund unabhängig von PTT (nur per Mute gesteuert) — die Wiedergabeposition wird beim PTT-Druck nicht auf Anfang zurückgesetzt.
-- **`plutoplus.local` löst kurz nach einem Kabel-/Verbindungswechsel (z.B. Ethernet → USB) manchmal noch auf die ALTE IP auf.** Der Pluto meldet sich per mDNS auf jedem aktiven Interface mit dessen eigener IP (z.B. `192.168.178.x` über Ethernet, `192.168.2.1` über den USB-Gadget-Adapter) — nach einem Wechsel dauert es ein paar Sekunden, bis `avahi-daemon` das neue Interface bemerkt und die frische mDNS-Ankündigung empfängt; bis dahin kann der Hostname noch auf die nicht mehr erreichbare alte IP zeigen ("Connect" schlägt dann fehl, sieht wie ein Verbindungsfehler aus). Selbst behoben, sobald `avahi-daemon` nachzieht (typischerweise wenige Sekunden) — zur Kontrolle: `iio_info -u ip:plutoplus.local` oder in der GUI der Scan-Button. Bis dahin notfalls die IP direkt eintragen (siehe Geräte-Scan/-Auswahl unten).
-- **Der AD9361 teilt sich einen Takt zwischen RX und TX.** Läuft `pluto_rx` gleichzeitig mit `pluto_tx` (das übliche Testsetup) und ändert `pluto_rx` seine RX-Bandbreite, verstellt das nachweislich den tatsächlich von `pluto_tx` gesendeten Takt (nicht den RX-Empfang!) — gemessen als Tonhöhenverschiebung um exakt den Bandbreiten-Faktor. `pluto_rx` allein (ohne gleichzeitig laufendes `pluto_tx`) ist davon nicht betroffen — verifiziert mit einem echten, externen UKW-Sender als Referenz. Noch ungelöst, siehe ToDo unten.
-
-`pluto_rx`'s SSB-Demodulator ist ein komplexes Bandpassfilter (`firdes.complex_band_pass`, 300-2700 Hz oberhalb der abgestimmten Frequenz) direkt auf dem RX-IQ-Signal plus `complex_to_real` — das genaue Spiegelbild von `pluto_tx`'s Hilbert-basiertem USB-Modulator. Die RX-Bandbreite ("Zoom"-Stufen, aktuell 1/2,5 MHz) bleibt hinter den Kulissen immer auf eine feste Zwischenfrequenz-Rate (`DEMOD_IF_RATE = 50 kHz`) heruntergefiltert, damit der Demod-/Resampler-Zweig unabhängig von der gewählten Zoomstufe gleich bleibt — ein Bandbreitenwechsel baut daher den kompletten Flowgraph neu auf (GNU-Radio-Filter können ihr Dezimationsverhältnis nicht zur Laufzeit ändern). 5/10 MHz sind bewusst nicht als Presets verfügbar: über die aktuelle `ip:plutoplus.local`-Verbindung (IIOD-Netzwerkprotokoll über das USB-Gadget-Interface, nicht der native USB-Backend) kommt der Durchsatz messbar nur auf ~4,7-4,9 MSa/s mit Buffer-Overruns, was sich als abgehacktes/tonhöhen-verzerrtes Audio bemerkbar macht — siehe den Netzwerk/USB-ToDo-Punkt unten.
+- **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere Unterbrechung.
+- Audiodatei loopt unabhängig von PTT weiter, Position wird bei PTT nicht zurückgesetzt.
+- **`plutoplus.local` kann nach einem Verbindungswechsel (Ethernet↔USB) kurzzeitig noch auf die alte IP zeigen**, bis `avahi-daemon` nachzieht (paar Sekunden). Zur Kontrolle: `iio_info -u ip:plutoplus.local` oder der GUI-Scan-Button; notfalls IP direkt eintragen.
+- **Der AD9361 teilt sich einen Takt zwischen RX und TX**: läuft `pluto_rx` gleichzeitig mit `pluto_tx` und ändert seine RX-Bandbreite, verschiebt das messbar den tatsächlich gesendeten Takt. `pluto_rx` allein ist nicht betroffen. Ungelöst (siehe ToDo) — bis dahin: RX-Bandbreite nicht während aktiver Sendung ändern.
+- `pluto_rx`s SSB-Demod (komplexer Bandpass + `complex_to_real`) filtert immer auf eine feste Zwischenfrequenz (`DEMOD_IF_RATE=50kHz`) herunter — ein Bandbreitenwechsel baut daher den Flowgraph neu. 5/10 MHz sind nicht verfügbar: die aktuelle `ip:plutoplus.local`-Verbindung (IIOD-Netzwerkprotokoll) schafft nur ~4,7-4,9 MSa/s, darüber gibt es Overruns/abgehacktes Audio.
 
 ## Gerätewahl (Netzwerk/USB)
 
-Beide Apps haben in der GUI ein editierbares Dropdown ("Device (hostname or IP)") plus Scan- und Connect/Disconnect-Buttons. Standardmäßig wird beim Start automatisch mit `config.DEFAULT_URI` (`ip:plutoplus.local`) verbunden. Für einen zweiten Pluto im selben LAN, oder um explizit auf USB umzuschalten:
+Editierbares Dropdown ("Device") plus Scan- und Connect/Disconnect-Buttons; Start verbindet automatisch mit `config.DEFAULT_URI` (`ip:plutoplus.local`).
 
-**Nur `pluto_tx`:** ein zusätzliches "Device Type"-Dropdown (PlutoSDR / HackRF One, siehe [Geräte-Abstraktionsschicht](#geräte-abstraktionsschicht-plutosdr--hackrf-one) oben) davor, nur bei getrenntem Gerät editierbar. Je nach Auswahl ändert sich das Verbindungsfeld daneben (Pluto: Hostname/IP; HackRF: Seriennummer, leer = das einzige angeschlossene Gerät), ebenso Scan-Button, Frequenzbereich und die Pegel-Regler darunter.
+**Nur `pluto_tx`** hat zusätzlich ein "Device Type"-Dropdown (PlutoSDR/HackRF One), das Verbindungsfeld, Frequenzbereich und Pegel-Regler passend umschaltet (nur bei getrenntem Gerät editierbar; HackRF: Seriennummer, leer = einziges angeschlossenes Gerät).
 
-- **Scan** ruft `iio.scan_contexts()` auf (mDNS + USB + lokale IIO-Geräte, ~1s) und füllt das Dropdown mit allen gefundenen Contexts (der lokale `local:`-Eintrag, nie ein Pluto, wird herausgefiltert). Danach einfach den gewünschten Eintrag auswählen.
-- Alternativ manuell eintippen: bloßer Hostname oder IP (z.B. `192.168.1.50`) — wird automatisch zu `ip:192.168.1.50` — oder eine volle libiio-URI (`usb:1.5.5`, `ip:anderer-pluto.local`, ...), die unverändert übernommen wird.
+**Scan** ruft `iio.scan_contexts()` auf (mDNS+USB+lokal, ~1s) und füllt das Dropdown. Alternativ manuell: bloßer Hostname/IP (wird zu `ip:...`) oder volle libiio-URI (`usb:1.5.5`, ...).
 
-"Disconnect" fährt den Flowgraph sauber herunter (bei `pluto_tx` inklusive `force_safe_state()`, wie bei jedem anderen Shutdown-Pfad); "Connect" baut ihn mit der neuen Adresse neu auf und übernimmt dabei alle aktuellen GUI-Einstellungen (Frequenz, Modus, Gain, ...). Schlägt der Verbindungsaufbau fehl (falsche Adresse, Gerät nicht erreichbar), bleibt die App im getrennten Zustand mit einer Fehlermeldung im Statusfeld, statt abzustürzen.
-
-Der eigentliche Verbindungsaufbau (`iio.Context`) hat kein eingebautes Timeout und kann bei manchen falschen Adressen (erreichbar auf IP-Ebene, aber ohne antwortenden IIOD) mehrere Sekunden bis potenziell sehr lange blockieren — das fühlte sich wie ein Absturz an (Fenster reagiert nicht mehr). `pluto_tx/netutil.py`'s `probe_uri_with_timeout()` prüft die Erreichbarkeit deshalb zuerst in einem Hintergrund-Thread mit 5-Sekunden-Timeout, bevor der eigentliche (Qt-Widget-erzeugende) Flowgraph überhaupt aufgebaut wird — der muss synchron im GUI-Thread bleiben, sonst entstehen Qt-Thread-Verletzungen bei den Wasserfall-Widgets (ausprobiert und wieder verworfen, siehe Git-History).
+"Disconnect" fährt sauber herunter (bei `pluto_tx` inkl. `force_safe_state()`); "Connect" baut neu auf und übernimmt alle aktuellen Einstellungen. Schlägt der Aufbau fehl, bleibt die App im getrennten Zustand mit Fehlermeldung statt abzustürzen — der eigentliche Verbindungsversuch hat außerdem ein 5-Sekunden-Timeout (`netutil.py`), da `iio.Context` sonst potenziell sehr lange blockieren kann.
 
 ## ToDo für nächstes Mal
 
-- **HackRF-"Spike"-Beobachtung nicht abschließend geklärt.** Beim ersten realen HackRF-PTT-Test beschrieb der Betreiber einen kurzen sichtbaren Ausschlag, konnte ihn aber mangels präziser Zeitkorrelation zwischen Sendekommando und eigener Beobachtung nicht sicher "während der Sendung" (erwartet) von "außerhalb, bei angeblich stillem Gerät" (der eigentlich interessante Befund) unterscheiden — siehe [Geräte-Abstraktionsschicht](#geräte-abstraktionsschicht-plutosdr--hackrf-one) oben. Für eine echte Klärung: eine feste Aufnahme/Wasserfall-Historie (nicht nur Live-Beobachtung) parallel zu einem PTT-Zyklus mit klaren, geloggten Zeitstempeln, dann rückwirkend genau in das Zeitfenster außerhalb `key_ptt()`/`unkey_ptt()` hineinzoomen.
-- **HackRFDevice hat keine von GNU Radio unabhängige Sicherheitsschicht** (anders als `PlutoSafety`, die auch nach einem Absturz des GNU-Radio-Laufzeitsystems noch funktioniert) — bewusste Design-Entscheidung dieser Session (die aktuell installierten `gnuradio.soapy`-Bindings bieten dafür keine Grundlage, kein `activate()`/`deactivate()`). Falls das je zum echten Problem wird: eine rohe SoapySDR-Stream-Deaktivierung direkt über `python3-soapysdr` (unabhängig vom laufenden GNU-Radio-Block) wäre der nächste Ansatzpunkt, analog zu `PlutoSafety`s rohem `python3-libiio`-Pfad.
-- **RADE V1 als weiterer Digitalsprache-Modus in `pluto_tx` (zurückgestellt, noch nicht begonnen).** Nutzerwunsch, aber bewusst noch nicht umgesetzt — deutlich größerer Umfang als FreeDV, braucht erst eine echte Recherche-/Planungsphase wie bei M17/FreeDV. Bereits recherchiert (diese Session, nicht weiter vertieft):
-  - **Eigenständiges Projekt**, nicht Teil von `libcodec2` — [`freedv/rade_c`](https://github.com/freedv/rade_c) (C-Port von [`drowe67/radae`](https://github.com/drowe67/radae)), kein apt-Paket, reiner From-Source-Build. Baut dabei einen eigenen, gepatchten Opus-Fork mit FARGAN/LPCNet-Unterstützung selbst mit (`cmake/BuildOpus.cmake`) — vermutlich ähnliches Muster wie `install-m17.sh` (gepinnter Commit, lokal nach `$HOME/.local`), aber mit mehr Build-Aufwand.
-  - **Architektonisch anders als FreeDV**: `rade_tx()` (`rade_api.h`) liefert direkt komplexe IQ-Samples (`RADE_COMP`, float32, 8kHz) — kein audio-domänen-taugliches SSB-Signal wie bei FreeDV. Kann also NICHT die bestehende Hilbert/SSB-Kette wiederverwenden — bräuchte einen eigenen, direkten IQ-Pfad zu `tx_gain`, ähnlich M17s dediziertem Anschluss (aber ohne eigene FM-Modulation/RRC-Formfilter nötig, da die OFDM-Modulation schon in `rade_tx()`s IQ-Ausgabe steckt).
-  - **Zweistufige Pipeline**: `rade_tx()` nimmt FARGAN-Feature-Vektoren entgegen, nicht direkt Sprachaudio — die Sprache-zu-Feature-Umwandlung passiert separat (normalerweise über das `lpcnet_demo`-Tool bzw. die zugrundeliegende Opus/FARGAN-API). Bräuchte also ctypes-Bindings für mindestens zwei APIs, nicht nur eine (`rade_api.h` reicht allein nicht).
-  - **RADE V1 vs. V2**: V1 ist die stabile, für echten Sendebetrieb empfohlene Version (`RADE_MODE_V2`-Flag standardmäßig aus) — das offizielle `rade_c`-README warnt explizit, dass V2 noch in aktiver Entwicklung ist und "on-air use is not recommended". Nutzerwunsch war ausdrücklich V1, passt zu dieser Empfehlung.
-  - **Eigener Rufzeichen-/Textkanal existiert in V1** (`rade_tx_set_eoo_bits()`/`rade_tx_eoo()`, End-of-Over-Frame) — angesichts des gerade gefundenen `reliable_text`-Absturzes bei FreeDV besondere Vorsicht/gründliches Testen angebracht, bevor darauf vertraut wird.
-  - Volle API-Doku bereits gefunden: [`RadeAPIUse.md`](https://github.com/freedv/rade_c/blob/main/RadeAPIUse.md), [`rade_api.h`](https://github.com/freedv/rade_c/blob/main/src/rade_api.h).
-- **FreeDV `reliable_text` (Rufzeichen-Textkanal) beim gepackten libcodec2 (1.2.0-4) melden/reparieren.** Aktuell dauerhaft deaktiviert, siehe [FreeDV 2020/2020B Digitalsprache (TX)](#freedv-20202020b-digitalsprache-tx) oben — echter, per `gdb` bestätigter SIGFPE-Absturz in `freedv_comptx_2020()`, sobald `reliable_text_use_with_freedv()` aufgerufen wird. Mögliche nächste Schritte: den Bug bei drowe67/codec2 auf GitHub melden (mit dem `gdb`-Backtrace aus dieser Session), oder eine neuere libcodec2-Version testen (aus einem PPA oder from-source gebaut, ähnlich `install-m17.sh`s Muster) und prüfen, ob der Fehler dort behoben ist.
-- **Vermutete AD9361-IQ-Imbalance untersuchen/kalibrieren.** Beim realen FreeDV-TX-Test war ein breiteres, gespiegeltes Abbild des Signals unterhalb der Trägerfrequenz sichtbar (echtes Seitenband-Leck), obwohl die reine digitale Basisbandkette offline sauber gemessen wurde (65,5 dB USB/LSB-Unterdrückung im tatsächlich belegten 300-2700 Hz-Band, identisch zum bereits für normales Sprach-SSB gemessenen Wert) — siehe [FreeDV 2020/2020B Digitalsprache (TX)](#freedv-20202020b-digitalsprache-tx) oben. Verdacht: IQ-Imbalance (Gain-/Phasenfehler) im analogen AD9361-DAC/Mischer-Pfad, die eine rein digitale Messung vor dem DAC prinzipiell nicht erfassen kann — OFDM-Signale wie FreeDVs Modem sind dafür bekanntermaßen empfindlicher als Sprache oder M17s FM-basiertes Signal. Nicht weiter untersucht in dieser Session (bewusste Entscheidung). Nötig für eine echte Untersuchung: ein realer Hardware-Loopback-Test (z.B. RTL-SDR), um die tatsächliche Unterdrückung in dB zu quantifizieren, bevor über eine Korrektur (Kalibrierungsroutine, Korrekturmatrix vor dem DAC) entschieden wird. Betrifft vermutlich auch normale Sprach-SSB in geringerem Maß.
-- **Geteilter AD9361-Takt zwischen `pluto_rx` und `pluto_tx` beheben.** Ein erster Versuch (`pluto_tx.key_ptt()` ruft vor jedem Senden `pluto_sink.set_samplerate()` erneut auf, um den Takt "zurückzuholen") hat das Problem in der Praxis NICHT gelöst — vermutlich weil das Zurückholen des Takts durch `pluto_tx` genau umgekehrt die aktuell in `pluto_rx` eingestellte Bandbreite wieder verstellt, sobald als nächstes `pluto_rx` etwas mit dem Takt macht (z.B. beim nächsten `set_frequency`/Retune, oder generell weil beide Apps denselben Takt für sich beanspruchen). Der Fix wurde deshalb wieder entfernt (siehe Git-History). Nötig ist vermutlich eine echte Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+ (Tezuka-Firmware) — z.B. ob/wie sich RX- und TX-Sample-Clock über libiio wirklich unabhängig konfigurieren lassen (eigene BBPLL-Teiler pro Richtung), oder ob das auf dieser Firmware/diesem Board grundsätzlich nicht getrennt werden kann. Bis dahin: `pluto_rx`-Bandbreite nicht ändern, während `pluto_tx` aktiv sendet.
-- **Nativer USB-Backend nicht getestet** — der Geräte-Scan (siehe oben) findet auch USB-Contexts, aber ob eine echte USB-Verbindung (`usb:...`) durchgängig funktioniert, ist ungetestet — inklusive ob dafür auf einem frischen Rechner erst noch udev-Regeln für Nicht-root-Zugriff auf das USB-Gerät nötig sind (`install.sh` richtet das bewusst nicht ein). Der native USB-Backend könnte außerdem den RX-Durchsatz über die aktuell gemessenen ~4,7-4,9 MSa/s (IIOD-Netzwerkprotokoll) hinaus verbessern und 5/10-MHz-RX-Bandbreiten wieder nutzbar machen.
-- **GUI besser/cooler aussehen lassen** — aktuell rein funktional (Standard-Qt-Widgets). Eventuell Inspiration von anderer SDR-Software (SDR++, SDRangel) oder modernen Ham-Radio-Interfaces holen.
-- **`pluto_advanced_rx`: mehrstufige IF-Dezimation für 15/20-MHz-Presets.** Aktuell dezimiert `flowgraph.py`'s IF-Stufe in einem einzigen `rational_resampler_ccf`-Schritt von der RX-Bandbreite direkt auf `DEMOD_IF_RATE` (50 kHz). Das funktioniert bis 10 MHz (Dezimation 200:1), aber bei 15/20 MHz (400:1) wird der automatisch entworfene Filter >13.000 Taps lang und der GNU-Radio-Scheduler kann den Block nicht mehr beliefern (`ninput_items_required` > `max_possible_items_available`) — Ergebnis: keine Daten, nicht nur Overruns. Größere Puffer (`set_max_output_buffer`) alleine beheben das nachweislich nicht (getestet). Lösung wäre eine kaskadierte Dezimation (z.B. mehrere `rational_resampler_ccf`-Stufen mit je kleinerem Verhältnis statt einer einzigen mit riesigem Filter) — Standardtechnik bei großen Dezimationsverhältnissen, aber echter Umbau, kein Config-Change. Selbst mit funktionierendem Filter bliebe bei 15/20 MHz vermutlich trotzdem die Netzwerk-Durchsatzgrenze (~4,7-4,9 MSa/s) ein Problem, siehe den USB-Backend-ToDo-Punkt oben.
-- **M17-Demodulation in `pluto_advanced_rx`.** TX ist fertig (siehe [M17 Digitalsprache (TX)](#m17-digitalsprache-tx) oben), RX war ursprünglich mitgeplant, aber bewusst noch nicht umgesetzt. Wichtig für den Einstieg: `m17.symbol_sync` ist im gr-m17-Quellcode vorhanden, aber vom Maintainer bewusst aus dem Build entfernt (`lib/CMakeLists.txt`/`python/m17/bindings/CMakeLists.txt`, auskommentiert, Commit-Message "hide the symbol sync block for now") — RX muss stattdessen GNU Radios eigenen `digital.symbol_sync_ff` nutzen, genau wie gr-m17s eigenes Referenzbeispiel das schon macht. `m17.m17_decoder` exponiert `set_msg_handler` nicht direkt nach Python; zum Empfang seiner Message-Ports (z.B. Rufzeichen/Payload) ist ein kleiner eigener `gr.basic_block` mit registriertem Message-Port nötig (`msg_connect(decoder, "fields", eigener_sink, "in")`), analog zum in dieser Session gebauten (nicht committeten) Test-Sink.
+- **HackRF-„Spike"-Beobachtung nicht abschließend geklärt**: ein kurzer Ausschlag beim ersten realen PTT-Test konnte mangels präziser Zeitkorrelation nicht sicher als "während der Sendung" (erwartet) oder "im Ruhezustand" (der interessante Fall) eingeordnet werden. Für eine echte Klärung: Aufnahme mit geloggten Zeitstempeln statt Live-Beobachtung.
+- **HackRFDevice hat keine von GNU Radio unabhängige Sicherheitsschicht** wie `PlutoSafety` — bewusste Entscheidung, da die aktuellen `gnuradio.soapy`-Bindings dafür keine Grundlage bieten. Falls nötig: roher SoapySDR-Zugriff über `python3-soapysdr`, unabhängig vom laufenden GNU-Radio-Block.
+- **RADE V1** als weiterer Digitalsprache-Modus (TX in `pluto_tx`, RX in `pluto_advanced_rx`) ist geplant, siehe `~/.claude/plans/` bzw. das nächste Arbeitspaket. Machbarkeit bereits verifiziert: `rade_c` ([freedv/rade_c](https://github.com/freedv/rade_c)) lässt sich bauen, `librade.so` exportiert die volle `rade_api.h`; die fehlende Sprache↔Feature-Konvertierung wird über einen `lpcnet_demo`-Subprozess (bestätigt streamfähig) gelöst. RADE liefert wie M17 rohes IQ, kein audio-injizierbares Signal wie FreeDV.
+- **FreeDV `reliable_text` beim gepackten libcodec2 (1.2.0-4) melden/reparieren** — echter, per `gdb` bestätigter SIGFPE-Absturz (siehe oben). Nächste Schritte: Bug bei drowe67/codec2 melden, oder neuere libcodec2-Version testen.
+- **Vermutete AD9361-IQ-Imbalance untersuchen/kalibrieren** (siehe FreeDV-Abschnitt oben) — braucht einen realen Hardware-Loopback-Test zur Quantifizierung, bevor über eine Korrektur entschieden wird.
+- **Geteilter AD9361-Takt zwischen `pluto_rx`/`pluto_tx` beheben** — ein erster Versuch (Takt vor jedem Senden zurückholen) hat das Problem nicht gelöst und wurde wieder entfernt. Nötig: Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+.
+- **Nativer USB-Backend ungetestet** — könnte den RX-Durchsatz über die aktuellen ~4,7-4,9 MSa/s hinaus verbessern; ggf. eigene udev-Regeln nötig.
+- **GUI besser/cooler aussehen lassen** — aktuell rein funktional (Standard-Qt-Widgets).
+- **`pluto_advanced_rx`: mehrstufige IF-Dezimation für 15/20-MHz-Presets** — aktuell ein einzelner `rational_resampler_ccf`-Schritt, der bei diesem Verhältnis einen zu langen Filter für den Scheduler erzeugt. Lösung: kaskadierte Dezimation statt einer Stufe.
+- **M17-Demodulation in `pluto_advanced_rx`** — TX ist fertig, RX noch offen. `m17.symbol_sync` ist im gr-m17-Quellcode vorhanden aber nicht gebaut; RX müsste `digital.symbol_sync_ff` nutzen. `m17.m17_decoder` braucht einen eigenen `gr.basic_block` als Message-Port-Empfänger für Rufzeichen/Payload.
