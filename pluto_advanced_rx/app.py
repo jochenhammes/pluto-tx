@@ -39,13 +39,8 @@ def main(argv=None):
     from .gui import run_gui
 
     demod_mode = AdvancedRxFlowgraph.MODE_SSB if args.mode == "ssb" else AdvancedRxFlowgraph.MODE_FM
-
-    def build_tb():
-        return AdvancedRxFlowgraph(uri=args.uri, frequency=args.freq, sample_rate=args.bandwidth,
-                                    gain_mode=args.gain_mode, manual_gain_db=args.gain,
-                                    demod_mode=demod_mode)
-
-    return run_gui(build_tb) or 0
+    return run_gui(args.uri, frequency_hz=args.freq, demod_mode=demod_mode, sample_rate=args.bandwidth,
+                   gain_mode=args.gain_mode, manual_gain_db=args.gain) or 0
 
 
 if __name__ == "__main__":

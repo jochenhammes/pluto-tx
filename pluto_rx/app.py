@@ -38,13 +38,8 @@ def main(argv=None):
     from .gui import run_gui
 
     demod_mode = PlutoRxFlowgraph.MODE_SSB if args.mode == "ssb" else PlutoRxFlowgraph.MODE_FM
-
-    def build_tb():
-        return PlutoRxFlowgraph(uri=args.uri, frequency=args.freq, sample_rate=args.bandwidth,
-                                 gain_mode=args.gain_mode, manual_gain_db=args.gain,
-                                 demod_mode=demod_mode, enable_waterfall=True)
-
-    return run_gui(build_tb) or 0
+    return run_gui(args.uri, frequency_hz=args.freq, demod_mode=demod_mode, sample_rate=args.bandwidth,
+                   gain_mode=args.gain_mode, manual_gain_db=args.gain) or 0
 
 
 if __name__ == "__main__":

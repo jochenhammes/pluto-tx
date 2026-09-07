@@ -10,19 +10,32 @@ import sys
 from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
-from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, _gr_atten
+from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, _gr_atten, _default_wav_path
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 from .netutil import probe_uri_with_timeout, scan_devices_with_timeout
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, tb: PlutoTxFlowgraph):
+    def __init__(self, uri, frequency_hz=config.DEFAULT_FREQUENCY,
+                 atten_ceiling_db=config.DEFAULT_ATTEN_CEILING, mode=PlutoTxFlowgraph.MODE_FM,
+                 source=PlutoTxFlowgraph.SRC_MIC, wav_path=None, m17_src_callsign="",
+                 m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
+                 freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign=""):
+        """Builds the window in a disconnected/default state using the given
+        initial settings (mirrors PlutoTxFlowgraph's own constructor
+        defaults), then immediately attempts one real connection via
+        _rebuild() -- the exact same bounded-timeout, exception-safe path
+        already used for every later reconnect. If the device isn't
+        reachable at startup, __init__ finishes with the window in exactly
+        the state a manual Disconnect leaves it in (self.tb is None,
+        controls disabled, status message explaining why) instead of
+        crashing or hanging the whole app before a window ever appears."""
         super().__init__()
-        self.tb = tb
+        self.tb = None
         self.setWindowTitle("PlutoSDR TX")
         self._armed = True  # False after emergency stop, until re-armed
-        self._atten_ceiling_db = tb.atten_ceiling_db  # fixed for the session, carried across reconnects
-        self._wav_path = tb.wav_path  # carried across reconnects; updated on a file pick
+        self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
+        self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -34,7 +47,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
         self.uri_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
-        self.uri_combo.addItem(tb.uri)
+        self.uri_combo.addItem(uri)
         self.uri_combo.setEnabled(False)  # editable only while disconnected
         self.uri_combo.setToolTip(
             "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
@@ -58,7 +71,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_spin.setDecimals(4)
         self.freq_spin.setRange(47.0, 6000.0)
         self.freq_spin.setSingleStep(0.001)
-        self.freq_spin.setValue(tb.nominal_freq_hz / 1e6)
+        self.freq_spin.setValue(frequency_hz / 1e6)
         self.freq_spin.valueChanged.connect(self._on_freq_changed)
         freq_font = self.freq_spin.font()
         freq_font.setPointSize(freq_font.pointSize() + 6)
@@ -111,7 +124,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # M17 passed in directly), and connecting the signal first would
         # fire _on_mode_changed() -> tb.set_mode() before tb.start() has
         # run, which raises (blocks.selector's ninputs isn't known yet).
-        initial_idx = self.mode_combo.findData(tb.mode)
+        initial_idx = self.mode_combo.findData(mode)
         if initial_idx >= 0:
             self.mode_combo.setCurrentIndex(initial_idx)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -121,10 +134,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.source_combo = QtWidgets.QComboBox()
         self.source_combo.addItem("Microphone", PlutoTxFlowgraph.SRC_MIC)
         self.source_combo.addItem("Audio File", PlutoTxFlowgraph.SRC_FILE)
+        initial_source_idx = self.source_combo.findData(source)
+        if initial_source_idx >= 0:
+            self.source_combo.setCurrentIndex(initial_source_idx)
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         mode_row.addWidget(self.source_combo)
 
-        self.file_button = QtWidgets.QPushButton(self._file_button_text(tb.wav_path))
+        self.file_button = QtWidgets.QPushButton(self._file_button_text(self._wav_path))
         self.file_button.setEnabled(False)
         self.file_button.clicked.connect(self._on_pick_file)
         mode_row.addWidget(self.file_button)
@@ -137,13 +153,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # QLayout itself has no setVisible() -- only widgets do.
         m17_row = QtWidgets.QHBoxLayout()
         m17_row.addWidget(QtWidgets.QLabel("M17 Src Callsign:"))
-        self.m17_src_edit = QtWidgets.QLineEdit(tb.m17_src_callsign)
+        self.m17_src_edit = QtWidgets.QLineEdit(m17_src_callsign)
         self.m17_src_edit.setMaxLength(config.M17_CALLSIGN_MAX_LEN)
         self.m17_src_edit.setPlaceholderText("e.g. DA2JH")
         self.m17_src_edit.textChanged.connect(self._on_m17_src_callsign_changed)
         m17_row.addWidget(self.m17_src_edit)
         m17_row.addWidget(QtWidgets.QLabel("Dst Callsign:"))
-        self.m17_dst_edit = QtWidgets.QLineEdit(tb.m17_dst_callsign)
+        self.m17_dst_edit = QtWidgets.QLineEdit(m17_dst_callsign)
         self.m17_dst_edit.setMaxLength(config.M17_CALLSIGN_MAX_LEN)
         self.m17_dst_edit.textChanged.connect(self._on_m17_dst_callsign_changed)
         m17_row.addWidget(self.m17_dst_edit)
@@ -172,13 +188,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freedv_variant_combo = QtWidgets.QComboBox()
         self.freedv_variant_combo.addItem("2020", FREEDV_MODE_2020)
         self.freedv_variant_combo.addItem("2020B", FREEDV_MODE_2020B)
-        initial_variant_idx = self.freedv_variant_combo.findData(tb.freedv_variant)
+        initial_variant_idx = self.freedv_variant_combo.findData(freedv_variant)
         if initial_variant_idx >= 0:
             self.freedv_variant_combo.setCurrentIndex(initial_variant_idx)
         self.freedv_variant_combo.currentIndexChanged.connect(self._on_freedv_variant_changed)
         freedv_row.addWidget(self.freedv_variant_combo)
         freedv_row.addWidget(QtWidgets.QLabel("Callsign:"))
-        self.freedv_callsign_edit = QtWidgets.QLineEdit(tb.freedv_callsign)
+        self.freedv_callsign_edit = QtWidgets.QLineEdit(freedv_callsign)
         self.freedv_callsign_edit.setMaxLength(config.FREEDV_CALLSIGN_MAX_LEN)
         self.freedv_callsign_edit.setPlaceholderText("disabled -- libcodec2 bug, see README")
         self.freedv_callsign_edit.setToolTip(
@@ -206,7 +222,7 @@ class MainWindow(QtWidgets.QMainWindow):
         power_row.addWidget(self.power_label)
         power_row.addWidget(self.unlock_full_power)
         layout.addLayout(power_row)
-        self.power_slider.setValue(int(round(tb.target_atten_db)))
+        self.power_slider.setValue(int(round(atten_ceiling_db)))
 
         # --- NF (audio) gain -------------------------------------------
         nf_row = QtWidgets.QHBoxLayout()
@@ -330,7 +346,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # a device reconnect, which rebuilds the flowgraph) -----------------
         self.waterfall_container = QtWidgets.QVBoxLayout()
         layout.addLayout(self.waterfall_container)
-        self._embed_waterfall(tb)
+        self._embed_waterfall(None)
 
         # --- Lifecycle: periodic tick doubles as (a) Ctrl-C responsiveness
         # for Qt's event loop and (b) a live hardware-state readback, so the
@@ -339,6 +355,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(self._tick)
         self._timer.start(500)
+
+        # Everything above builds the window with widgets in their normal
+        # (enabled, "Disconnect"-labelled) construction defaults, which only
+        # makes sense once actually connected. Put it into the disconnected
+        # default presentation first (redundant with what _rebuild()'s own
+        # failure branches already do, but matches pluto_rx/
+        # pluto_advanced_rx's identical setup and doesn't rely on that),
+        # then attempt the actual initial connection through the exact same
+        # bounded-timeout, exception-safe path a later Connect/reconnect
+        # uses. If the device isn't reachable, these defaults are what's
+        # left on screen, with an explanatory status message, instead of
+        # raising -- so the app always ends up with a window on screen,
+        # connected or not.
+        self._set_connected_controls_enabled(False)
+        self.connect_button.setText("Connect")
+        self.uri_combo.setEnabled(True)
+        self._rebuild(uri, self._wav_path)
 
     # --- helpers ------------------------------------------------------
     @staticmethod
@@ -431,45 +464,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_indicator.setStyleSheet("background-color: #e67e22; color: white; font-size: 18pt; font-weight: bold;")
 
     # --- slots ------------------------------------------------------
+    # self.tb is None while disconnected (including the brief window during
+    # __init__ before the initial _rebuild() attempt resolves) -- normally
+    # that's harmless because these controls are also disabled then, and a
+    # disabled widget can't fire a signal from user interaction, but a
+    # *programmatic* setValue()/setChecked() during initial construction
+    # still fires it. So every handler that touches self.tb guards it, same
+    # as the M17/FreeDV callsign handlers already did before this.
     def _on_freq_changed(self, mhz):
-        self.tb.set_frequency(mhz * 1e6)
+        if self.tb is not None:
+            self.tb.set_frequency(mhz * 1e6)
 
     def _on_fine_changed(self, value):
-        self.tb.set_fine_offset(float(value))
+        if self.tb is not None:
+            self.tb.set_fine_offset(float(value))
         self.fine_label.setText(f"{value} Hz")
 
     def _on_nf_gain_changed(self, value):
-        gain = value / 100.0
-        self.tb.set_nf_gain(gain)
+        if self.tb is not None:
+            self.tb.set_nf_gain(value / 100.0)
         self.nf_gain_label.setText(f"{value} %")
 
     def _on_gate_enabled_changed(self, checked):
-        self.tb.set_gate_enabled(checked)
+        if self.tb is not None:
+            self.tb.set_gate_enabled(checked)
         self.gate_threshold_slider.setEnabled(checked and self.gate_enable.isEnabled())
 
     def _on_gate_threshold_changed(self, value):
-        self.tb.set_gate_threshold(float(value))
+        if self.tb is not None:
+            self.tb.set_gate_threshold(float(value))
         self.gate_threshold_label.setText(f"{value} dB")
 
     def _on_compressor_enabled_changed(self, checked):
-        self.tb.set_compressor_enabled(checked)
+        if self.tb is not None:
+            self.tb.set_compressor_enabled(checked)
         enabled = checked and self.compressor_enable.isEnabled()
         self.compressor_threshold_slider.setEnabled(enabled)
         self.compressor_ratio_slider.setEnabled(enabled)
 
     def _on_compressor_threshold_changed(self, value):
-        self.tb.set_compressor_threshold(float(value))
+        if self.tb is not None:
+            self.tb.set_compressor_threshold(float(value))
         self.compressor_threshold_label.setText(f"{value} dB")
 
     def _on_compressor_ratio_changed(self, value):
-        self.tb.set_compressor_ratio(float(value))
+        if self.tb is not None:
+            self.tb.set_compressor_ratio(float(value))
         self.compressor_ratio_label.setText(f"{value}:1")
 
     def _on_limiter_enabled_changed(self, checked):
-        self.tb.set_limiter_enabled(checked)
+        if self.tb is not None:
+            self.tb.set_limiter_enabled(checked)
 
     def _on_mode_changed(self, idx):
-        self.tb.set_mode(self.mode_combo.currentData())
+        if self.tb is not None:
+            self.tb.set_mode(self.mode_combo.currentData())
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
 
@@ -491,7 +540,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_source_changed(self, idx):
         source = self.source_combo.currentData()
-        self.tb.set_source(source)
+        if self.tb is not None:
+            self.tb.set_source(source)
         self.file_button.setEnabled(source == PlutoTxFlowgraph.SRC_FILE)
 
     def _on_pick_file(self):
@@ -506,7 +556,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild(self.tb.uri, path)
 
     def _on_power_changed(self, value):
-        self.tb.set_target_power(float(value))
+        if self.tb is not None:
+            self.tb.set_target_power(float(value))
         self.power_label.setText(f"{value} dB")
 
     def _on_unlock_changed(self, _state):
@@ -519,7 +570,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Rewire the PTT button between click-toggle and press-and-hold
         semantics. Switching modes while keyed would leave the RF on with no
         way to release it under the new mode's signals -- always unkey first."""
-        if self.tb.keyed:
+        if self.tb is not None and self.tb.keyed:
             self._release_ptt()
 
         for signal in (self.ptt_button.toggled, self.ptt_button.pressed, self.ptt_button.released):
@@ -548,7 +599,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ptt_button.blockSignals(False)
 
     def _on_ptt_toggled(self, checked):
-        if checked and not self._armed:
+        if checked and (not self._armed or self.tb is None):
             self.ptt_button.blockSignals(True)
             self.ptt_button.setChecked(False)
             self.ptt_button.blockSignals(False)
@@ -562,13 +613,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._release_ptt()
 
     def _on_ptt_pressed(self):
-        if not self._armed:
+        if not self._armed or self.tb is None:
             return
         self.tb.key_ptt()
         self._set_indicator_on_air()
 
     def _on_ptt_released(self):
-        if not self.tb.keyed:
+        if self.tb is None or not self.tb.keyed:
             return
         self._release_ptt()
 
@@ -581,6 +632,8 @@ class MainWindow(QtWidgets.QMainWindow):
         back to READY, and a bounded timer finishes the job. E-STOP is
         NOT routed through here -- it calls tb.unkey_ptt() + force_safe_state()
         directly, an unconditional override of any pending M17 tail."""
+        if self.tb is None:
+            return
         self.tb.unkey_ptt()
         if self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17:
             self._set_indicator_ending()
@@ -662,7 +715,8 @@ class MainWindow(QtWidgets.QMainWindow):
         TX chain, then build and start a new one" sequence; a stray
         reference to the old flowgraph here would leak its AD9361 buffer
         claim and break the next connect with 'Unable to create buffer'
-        (see run_gui()'s 'del tb' fix for the same underlying issue)."""
+        (the same class of bug run_gui() avoids by never holding a second
+        reference to self.tb of its own)."""
         if self.tb is not None:
             self.tb.shutdown_safe()
             self.tb = None
@@ -734,7 +788,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._style_estop_button(locked=True)
             self.status_label.setText("E-STOP triggered: attenuation at minimum, LO powered down.")
         else:
-            self.tb.safety.prepare_for_start()
+            # Deliberately NOT prepare_for_start() -- that also powers the LO
+            # back up, which would violate the PTT<->LO-powerdown hard tie
+            # (LO stays off until the operator actually keys PTT again; see
+            # flowgraph.py's key_ptt()/unkey_ptt()). Just re-confirm minimum
+            # attenuation on both the raw-iio and GR-sink paths.
+            self.tb.safety.force_min_attenuation()
             self.tb.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
             self._armed = True
             self.ptt_button.setEnabled(True)
@@ -763,20 +822,21 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
 
-def run_gui(build_tb):
-    """build_tb: callable that constructs and returns a PlutoTxFlowgraph.
-    Must be called AFTER QApplication exists -- the flowgraph's optional
-    waterfall sink is a real Qt widget."""
+def run_gui(uri, frequency_hz=config.DEFAULT_FREQUENCY, atten_ceiling_db=config.DEFAULT_ATTEN_CEILING,
+            mode=PlutoTxFlowgraph.MODE_FM):
+    """Builds and shows the main window, which itself attempts the initial
+    connection to `uri` (see MainWindow.__init__/its _rebuild() call) --
+    unlike the old build-tb-first shape, this never raises just because the
+    device isn't reachable at startup: the window still comes up, showing
+    the same disconnected state a manual Disconnect leaves it in, with a
+    status message and a Connect button to retry. self.tb (only ever set by
+    MainWindow itself) stays the single reference to the running flowgraph,
+    so there's no stray local reference here to leak an AD9361 buffer claim
+    (the "Unable to create buffer: -16" bug this project hit before when a
+    second reference existed)."""
     qapp = QtWidgets.QApplication(sys.argv)
-    tb = build_tb()
-    window = MainWindow(tb)
+    window = MainWindow(uri, frequency_hz=frequency_hz, atten_ceiling_db=atten_ceiling_db, mode=mode)
     window.show()
-    tb.start()
-    del tb  # window.tb is now the only reference -- see MainWindow._disconnect's
-    # note: a stray reference here would keep the old flowgraph (and its
-    # AD9361 buffer claim) alive forever, since Python never garbage-collects
-    # it, breaking every reconnect after the first with "Unable to create
-    # buffer: -16" (EBUSY). Verified: this reproduced the exact bug.
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down safely...")

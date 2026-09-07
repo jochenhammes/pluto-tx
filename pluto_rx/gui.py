@@ -16,9 +16,18 @@ from .flowgraph import PlutoRxFlowgraph
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, tb: PlutoRxFlowgraph):
+    def __init__(self, uri, frequency_hz=config.DEFAULT_FREQUENCY, demod_mode=PlutoRxFlowgraph.MODE_FM,
+                 sample_rate=config.DEFAULT_RX_BANDWIDTH, gain_mode=config.DEFAULT_GAIN_MODE,
+                 manual_gain_db=config.DEFAULT_MANUAL_GAIN_DB):
+        """Builds the window in a disconnected default state (self.tb is
+        None), then immediately attempts one real connection via _connect()
+        -- the exact same bounded-timeout, exception-safe path already used
+        for every later reconnect. Every _on_*_changed slot below already
+        guards self.tb is None (needed regardless, for the normal Disconnect
+        state), so it's also already safe to fire during this initial
+        widget construction if it fires early -- no crash risk either way."""
         super().__init__()
-        self.tb = tb
+        self.tb = None
         self.setWindowTitle("PlutoSDR RX")
 
         central = QtWidgets.QWidget()
@@ -31,7 +40,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
         self.uri_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
-        self.uri_combo.addItem(tb.uri)
+        self.uri_combo.addItem(uri)
         self.uri_combo.setEnabled(False)  # editable only while disconnected
         self.uri_combo.setToolTip(
             "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
@@ -55,7 +64,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_spin.setDecimals(4)
         self.freq_spin.setRange(70.0, 6000.0)
         self.freq_spin.setSingleStep(0.001)
-        self.freq_spin.setValue(tb.nominal_freq_hz / 1e6)
+        self.freq_spin.setValue(frequency_hz / 1e6)
         self.freq_spin.valueChanged.connect(self._on_freq_changed)
         freq_font = self.freq_spin.font()
         freq_font.setPointSize(freq_font.pointSize() + 6)
@@ -79,6 +88,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demod_combo = QtWidgets.QComboBox()
         self.demod_combo.addItem("FM", PlutoRxFlowgraph.MODE_FM)
         self.demod_combo.addItem("SSB (USB)", PlutoRxFlowgraph.MODE_SSB)
+        initial_demod_idx = self.demod_combo.findData(demod_mode)
+        if initial_demod_idx >= 0:
+            self.demod_combo.setCurrentIndex(initial_demod_idx)
         self.demod_combo.currentIndexChanged.connect(self._on_demod_changed)
         demod_row.addWidget(self.demod_combo)
 
@@ -86,7 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gain_mode_combo = QtWidgets.QComboBox()
         for m in config.GAIN_MODES:
             self.gain_mode_combo.addItem(m, m)
-        self.gain_mode_combo.setCurrentText(config.DEFAULT_GAIN_MODE)
+        self.gain_mode_combo.setCurrentText(gain_mode)
         self.gain_mode_combo.currentIndexChanged.connect(self._on_gain_mode_changed)
         demod_row.addWidget(self.gain_mode_combo)
         layout.addLayout(demod_row)
@@ -97,11 +109,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gain_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         lo, hi = config.MANUAL_GAIN_RANGE_DB
         self.gain_slider.setRange(int(lo), int(hi))
-        self.gain_slider.setValue(int(config.DEFAULT_MANUAL_GAIN_DB))
-        self.gain_slider.setEnabled(config.DEFAULT_GAIN_MODE == "manual")
+        self.gain_slider.setValue(int(manual_gain_db))
+        self.gain_slider.setEnabled(gain_mode == "manual")
         self.gain_slider.valueChanged.connect(self._on_gain_changed)
         gain_row.addWidget(self.gain_slider)
-        self.gain_label = QtWidgets.QLabel(f"{int(config.DEFAULT_MANUAL_GAIN_DB)} dB")
+        self.gain_label = QtWidgets.QLabel(f"{int(manual_gain_db)} dB")
         self.gain_label.setMinimumWidth(50)
         gain_row.addWidget(self.gain_label)
         layout.addLayout(gain_row)
@@ -125,7 +137,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bandwidth_combo = QtWidgets.QComboBox()
         for bw in config.RX_BANDWIDTH_PRESETS:
             self.bandwidth_combo.addItem(self._format_hz(bw), bw)
-        self.bandwidth_combo.setCurrentIndex(config.RX_BANDWIDTH_PRESETS.index(config.DEFAULT_RX_BANDWIDTH))
+        self.bandwidth_combo.setCurrentIndex(config.RX_BANDWIDTH_PRESETS.index(sample_rate))
         self.bandwidth_combo.currentIndexChanged.connect(self._on_bandwidth_changed)
         zoom_row.addWidget(self.bandwidth_combo)
 
@@ -145,13 +157,29 @@ class MainWindow(QtWidgets.QMainWindow):
         # an RX-bandwidth change, which rebuilds the flowgraph) -------------
         self.waterfall_container = QtWidgets.QVBoxLayout()
         layout.addLayout(self.waterfall_container)
-        self._embed_waterfall(tb)
+        self._embed_waterfall(None)
 
         # Idle QTimer tick: required for Ctrl-C to reach Python's signal
         # handler while Qt's event loop is running (same reason as the TX GUI).
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(lambda: None)
         self._timer.start(500)
+
+        # Everything above builds the window with widgets in their normal
+        # (enabled, "Disconnect"-labelled) construction defaults, which only
+        # makes sense once actually connected. Put it into the disconnected
+        # default presentation first -- unlike _rebuild() in pluto_tx,
+        # _connect()'s failure branches only update the status label (their
+        # precondition is that the window is already disconnected, which
+        # normally holds because _connect() is only ever called right after
+        # a manual _disconnect()) -- then attempt the actual initial
+        # connection through that same bounded-timeout, exception-safe path.
+        # If the device isn't reachable, these defaults are what's left on
+        # screen, with an explanatory status message, instead of raising.
+        self._set_connected_controls_enabled(False)
+        self.connect_button.setText("Connect")
+        self.uri_combo.setEnabled(True)
+        self._connect(uri)
 
     @staticmethod
     def _format_hz(hz):
@@ -338,20 +366,22 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
 
-def run_gui(build_tb):
-    """build_tb: callable that constructs and returns a PlutoRxFlowgraph.
-    Must be called AFTER QApplication exists -- the flowgraph's waterfall
-    sink is a real Qt widget."""
+def run_gui(uri, frequency_hz=config.DEFAULT_FREQUENCY, demod_mode=PlutoRxFlowgraph.MODE_FM,
+            sample_rate=config.DEFAULT_RX_BANDWIDTH, gain_mode=config.DEFAULT_GAIN_MODE,
+            manual_gain_db=config.DEFAULT_MANUAL_GAIN_DB):
+    """Builds and shows the main window, which itself attempts the initial
+    connection to `uri` (see MainWindow.__init__/its _connect() call) --
+    never raises just because the device isn't reachable at startup: the
+    window still comes up, in the same disconnected state a manual
+    Disconnect leaves it in. self.tb (only ever set by MainWindow itself)
+    stays the single reference to the running flowgraph, so there's no
+    stray local reference here to leak an AD9361 buffer claim (the "Unable
+    to create buffer: -16" bug this project hit before when a second
+    reference existed)."""
     qapp = QtWidgets.QApplication(sys.argv)
-    tb = build_tb()
-    window = MainWindow(tb)
+    window = MainWindow(uri, frequency_hz=frequency_hz, demod_mode=demod_mode, sample_rate=sample_rate,
+                         gain_mode=gain_mode, manual_gain_db=manual_gain_db)
     window.show()
-    tb.start()
-    del tb  # window.tb is now the only reference -- a stray one here would
-    # keep the old flowgraph (and its AD9361 buffer claim) alive forever,
-    # breaking every reconnect after the first with "Unable to create
-    # buffer: -16" (EBUSY). Same bug, verified on pluto_tx's identical
-    # run_gui() shape; fixed the same way here for consistency.
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down...")

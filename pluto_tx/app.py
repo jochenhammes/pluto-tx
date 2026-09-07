@@ -46,12 +46,7 @@ def main(argv=None):
     if args.gui:
         from .gui import run_gui
         mode = PlutoTxFlowgraph.MODE_SSB if args.mode == "ssb" else PlutoTxFlowgraph.MODE_FM
-
-        def build_tb():
-            return PlutoTxFlowgraph(uri=args.uri, frequency=args.freq, atten_ceiling_db=args.atten,
-                                     mode=mode, enable_waterfall=True)
-
-        return run_gui(build_tb) or 0
+        return run_gui(args.uri, frequency_hz=args.freq, atten_ceiling_db=args.atten, mode=mode) or 0
 
     if not args.yes:
         reply = input("Type YES to key up: ")
