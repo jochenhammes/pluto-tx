@@ -17,6 +17,7 @@ audio rate -> complex resampler up to TX rate, not real-resample-then-Hilbert.
 import math
 import os
 import sys
+import time
 import wave
 
 from gnuradio import gr, blocks, filter, analog, audio, iio, qtgui
@@ -117,7 +118,10 @@ class PlutoTxFlowgraph(gr.top_block):
         # "FM" regardless of what mode the flowgraph was actually built with.
 
         # Safety layer first: attenuation to minimum, LO up -- BEFORE the GR
-        # sink (which enables TX channels at construction time) exists.
+        # sink (which enables TX channels at construction time) exists. The
+        # LO is powered back down once construction/wiring is finished below
+        # (idle/unkeyed state) -- see the end of __init__ and key_ptt()/
+        # unkey_ptt() for the PTT<->LO-powerdown hard tie.
         self.safety = PlutoSafety(uri)
         self.safety.prepare_for_start()
 
@@ -407,6 +411,12 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.waterfall is not None:
             self.connect(self.tx_gain, self.waterfall)
 
+        # Idle state once construction is done: LO powered back down. The
+        # sink constructor above needs the LO up to initialize (see the
+        # comment on prepare_for_start() above), but the app starts unkeyed
+        # -- see key_ptt()/unkey_ptt() for the PTT<->LO-powerdown hard tie.
+        self.safety.power_down_lo(True)
+
     def _build_file_source(self, wav_path):
         """Return a mono, AUDIO_RATE float stream from a WAV file of any
         channel count / sample rate (downmix + resample as needed)."""
@@ -573,10 +583,24 @@ class PlutoTxFlowgraph(gr.top_block):
         return self._keyed
 
     def key_ptt(self):
-        """PTT press: unmute audio, then raise RF power. In M17 mode, also
-        sends SOT (start of transmission) -- without it m17_coder silently
-        discards all input and emits nothing (verified this session)."""
+        """PTT press: power the TX LO back up (it's kept powered down
+        whenever unkeyed -- see unkey_ptt()/finish_unkey_m17()/config.
+        LO_RELOCK_S), wait for the synthesizer to relock, then unmute audio
+        and raise RF power. In M17 mode, also sends SOT (start of
+        transmission) -- without it m17_coder silently discards all input
+        and emits nothing (verified this session).
+
+        The LO powerdown/power-up is hard-tied to PTT in every mode, not
+        just at app shutdown: the TX attenuator alone (down to MIN_ATTEN)
+        does not fully suppress LO leakage, and an external PA connected to
+        the Pluto's TX port amplifies that residual leakage into a real,
+        measurable spike whenever the LO is left running between
+        transmissions. Powering the synthesizer off (not just attenuating
+        it) is the only way to actually make it disappear, regardless of
+        which modulation branch is active."""
         self._m17_ending = False
+        self.safety.power_down_lo(False)
+        time.sleep(config.LO_RELOCK_S)
         if self.mode == self.MODE_M17:
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
             self.m17_codec2_encoder.post(_pmt.intern("state_reset"), _pmt.intern("SOT"))
@@ -585,17 +609,20 @@ class PlutoTxFlowgraph(gr.top_block):
         self._keyed = True
 
     def unkey_ptt(self):
-        """PTT release. FM/SSB: kill RF power FIRST, then mute audio (order
-        is safety-critical). M17 is different: muting audio and sending EOT
-        happen immediately, but RF must stay up briefly afterward for the
-        encoder's EOT tail (final frame + EOT frames, ~80ms minimum) to
-        actually transmit -- cutting RF instantly would leave the receiver
-        hanging with no clean end-of-stream. self._keyed stays True and
-        self._m17_ending is set; the GUI drives finish_unkey_m17() after a
-        bounded delay to actually lower power. This tail is NOT a safety
-        gap: force_safe_state() (E-STOP, shutdown_safe()) forces attenuation
-        down immediately regardless, via the independent PlutoSafety layer,
-        at any point during the tail."""
+        """PTT release. FM/SSB: kill RF power FIRST, mute audio, then power
+        the LO down (order is safety-critical -- attenuation to minimum
+        before the LO bit even matters, LO-off is what finally kills the
+        leakage spike for good). M17 is different: muting audio and sending
+        EOT happen immediately, but RF (and therefore the LO) must stay up
+        briefly afterward for the encoder's EOT tail (final frame + EOT
+        frames, ~80ms minimum) to actually transmit -- cutting RF instantly
+        would leave the receiver hanging with no clean end-of-stream.
+        self._keyed stays True and self._m17_ending is set; the GUI drives
+        finish_unkey_m17() after a bounded delay to actually lower power and
+        power the LO down. This tail is NOT a safety gap: force_safe_state()
+        (E-STOP, shutdown_safe()) forces attenuation down AND the LO off
+        immediately regardless, via the independent PlutoSafety layer, at
+        any point during the tail."""
         if self.mode == self.MODE_M17:
             self.ptt_mute.set_k(0.0)
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("EOT"))
@@ -603,6 +630,7 @@ class PlutoTxFlowgraph(gr.top_block):
         else:
             self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
             self.ptt_mute.set_k(0.0)
+            self.safety.power_down_lo(True)
             self._keyed = False
 
     def finish_unkey_m17(self):
@@ -613,6 +641,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if not self._m17_ending:
             return
         self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
+        self.safety.power_down_lo(True)
         self._m17_ending = False
         self._keyed = False
 
