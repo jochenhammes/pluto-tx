@@ -19,6 +19,7 @@ Das Skript ist für Debian/Ubuntu-artige Systeme (`apt-get`) gedacht und install
 - **`libiio-utils`** — `iio_info`/`iio_attr`, nicht zwingend nötig für die Apps selbst, aber praktisch zum manuellen Nachschauen auf der Kommandozeile.
 - **`avahi-daemon`** — löst `*.local`-mDNS-Hostnamen wie `plutoplus.local` tatsächlich auf. Wichtig: `libiio0` zieht zwar automatisch die Avahi-*Client*-Bibliotheken mit (harte Abhängigkeit), der eigentliche Daemon ist aber nur ein apt-„Suggests" — ohne dieses Paket würde `plutoplus.local` auf einem frisch installierten Rechner NICHT auflösbar sein, nur eine nackte IP-Adresse. Das Skript aktiviert den Dienst danach auch gleich per `systemctl enable --now`.
 - **`python3-pyqtgraph`** — für `pluto_advanced_rx`'s interaktives Wasserfall-Widget. Auch das ist nur ein apt-„Recommends" von `gnuradio`, kein hartes Dependency — deshalb explizit gelistet.
+- **`soapysdr-module-hackrf`, `hackrf`, `python3-soapysdr`** — für `pluto_tx`'s HackRF-One-TX-Backend (siehe [Geräte-Abstraktionsschicht](#geräte-abstraktionsschicht-plutosdr--hackrf-one) unten). `gnuradio.soapy` selbst steckt schon in `gnuradio` oben; diese drei sind der fehlende Rest (der eigentliche Soapy-HackRF-Treiber, `hackrf_info` zur Fehlersuche, und die rohen SoapySDR-Python-Bindings für die Geräte-Enumeration im Scan-Button). Ohne installiertes HackRF ist der "HackRF One"-Eintrag im Gerätetyp-Dropdown trotzdem da, `Connect` schlägt dann nur mit einer Fehlermeldung fehl — PlutoSDR ist davon unberührt.
 - **`git`** — zum Klonen/Updaten dieses Repos, falls noch nicht vorhanden.
 
 Danach prüft das Skript per echtem Python-Import (`from gnuradio import iio, qtgui, ...`, `import iio`, `from PyQt5 import ...`, `import pyqtgraph`), ob alles sauber importierbar ist, und legt drei Kommandozeilen-Starter unter `~/.local/bin/` an: `pluto-tx` (startet die GUI, `--gui` ist schon eingebaut), `pluto-rx` und `pluto-advanced-rx`. Ist `~/.local/bin` noch nicht im `PATH`, sagt das Skript das am Ende explizit dazu.
@@ -49,13 +50,17 @@ Im Gegensatz zu M17 ist FreeDV 2020/2020B nach einem normalen `./install.sh` ber
 install.sh                  # siehe Installation oben
 install-m17.sh               # optional: gr-m17-Build, siehe Installation oben
 pluto_tx/
-├── config.py      # Konstanten: Dämpfungsgrenzen, Samplerates, DE-Bandplan, NF-Dynamik, M17, FreeDV
-├── safety.py       # PlutoSafety: rohes python3-libiio, unabhängig von gr-iio
-├── flowgraph.py     # PlutoTxFlowgraph(gr.top_block): FM/SSB/M17/FreeDV-Signalkette
+├── config.py      # geräteunabhängige Konstanten: Audio-Rate, DE-Bandplan, NF-Dynamik, M17, FreeDV
+├── devices/        # Geräte-Abstraktionsschicht, siehe Geräte-Abstraktionsschicht-Abschnitt unten
+│   ├── base.py       # TxDevice-ABC, PowerStage-Dataclass
+│   ├── pluto.py       # PlutoDevice: gr-iio + PlutoSafety (aus safety.py), plus Plutos eigene Konstanten (MIN_ATTEN etc. teils noch in config.py, siehe unten)
+│   └── hackrf.py       # HackRFDevice: gr-soapy (driver=hackrf), VGA+AMP-Gain-Modell
+├── safety.py       # PlutoSafety: rohes python3-libiio, unabhängig von gr-iio -- NUR für PlutoDevice, siehe unten
+├── flowgraph.py     # PlutoTxFlowgraph(gr.top_block): FM/SSB/M17/FreeDV-Signalkette, geräteunabhängig bis auf self.device
 ├── dynamics.py      # DynamicsProcessor(gr.sync_block): Kompressor/Limiter, siehe NF-Verarbeitung unten
 ├── freedv_ctypes.py # ctypes-Wrapper um libcodec2s freedv_api (FreeDV 2020/2020B), siehe FreeDV-Abschnitt unten
 ├── freedv.py        # FreeDVEncoder(gr.basic_block): freedv_tx() als GNU-Radio-Block, siehe FreeDV-Abschnitt unten
-├── gui.py             # PyQt5 GUI
+├── gui.py             # PyQt5 GUI (inkl. Gerätetyp-Dropdown, siehe Geräte-Abstraktionsschicht unten)
 ├── app.py              # CLI-Einstieg (--gui für die GUI)
 └── da2jh-test.wav        # Standard-Testaufnahme (Rufzeichen, gesprochen)
 pluto_rx/
@@ -127,6 +132,20 @@ python3 -m pluto_tx.app --freq 432150000 --gui
 Kernproblem, das diesen Eigenbau motiviert hat: der AD9361-Treiber (libiio) trennt Buffer-Streaming komplett von Dämpfung (`hardwaregain`) und LO-Zustand (`powerdown`) — keine SDR-Software, die wir getestet haben (SDRangel eingeschlossen), setzt diese beim Stoppen automatisch zurück. Deshalb: `PlutoSafety` (in `safety.py`) verwaltet TX-Dämpfung und LO-Powerdown komplett unabhängig von GNU Radio über rohes `python3-libiio`. `force_safe_state()` (Dämpfung auf Minimum + LO aus) ist die einzige Funktion, auf die jeder Shutdown-Pfad läuft: normales Programmende, Fenster schließen, SIGINT/SIGTERM, unbehandelte Exceptions. Die GUI zeigt zusätzlich alle 500ms den tatsächlichen Hardware-Zustand an (nicht nur den vermuteten App-Zustand) und hat einen NOTAUS-Button.
 
 PTT schaltet nur die Dämpfung (schnell, kein LO-Relock), nicht den LO-Powerdown — der ist für App-Start/-Ende reserviert.
+
+## Geräte-Abstraktionsschicht (PlutoSDR + HackRF One)
+
+`pluto_tx` unterstützt neben der PlutoSDR jetzt auch ein HackRF One als TX-Gerät, über eine eigene Abstraktionsschicht (`pluto_tx/devices/`), damit weitere SoapySDR-fähige Hardware später mit überschaubarem Aufwand dazukommen kann (eine neue Datei + eine Registry-Zeile + ein GUI-Widget-Paar, keine Änderung an `flowgraph.py`).
+
+**`TxDevice`** (`devices/base.py`) ist die abstrakte Basisklasse: `build_sink()` konstruiert den ans `tx_gain` anzuschließenden GNU-Radio-Block, `set_power(stage_name, value)`/`power_stages` (eine Liste von `PowerStage`s, genau eine mit `is_primary=True`) modellieren das Pegel-/Gain-Konzept des jeweiligen Geräts, `pre_key()`/`post_unkey()` sind die Hooks, die `flowgraph.py`s `key_ptt()`/`unkey_ptt()` bei jedem PTT-Zyklus aufruft, `force_safe_state()` ist der NOTAUS-Backstop, `read_hw_state()` speist die GUI-Statuszeile. Die sicherheitskritische **Reihenfolge** (Pegel-auf-Minimum-vor-dem-Hook, M17s verzögerter EOT-Tail) bleibt bewusst in `flowgraph.py`, nicht in den Backends — an einer Stelle prüfbar, unabhängig vom aktiven Gerät.
+
+**`PlutoDevice`** (`devices/pluto.py`) ist ein reiner, verhaltenserhaltender Umzug des bisherigen Codes: `PlutoSafety` (`safety.py`, unverändert) plus `iio.fmcomms2_sink_fc32`, jetzt hinter dem `TxDevice`-Interface. Ein `PowerStage("attenuation", ...)`, Bereich `MIN_ATTEN`/`MAX_ATTEN` (bleiben in `config.py`, siehe unten). Nach dem Umbau erneut vollständig auf echter Hardware verifiziert: Idle-Zustand, Key/Unkey-Timing inkl. `LO_RELOCK_S`, Pegel-Ceiling/Unlock, M17-EOT-Tail, NOTAUS/Re-Arm — alle bit-identisch zum Verhalten vor dem Umbau.
+
+**`HackRFDevice`** (`devices/hackrf.py`) nutzt `gnuradio.soapy.sink("driver=hackrf", ...)` — `gnuradio.soapy` ist bereits Teil des `gnuradio`-apt-Pakets, nur der eigentliche HackRF-Treiber (`soapysdr-module-hackrf`) und `python3-soapysdr` (für die Geräte-Enumeration) müssen dazu, siehe Installation oben. HackRFs Pegelmodell ist grundlegend anders als Plutos einzelne Dämpfungsstufe: zwei **additive** Gain-Stufen (mehr = mehr Leistung, umgekehrtes Vorzeichen zu Plutos Dämpfung) — `VGA` (0-47 dB, kontinuierlich, die primäre Stufe, GUI-Slider) und `AMP` (grob, +14 dB an/aus, GUI-Checkbox, nur bei Gerätetyp "HackRF One" sichtbar). Auf echter Hardware bestätigt per `get_gain_range(0,"AMP")`: intern ein `float`-Wertebereich (0.0/14.0), kein natives bool — `read_hw_state()`s `amp_on` leitet sich per `get_gain(...) > 0` daraus ab.
+
+**Bekannte, bewusste Einschränkung — kein Pluto-Äquivalent zum LO-Powerdown:** Die auf diesem System installierten `gnuradio.soapy`-Python-Bindings binden nachweislich kein `activate()`/`deactivate()` oder sonstiges Pro-Stream-Lifecycle-Kommando (geprüft per `dir(soapy.sink)`) — der einzige zwischen Sendungen verfügbare Hebel sind die beiden Gain-Stufen selbst. `HackRFDevice.post_unkey()` schaltet `AMP` aus (der primäre `VGA`-Wert wird ohnehin schon generisch von `flowgraph.py` genullt) — das ist nicht "die beste Näherung", sondern der einzig verfügbare Hebel über diesen API-Pfad. Ebenso besitzt `HackRFDevice` **keine** von GNU Radio unabhängige Sicherheitsschicht wie `PlutoSafety` (die bewusst einen eigenen `iio.Context` hält, damit sie auch nach einem Absturz des GNU-Radio-Laufzeitsystems noch funktioniert) — `force_safe_state()` kann nur über den noch laufenden `soapy.sink`-Block wirken.
+
+**Verifiziert (echte Hardware, `key_ptt()`/`unkey_ptt()` tatsächlich ausgelöst, jeweils mit expliziter Freigabe des Betreibers vor jeder Sendung):** VGA- und AMP-Register ändern sich beim Keyen/Unkeyen wirklich (nicht nur Python-Buchführung), `post_unkey()` schaltet AMP zuverlässig wieder aus, `force_safe_state()` nullt beide Stufen auch mitten in einer laufenden "Sendung". Ein kurzer realer PTT-Test bei niedriger Leistung (432,15 MHz FM, VGA 10 dB, AMP aus) wurde vom Betreiber live beobachtet — ein kurzer Ausschlag war sichtbar, konnte aber mangels präziser Zeitkorrelation zwischen Sendekommando und Beobachtung nicht eindeutig als "während der Sendung" (erwartet, einfach das Signal selbst) oder "außerhalb, bei angeblich stillem Gerät" (der eigentlich interessante Befund, analog zum Pluto-LO-Leck) eingeordnet werden. **Nicht abschließend geklärt** — siehe ToDo unten.
 
 ## NF-Verarbeitung (Noise Gate, Kompressor, Limiter)
 
@@ -210,6 +229,8 @@ ptt_mute -> freedv_audio_resampler (48k->16k) -> freedv_float_to_short
 
 Beide Apps haben in der GUI ein editierbares Dropdown ("Device (hostname or IP)") plus Scan- und Connect/Disconnect-Buttons. Standardmäßig wird beim Start automatisch mit `config.DEFAULT_URI` (`ip:plutoplus.local`) verbunden. Für einen zweiten Pluto im selben LAN, oder um explizit auf USB umzuschalten:
 
+**Nur `pluto_tx`:** ein zusätzliches "Device Type"-Dropdown (PlutoSDR / HackRF One, siehe [Geräte-Abstraktionsschicht](#geräte-abstraktionsschicht-plutosdr--hackrf-one) oben) davor, nur bei getrenntem Gerät editierbar. Je nach Auswahl ändert sich das Verbindungsfeld daneben (Pluto: Hostname/IP; HackRF: Seriennummer, leer = das einzige angeschlossene Gerät), ebenso Scan-Button, Frequenzbereich und die Pegel-Regler darunter.
+
 - **Scan** ruft `iio.scan_contexts()` auf (mDNS + USB + lokale IIO-Geräte, ~1s) und füllt das Dropdown mit allen gefundenen Contexts (der lokale `local:`-Eintrag, nie ein Pluto, wird herausgefiltert). Danach einfach den gewünschten Eintrag auswählen.
 - Alternativ manuell eintippen: bloßer Hostname oder IP (z.B. `192.168.1.50`) — wird automatisch zu `ip:192.168.1.50` — oder eine volle libiio-URI (`usb:1.5.5`, `ip:anderer-pluto.local`, ...), die unverändert übernommen wird.
 
@@ -219,6 +240,8 @@ Der eigentliche Verbindungsaufbau (`iio.Context`) hat kein eingebautes Timeout u
 
 ## ToDo für nächstes Mal
 
+- **HackRF-"Spike"-Beobachtung nicht abschließend geklärt.** Beim ersten realen HackRF-PTT-Test beschrieb der Betreiber einen kurzen sichtbaren Ausschlag, konnte ihn aber mangels präziser Zeitkorrelation zwischen Sendekommando und eigener Beobachtung nicht sicher "während der Sendung" (erwartet) von "außerhalb, bei angeblich stillem Gerät" (der eigentlich interessante Befund) unterscheiden — siehe [Geräte-Abstraktionsschicht](#geräte-abstraktionsschicht-plutosdr--hackrf-one) oben. Für eine echte Klärung: eine feste Aufnahme/Wasserfall-Historie (nicht nur Live-Beobachtung) parallel zu einem PTT-Zyklus mit klaren, geloggten Zeitstempeln, dann rückwirkend genau in das Zeitfenster außerhalb `key_ptt()`/`unkey_ptt()` hineinzoomen.
+- **HackRFDevice hat keine von GNU Radio unabhängige Sicherheitsschicht** (anders als `PlutoSafety`, die auch nach einem Absturz des GNU-Radio-Laufzeitsystems noch funktioniert) — bewusste Design-Entscheidung dieser Session (die aktuell installierten `gnuradio.soapy`-Bindings bieten dafür keine Grundlage, kein `activate()`/`deactivate()`). Falls das je zum echten Problem wird: eine rohe SoapySDR-Stream-Deaktivierung direkt über `python3-soapysdr` (unabhängig vom laufenden GNU-Radio-Block) wäre der nächste Ansatzpunkt, analog zu `PlutoSafety`s rohem `python3-libiio`-Pfad.
 - **RADE V1 als weiterer Digitalsprache-Modus in `pluto_tx` (zurückgestellt, noch nicht begonnen).** Nutzerwunsch, aber bewusst noch nicht umgesetzt — deutlich größerer Umfang als FreeDV, braucht erst eine echte Recherche-/Planungsphase wie bei M17/FreeDV. Bereits recherchiert (diese Session, nicht weiter vertieft):
   - **Eigenständiges Projekt**, nicht Teil von `libcodec2` — [`freedv/rade_c`](https://github.com/freedv/rade_c) (C-Port von [`drowe67/radae`](https://github.com/drowe67/radae)), kein apt-Paket, reiner From-Source-Build. Baut dabei einen eigenen, gepatchten Opus-Fork mit FARGAN/LPCNet-Unterstützung selbst mit (`cmake/BuildOpus.cmake`) — vermutlich ähnliches Muster wie `install-m17.sh` (gepinnter Commit, lokal nach `$HOME/.local`), aber mit mehr Build-Aufwand.
   - **Architektonisch anders als FreeDV**: `rade_tx()` (`rade_api.h`) liefert direkt komplexe IQ-Samples (`RADE_COMP`, float32, 8kHz) — kein audio-domänen-taugliches SSB-Signal wie bei FreeDV. Kann also NICHT die bestehende Hilbert/SSB-Kette wiederverwenden — bräuchte einen eigenen, direkten IQ-Pfad zu `tx_gain`, ähnlich M17s dediziertem Anschluss (aber ohne eigene FM-Modulation/RRC-Formfilter nötig, da die OFDM-Modulation schon in `rade_tx()`s IQ-Ausgabe steckt).

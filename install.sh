@@ -10,9 +10,11 @@
 # mDNS hostnames like plutoplus.local -- libiio only gets the avahi CLIENT
 # libraries for free as a hard dependency; the daemon itself is merely an
 # apt "Suggests", so it's easy to end up without it on a fresh install),
-# and python3-pyqtgraph (pluto_advanced_rx's interactive waterfall widget --
+# python3-pyqtgraph (pluto_advanced_rx's interactive waterfall widget --
 # only a "Recommends" of "gnuradio", not a hard dependency, so also easy to
-# end up without on a fresh install).
+# end up without on a fresh install), and the HackRF/SoapySDR pieces pluto_tx
+# needs for its HackRF One TX backend (gnuradio.soapy itself ships inside
+# "gnuradio" already -- these three packages are the only missing bits).
 #
 # Usage:
 #   ./install.sh
@@ -38,6 +40,8 @@ launcher scripts and the self-test:
     hostnames like plutoplus.local instead of a bare IP address
   - python3-pyqtgraph, if you want to use pluto_advanced_rx's interactive
     waterfall
+  - soapysdr-module-hackrf, hackrf, and python3-soapysdr, if you want to use
+    pluto_tx's HackRF One TX backend
 EOF
     exit 1
 fi
@@ -48,6 +52,12 @@ PACKAGES=(
     libiio-utils      # iio_info, iio_attr -- optional, useful for manual troubleshooting
     avahi-daemon      # resolves "*.local" mDNS hostnames; libiio only gets the client libs for free
     python3-pyqtgraph # pluto_advanced_rx's interactive waterfall -- only a gnuradio "Recommends", not a hard dep
+    soapysdr-module-hackrf # gr-soapy's HackRF driver .so -- gnuradio.soapy itself is already
+                            # part of "gnuradio" above; this is the one missing piece for pluto_tx's HackRF backend
+    hackrf            # hackrf_info etc., for manual troubleshooting -- mirrors libiio-utils above
+    python3-soapysdr  # raw SoapySDR Python bindings, used only for structured HackRF device
+                       # enumeration in pluto_tx's GUI Scan button -- gnuradio.soapy's own sink block
+                       # doesn't need this, it links libsoapysdr directly in C++
     git               # to clone/update this repo
 )
 
@@ -72,12 +82,13 @@ echo "Verifying the Python side..."
 python3 - <<'EOF'
 import sys
 try:
-    from gnuradio import gr, blocks, filter, analog, audio, iio, qtgui  # noqa: F401
+    from gnuradio import gr, blocks, filter, analog, audio, iio, soapy, qtgui  # noqa: F401
     from gnuradio.fft import window  # noqa: F401
     from gnuradio.filter import firdes  # noqa: F401
     import iio as libiio  # noqa: F401  -- raw python3-libiio, distinct from gnuradio.iio above
     from PyQt5 import QtCore, QtWidgets, sip  # noqa: F401
     import pyqtgraph  # noqa: F401  -- pluto_advanced_rx's interactive waterfall
+    import SoapySDR  # noqa: F401  -- HackRF device scanning in pluto_tx's GUI
 except ImportError as e:
     print(f"FAILED: {e}", file=sys.stderr)
     sys.exit(1)

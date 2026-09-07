@@ -11,6 +11,7 @@ import sys
 import time
 
 from . import config
+from .devices import pluto as pluto_device
 from .flowgraph import PlutoTxFlowgraph
 
 
@@ -18,7 +19,7 @@ def build_argparser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uri", default=config.DEFAULT_URI)
     p.add_argument("--freq", type=float, default=config.DEFAULT_FREQUENCY, help="Hz")
-    p.add_argument("--atten", type=float, default=config.DEFAULT_ATTEN_CEILING,
+    p.add_argument("--atten", type=float, default=pluto_device.DEFAULT_ATTEN_CEILING,
                     help="TX attenuation in dB while keyed (default %(default)s)")
     p.add_argument("--mode", choices=["fm", "ssb"], default="fm")
     p.add_argument("--duration", type=float, default=3.0,
@@ -55,7 +56,8 @@ def main(argv=None):
             return 1
 
     mode = PlutoTxFlowgraph.MODE_SSB if args.mode == "ssb" else PlutoTxFlowgraph.MODE_FM
-    tb = PlutoTxFlowgraph(uri=args.uri, frequency=args.freq, atten_ceiling_db=args.atten, mode=mode)
+    tb = PlutoTxFlowgraph(device_type="pluto", connection=args.uri, frequency=args.freq,
+                           power_ceiling=args.atten, mode=mode)
 
     def sig_handler(signum, frame):
         print(f"\nSignal {signum} received, shutting down safely...")

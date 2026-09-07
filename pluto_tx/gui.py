@@ -10,14 +10,15 @@ import sys
 from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
-from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, _gr_atten, _default_wav_path
+from . import devices
+from .devices import pluto as pluto_device
+from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, _default_wav_path
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
-from .netutil import probe_uri_with_timeout, scan_devices_with_timeout
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, uri, frequency_hz=config.DEFAULT_FREQUENCY,
-                 atten_ceiling_db=config.DEFAULT_ATTEN_CEILING, mode=PlutoTxFlowgraph.MODE_FM,
+                 atten_ceiling_db=pluto_device.DEFAULT_ATTEN_CEILING, mode=PlutoTxFlowgraph.MODE_FM,
                  source=PlutoTxFlowgraph.SRC_MIC, wav_path=None, m17_src_callsign="",
                  m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign=""):
@@ -41,20 +42,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
-        # --- Device (network/USB URI) -----------------------------------
+        # --- Device type + connection ------------------------------------
+        # One connection combo shared by every backend (holds a libiio URI
+        # for PlutoSDR, a HackRF serial -- or blank for "the only attached
+        # one" -- for HackRF): both are just a connection string with an
+        # optional Scan-populated dropdown, so a second widget pair per
+        # backend would only duplicate this row, not add real capability.
+        # Relabelled/retooltipped by _on_device_type_changed() below.
         device_row = QtWidgets.QHBoxLayout()
-        device_row.addWidget(QtWidgets.QLabel("Device (hostname or IP):"))
+        device_row.addWidget(QtWidgets.QLabel("Device Type:"))
+        self.device_type_combo = QtWidgets.QComboBox()
+        for device_type, device_cls in devices.DEVICE_REGISTRY.items():
+            self.device_type_combo.addItem(device_cls.display_name, device_type)
+        self.device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
+        device_row.addWidget(self.device_type_combo)
+        self.device_label = QtWidgets.QLabel("Device (hostname or IP):")
+        device_row.addWidget(self.device_label)
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
         self.uri_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
         self.uri_combo.addItem(uri)
         self.uri_combo.setEnabled(False)  # editable only while disconnected
-        self.uri_combo.setToolTip(
-            "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
-            "URI like usb:1.5.5 to pick a specific device when more than one "
-            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
-            "automatically. Use Scan to discover devices on the network/USB."
-        )
         device_row.addWidget(self.uri_combo, 1)
         self.scan_button = QtWidgets.QPushButton("Scan")
         self.scan_button.clicked.connect(self._on_scan_clicked)
@@ -63,6 +71,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
         layout.addLayout(device_row)
+        self._update_device_connection_labels()
 
         # --- Frequency + fine tune ---------------------------------
         freq_row = QtWidgets.QHBoxLayout()
@@ -87,6 +96,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fine_label = QtWidgets.QLabel("0 Hz")
         self.fine_label.setMinimumWidth(70)
         freq_row.addWidget(self.fine_label)
+
+        # Manual, operator-tuned frequency offset -- only shown for backends
+        # with supports_frequency_correction=True (currently just HackRF: a
+        # real ~25kHz offset was observed on real hardware, and this
+        # system's SoapyHackRF driver exposes no automatic correction to
+        # compensate for it in software). Not a calibrated value -- the
+        # operator dials it in empirically against their own receiver.
+        self.freq_correction_label = QtWidgets.QLabel("Freq. Correction (Hz):")
+        self.freq_correction_label.setVisible(False)
+        freq_row.addWidget(self.freq_correction_label)
+        self.freq_correction_spin = QtWidgets.QSpinBox()
+        self.freq_correction_spin.setRange(-200_000, 200_000)
+        self.freq_correction_spin.setSingleStep(100)
+        self.freq_correction_spin.setValue(0)
+        self.freq_correction_spin.valueChanged.connect(self._on_freq_correction_changed)
+        self.freq_correction_spin.setVisible(False)
+        freq_row.addWidget(self.freq_correction_spin)
         layout.addLayout(freq_row)
 
         # --- Mode + source -------------------------------------------
@@ -145,6 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_button.clicked.connect(self._on_pick_file)
         mode_row.addWidget(self.file_button)
         layout.addLayout(mode_row)
+        layout.addSpacing(12)
 
         # --- M17 callsigns -- only VISIBLE in M17 mode (not just enabled/
         # disabled like the other controls), per explicit request: these
@@ -210,8 +237,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_freedv_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
+        # power_slider is reused across backends (relabelled/reranged by
+        # _on_device_type_changed()) rather than one slider per device --
+        # every backend's primary power stage is a single continuous value,
+        # so a second widget would only duplicate this row. amp_checkbox is
+        # the one backend-specific extra so far (HackRF's coarse +14dB amp,
+        # a non-primary stage with no Pluto equivalent) -- hidden outside
+        # HackRF mode, same "hide the whole control, don't just greatly it"
+        # reasoning as the M17/FreeDV rows above.
         power_row = QtWidgets.QHBoxLayout()
-        power_row.addWidget(QtWidgets.QLabel("TX Power (Attenuation, dB):"))
+        self.power_row_label = QtWidgets.QLabel("TX Power (Attenuation, dB):")
+        power_row.addWidget(self.power_row_label)
         self.power_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.unlock_full_power = QtWidgets.QCheckBox("Unlock full power")
         self._refresh_power_slider_range()
@@ -221,7 +257,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.power_label = QtWidgets.QLabel()
         power_row.addWidget(self.power_label)
         power_row.addWidget(self.unlock_full_power)
+        self.amp_checkbox = QtWidgets.QCheckBox("TX Amp (+14dB)")
+        self.amp_checkbox.setChecked(False)
+        self.amp_checkbox.setVisible(False)
+        self.amp_checkbox.toggled.connect(self._on_amp_changed)
+        power_row.addWidget(self.amp_checkbox)
         layout.addLayout(power_row)
+        layout.addSpacing(12)
         self.power_slider.setValue(int(round(atten_ceiling_db)))
 
         # --- NF (audio) gain -------------------------------------------
@@ -371,6 +413,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.device_type_combo.setEnabled(True)
+        self._sync_device_dependent_widgets()  # sync freq range/power label/amp visibility to "PlutoSDR"
         self._rebuild(uri, self._wav_path)
 
     # --- helpers ------------------------------------------------------
@@ -399,7 +443,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_connected_controls_enabled(self, enabled: bool):
         for w in (self.freq_spin, self.fine_slider, self.mode_combo, self.source_combo,
-                  self.power_slider, self.unlock_full_power, self.nf_gain_slider,
+                  self.power_slider, self.unlock_full_power, self.amp_checkbox, self.nf_gain_slider,
                   self.gate_enable, self.compressor_enable, self.limiter_enable,
                   self.ptt_button, self.ptt_mode_button, self.estop_button):
             w.setEnabled(enabled)
@@ -444,8 +488,76 @@ class MainWindow(QtWidgets.QMainWindow):
         self.estop_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
 
     def _refresh_power_slider_range(self):
-        ceiling = 0 if self.unlock_full_power.isChecked() else config.DEFAULT_ATTEN_CEILING
-        self.power_slider.setRange(int(round(config.MIN_ATTEN)), int(round(ceiling)))
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        stage = devices.primary_power_stage(device_cls.device_type)
+        # Deliberately device_cls.default_power_ceiling here, not
+        # self._atten_ceiling_db (the value actually passed to the
+        # flowgraph's power_ceiling) -- a pre-existing inconsistency carried
+        # forward unchanged into this generalized version, see the device-
+        # abstraction plan.
+        ceiling = stage.max_value if self.unlock_full_power.isChecked() else device_cls.default_power_ceiling
+        self.power_slider.setRange(int(round(stage.min_value)), int(round(ceiling)))
+
+    def _update_device_connection_labels(self):
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        if device_cls.connection_kind == "uri":
+            self.device_label.setText("Device (hostname or IP):")
+            self.uri_combo.setToolTip(
+                "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
+                "URI like usb:1.5.5 to pick a specific device when more than one "
+                "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
+                "automatically. Use Scan to discover devices on the network/USB."
+            )
+        else:
+            self.device_label.setText("HackRF Serial (blank = auto):")
+            self.uri_combo.setToolTip(
+                "HackRF serial number, or leave blank to use the only attached "
+                "HackRF. Use Scan to discover attached HackRF devices (needs "
+                "python3-soapysdr, see install.sh)."
+            )
+
+    def _on_device_type_changed(self, idx):
+        """Only takes effect on the next Connect -- device_type_combo (like
+        uri_combo) is only editable while disconnected. Also clears the
+        connection field: a Pluto URI left behind after switching to
+        HackRF (or vice versa) looks like a valid value but isn't -- the
+        operator has to notice and clear it manually otherwise (real bug
+        report)."""
+        self.uri_combo.blockSignals(True)
+        self.uri_combo.clear()
+        self.uri_combo.clearEditText()
+        self.uri_combo.blockSignals(False)
+        self._sync_device_dependent_widgets()
+
+    def _sync_device_dependent_widgets(self):
+        """Cosmetic/range updates only, never touches self.tb. Called both
+        by _on_device_type_changed() above and once at the end of __init__
+        to sync the initial (PlutoSDR) selection -- split out from that
+        handler so the initial call doesn't also wipe the uri_combo value
+        the constructor was given."""
+        self._update_device_connection_labels()
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        lo_hz, hi_hz = device_cls.frequency_range_hz
+        self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
+        self._atten_ceiling_db = device_cls.default_power_ceiling
+        stage = devices.primary_power_stage(device_cls.device_type)
+        self.power_row_label.setText(f"TX Power ({stage.label}, {stage.unit}):" if stage.unit
+                                      else f"TX Power ({stage.label}):")
+        self._refresh_power_slider_range()
+        secondary_stages = [s for s in device_cls.power_stages if not s.is_primary]
+        if secondary_stages:
+            self.amp_checkbox.setText(secondary_stages[0].label)
+            self.amp_checkbox.setVisible(True)
+        else:
+            self.amp_checkbox.setVisible(False)
+        self.freq_correction_label.setVisible(device_cls.supports_frequency_correction)
+        self.freq_correction_spin.setVisible(device_cls.supports_frequency_correction)
+        # Reset to this device type's default correction -- safe to do
+        # unconditionally here: this method only runs on an actual device-
+        # type switch (see _on_device_type_changed()) or once at startup,
+        # never on a plain reconnect within the same type, so it never
+        # clobbers a value the operator already tuned this session.
+        self.freq_correction_spin.setValue(int(getattr(device_cls, "DEFAULT_FREQUENCY_CORRECTION_HZ", 0)))
 
     def _set_indicator_idle(self):
         self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")
@@ -479,6 +591,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.set_fine_offset(float(value))
         self.fine_label.setText(f"{value} Hz")
+
+    def _on_freq_correction_changed(self, value):
+        if self.tb is not None:
+            self.tb.device.set_frequency_correction(float(value))
 
     def _on_nf_gain_changed(self, value):
         if self.tb is not None:
@@ -553,15 +669,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # rebuild -- exactly the same rebuild _rebuild() already does for a
         # device reconnect, just keeping the current uri and swapping the
         # wav_path instead.
-        self._rebuild(self.tb.uri, path)
+        self._rebuild(self.tb.device.connection, path)
 
     def _on_power_changed(self, value):
         if self.tb is not None:
             self.tb.set_target_power(float(value))
-        self.power_label.setText(f"{value} dB")
+        stage = devices.primary_power_stage(self.device_type_combo.currentData())
+        self.power_label.setText(f"{value} {stage.unit}".strip())
 
     def _on_unlock_changed(self, _state):
         self._refresh_power_slider_range()
+
+    def _on_amp_changed(self, checked):
+        if self.tb is not None:
+            self.tb.set_secondary_power("AMP", checked)
 
     def _on_ptt_mode_toggle_clicked(self):
         self._configure_ptt_button(hold_mode=not self._ptt_hold_mode)
@@ -653,26 +774,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self._connect(self.uri_combo.currentText())
 
     def _on_scan_clicked(self):
-        self.status_label.setText("Scanning for devices...")
+        device_type = self.device_type_combo.currentData()
+        device_cls = devices.DEVICE_REGISTRY[device_type]
+        self.status_label.setText(f"Scanning for {device_cls.display_name} devices...")
         QtWidgets.QApplication.processEvents()
-        devices, error = scan_devices_with_timeout()
+        found, error = device_cls.scan_devices_with_timeout()
         if error is not None:
             self.status_label.setText(f"Scan failed: {error}")
             return
-        devices.pop("local:", None)  # this machine's own sensors, never a Pluto
+        found.pop("local:", None)  # libiio's local-context artifact, never a Pluto (harmless no-op for HackRF)
         current = self.uri_combo.currentText()
         self.uri_combo.blockSignals(True)
         self.uri_combo.clear()
-        for uri, desc in devices.items():
+        for connection, desc in found.items():
             idx = self.uri_combo.count()
-            self.uri_combo.addItem(uri)
+            self.uri_combo.addItem(connection)
             self.uri_combo.setItemData(idx, desc, QtCore.Qt.ToolTipRole)
         if current and self.uri_combo.findText(current) < 0:
             self.uri_combo.addItem(current)
         if current:
             self.uri_combo.setCurrentText(current)
         self.uri_combo.blockSignals(False)
-        self.status_label.setText(f"Found {len(devices)} device(s)." if devices else "No devices found.")
+        self.status_label.setText(f"Found {len(found)} device(s)." if found else "No devices found.")
 
     def _reset_session_ui_state(self):
         """Reset PTT/E-STOP visuals to a fresh, safe, unkeyed, re-armed
@@ -697,45 +820,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.device_type_combo.setEnabled(True)
         self.compressor_gr_label.setText("GR: 0.0 dB")
         self.status_label.setText("Disconnected.")
 
     def _connect(self, uri_text):
-        uri = config.normalize_uri(uri_text)
-        if not uri:
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        # Pluto's connection is a libiio URI (bare hostname/IP gets 'ip:'
+        # prefixed); HackRF's is a bare serial (or blank for "the only
+        # attached one") -- normalize_uri() would wrongly mangle that.
+        connection = config.normalize_uri(uri_text) if device_cls.connection_kind == "uri" else uri_text.strip()
+        if device_cls.connection_kind == "uri" and not connection:
             self.status_label.setText("Please enter a device hostname, IP, or URI.")
             return
-        self._rebuild(uri, self._wav_path)
+        self._rebuild(connection, self._wav_path)
 
-    def _rebuild(self, uri, wav_path):
+    def _rebuild(self, connection, wav_path):
         """Tear down the current flowgraph (if any) and build a fresh one at
-        `uri` loading `wav_path`, carrying over every other current GUI
-        setting. Shared by device reconnects (Connect button) and WAV file
-        swaps (File button) -- both need the exact same "safely stop the old
-        TX chain, then build and start a new one" sequence; a stray
-        reference to the old flowgraph here would leak its AD9361 buffer
-        claim and break the next connect with 'Unable to create buffer'
-        (the same class of bug run_gui() avoids by never holding a second
-        reference to self.tb of its own)."""
+        `connection` loading `wav_path`, carrying over every other current
+        GUI setting (including the currently selected device type). Shared
+        by device reconnects (Connect button) and WAV file swaps (File
+        button) -- both need the exact same "safely stop the old TX chain,
+        then build and start a new one" sequence; a stray reference to the
+        old flowgraph here would leak its AD9361 buffer claim and break the
+        next connect with 'Unable to create buffer' (the same class of bug
+        run_gui() avoids by never holding a second reference to self.tb of
+        its own)."""
         if self.tb is not None:
             self.tb.shutdown_safe()
             self.tb = None
             self._embed_waterfall(None)
             self._reset_session_ui_state()
-        self.status_label.setText(f"Connecting to {uri}...")
+        device_type = self.device_type_combo.currentData()
+        device_cls = devices.DEVICE_REGISTRY[device_type]
+        label = connection or "auto-detect"
+        self.status_label.setText(f"Connecting to {device_cls.display_name} ({label})...")
         QtWidgets.QApplication.processEvents()
-        probe_error = probe_uri_with_timeout(uri)
+        probe_error = device_cls.probe_with_timeout(connection)
         if probe_error is not None:
-            self.status_label.setText(f"Could not connect to {uri}: {probe_error}")
+            self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {probe_error}")
             self._set_connected_controls_enabled(False)
             self.connect_button.setText("Connect")
             self.uri_combo.setEnabled(True)
+            self.device_type_combo.setEnabled(True)
             return
         try:
             new_tb = PlutoTxFlowgraph(
-                uri=uri,
+                device_type=device_type,
+                connection=connection,
                 frequency=self.freq_spin.value() * 1e6,
-                atten_ceiling_db=self._atten_ceiling_db,
+                power_ceiling=self._atten_ceiling_db,
                 wav_path=wav_path,
                 mode=self.mode_combo.currentData(),
                 source=self.source_combo.currentData(),
@@ -746,14 +880,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 freedv_callsign=self.freedv_callsign_edit.text(),
             )
         except Exception as e:
-            self.status_label.setText(f"Could not connect to {uri}: {e}")
+            self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")
             self._set_connected_controls_enabled(False)
             self.connect_button.setText("Connect")
             self.uri_combo.setEnabled(True)
+            self.device_type_combo.setEnabled(True)
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
+        new_tb.set_secondary_power("AMP", self.amp_checkbox.isChecked())
+        new_tb.device.set_frequency_correction(float(self.freq_correction_spin.value()))
         # Reapply dynamics-processing settings -- a fresh flowgraph starts at
         # config.py's defaults, which would otherwise silently diverge from
         # what these controls still visually show after any rebuild (device
@@ -773,14 +910,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(True)
         self.connect_button.setText("Disconnect")
         self.uri_combo.setEnabled(False)
-        self.status_label.setText(f"Connected to {uri}.")
+        self.device_type_combo.setEnabled(False)
+        self.status_label.setText(f"Connected to {device_cls.display_name} ({label}).")
 
     def _on_estop_toggled(self, checked):
         """checked=True: E-STOP triggered. checked=False: re-armed. One
         toggle button covers both directions instead of two separate ones."""
         if checked:
             self.tb.unkey_ptt()
-            self.tb.safety.force_safe_state()
+            self.tb.device.force_safe_state()
             self._armed = False
             self._reset_ptt_button_visual()
             self.ptt_button.setEnabled(False)
@@ -789,12 +927,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText("E-STOP triggered: attenuation at minimum, LO powered down.")
         else:
             # Deliberately NOT prepare_for_start() -- that also powers the LO
-            # back up, which would violate the PTT<->LO-powerdown hard tie
-            # (LO stays off until the operator actually keys PTT again; see
-            # flowgraph.py's key_ptt()/unkey_ptt()). Just re-confirm minimum
-            # attenuation on both the raw-iio and GR-sink paths.
-            self.tb.safety.force_min_attenuation()
-            self.tb.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
+            # back up (on Pluto), which would violate the PTT<->device-safety
+            # hard tie (LO stays off until the operator actually keys PTT
+            # again; see flowgraph.py's key_ptt()/unkey_ptt()). Just
+            # re-confirm the primary power stage is at its safe/off value.
+            stage = self.tb.device.primary_stage
+            self.tb.device.set_power(stage.name, stage.off_value)
             self._armed = True
             self.ptt_button.setEnabled(True)
             self._set_indicator_idle()
@@ -806,11 +944,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.hw_status_label.setText("")
             return
         try:
-            state = self.tb.safety.read_state()
-            self.hw_status_label.setText(
-                f"HW: hardwaregain={state['hardwaregain_db']:.2f} dB, "
-                f"LO powerdown={state['lo_powerdown']}"
-            )
+            state = self.tb.device.read_hw_state()
+            parts = (f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}" for k, v in state.items())
+            self.hw_status_label.setText("HW: " + ", ".join(parts))
         except Exception as e:
             self.hw_status_label.setText(f"HW status read failed: {e}")
         self.compressor_gr_label.setText(f"GR: {self.tb.compressor.gain_reduction_db():.1f} dB")
@@ -822,7 +958,7 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
 
-def run_gui(uri, frequency_hz=config.DEFAULT_FREQUENCY, atten_ceiling_db=config.DEFAULT_ATTEN_CEILING,
+def run_gui(uri, frequency_hz=config.DEFAULT_FREQUENCY, atten_ceiling_db=pluto_device.DEFAULT_ATTEN_CEILING,
             mode=PlutoTxFlowgraph.MODE_FM):
     """Builds and shows the main window, which itself attempts the initial
     connection to `uri` (see MainWindow.__init__/its _rebuild() call) --

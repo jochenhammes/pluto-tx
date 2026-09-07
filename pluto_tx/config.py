@@ -18,39 +18,18 @@ def normalize_uri(text: str) -> str:
     return f"ip:{text}"
 
 # AD9361 TX attenuation range (dB, 0 = max power, more negative = less power).
+# Stay here (not in devices/pluto.py with the rest of the Pluto-specific TX
+# device constants) because safety.py -- deliberately independent of the
+# device abstraction layer, see devices/pluto.py's module docstring --
+# already imports them from here, and devices/pluto.py importing safety.py
+# means safety.py importing back from devices/pluto.py would be circular.
 MIN_ATTEN = -89.75
 MAX_ATTEN = 0.0
-# GUI power slider default ceiling: never select less attenuation than this
-# (i.e. never more power than this) unless the "unlock full power" box is checked.
-DEFAULT_ATTEN_CEILING = -20.0
-
-# PTT is hard-tied to the TX LO powerdown bit (ad9361-phy altvoltage1,
-# see safety.py's power_down_lo()), in every mode -- not just at app
-# shutdown. Reason: the TX attenuator alone (down to MIN_ATTEN) does not
-# fully suppress LO leakage; an external PA connected to the Pluto's TX
-# port amplifies that residual leakage into an audible/measurable spike
-# whenever the LO is left running between transmissions. So: LO powered
-# down whenever unkeyed (idle at app start, and after every unkey_ptt()/
-# finish_unkey_m17()), powered back up only for the duration of key_ptt().
-# LO_RELOCK_S is how long key_ptt() waits after powering the LO back up
-# before actually unmuting audio and raising TX power, to let the AD9361's
-# synthesizer relock first -- a conservative placeholder, NOT measured
-# against real hardware (unlike M17_EOT_HOLD_S below, which was calibrated
-# against a real PTT release). Needs the same real-PTT calibration pass if
-# transmit quality issues show up right at key-up.
-LO_RELOCK_S = 0.005
 
 # Audio front end.
 AUDIO_RATE = 48_000
-# Shared TX baseband ("quadrature") rate for both FM and SSB. fmcomms2_sink
-# needs set_filter_params() to go below the AD9361's hardware ADC/DAC floor
-# (~2.083 MHz) -- we don't configure that, so QUAD_RATE must stay >= that
-# floor. 2.5 MSps also matches the rate already verified working earlier
-# this session (RX capture + the SDRangel TX test).
-QUAD_RATE = 2_500_000
 
-DEFAULT_BANDWIDTH = 200_000  # Hz, AD9361 analog TX filter (min allowed is 200000)
-DEFAULT_FREQUENCY = 432_150_000  # Hz, matches today's verified carrier test
+DEFAULT_FREQUENCY = 432_150_000  # Hz, matches today's verified carrier test; valid for every device backend
 FINE_TUNE_RANGE_HZ = 2_000  # +/- range of the fine-tune spinbox
 
 # NF (audio) band-pass filter presets, (f_lo, f_hi, trans_width) in Hz.
@@ -137,8 +116,8 @@ FREEDV_DEFAULT_MODE = 8  # FREEDV_MODE_2020 (vs. FREEDV_MODE_2020B = 16)
 
 FREEDV_CALLSIGN_MAX_LEN = 9  # matches M17_CALLSIGN_MAX_LEN; reliable_text itself allows more
 
-# German amateur radio band edges reachable by the Pluto's TX LO range
-# (46.875 MHz - 6 GHz), used only for a non-blocking sanity warning in the GUI.
+# German amateur radio band edges, used only for a non-blocking sanity
+# warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [
     ("2m", 144_000_000, 146_000_000),
     ("70cm", 430_000_000, 440_000_000),

@@ -17,16 +17,15 @@ audio rate -> complex resampler up to TX rate, not real-resample-then-Hilbert.
 import math
 import os
 import sys
-import time
 import wave
 
-from gnuradio import gr, blocks, filter, analog, audio, iio, qtgui
+from gnuradio import gr, blocks, filter, analog, audio, qtgui
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
 from . import config
+from . import devices
 from . import dynamics
-from .safety import PlutoSafety
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
 # install-m17.sh), not something every pluto_tx user necessarily has. The
@@ -73,15 +72,6 @@ def _default_wav_path():
     return _DEFAULT_WAV if os.path.exists(_DEFAULT_WAV) else _ensure_placeholder_wav()
 
 
-def _gr_atten(db: float) -> float:
-    """gr-iio's fmcomms2_sink_fc32.set_attenuation() expects a POSITIVE dB
-    magnitude (it negates internally before writing the AD9361 hardwaregain
-    register) -- the opposite sign convention from raw libiio/iio_attr, which
-    this codebase otherwise uses everywhere (config.MIN_ATTEN = -89.75, etc).
-    Convert only at this boundary."""
-    return abs(db)
-
-
 class PlutoTxFlowgraph(gr.top_block):
     SRC_MIC = 0
     SRC_FILE = 1
@@ -90,20 +80,24 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_M17 = 2
     MODE_FREEDV = 3
 
-    def __init__(self, uri=config.DEFAULT_URI, frequency=config.DEFAULT_FREQUENCY,
-                 atten_ceiling_db=config.DEFAULT_ATTEN_CEILING, audio_device="",
+    def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
+                 power_ceiling=None, audio_device="",
                  wav_path=None, mode=MODE_FM, source=SRC_MIC, enable_waterfall=False,
                  m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign=""):
         super().__init__("PlutoTxFlowgraph")
 
-        self.uri = uri
+        device_cls = devices.DEVICE_REGISTRY[device_type]
+        if power_ceiling is None:
+            power_ceiling = device_cls.default_power_ceiling
+
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
-        self.atten_ceiling_db = atten_ceiling_db
-        self.target_atten_db = atten_ceiling_db
+        self.power_ceiling = power_ceiling
+        self.target_power = power_ceiling
         self._keyed = False
         self._m17_ending = False  # True during the brief EOT tail after unkey_ptt() in M17 mode
+        self._secondary_power = {}  # non-primary power stages (e.g. HackRF's AMP), see set_secondary_power()
 
         if mode == self.MODE_M17 and not M17_AVAILABLE:
             # mode_selector below would otherwise be constructed pointing at
@@ -117,13 +111,15 @@ class PlutoTxFlowgraph(gr.top_block):
         # to sync mode_combo's initial selection, otherwise it always shows
         # "FM" regardless of what mode the flowgraph was actually built with.
 
-        # Safety layer first: attenuation to minimum, LO up -- BEFORE the GR
-        # sink (which enables TX channels at construction time) exists. The
-        # LO is powered back down once construction/wiring is finished below
-        # (idle/unkeyed state) -- see the end of __init__ and key_ptt()/
-        # unkey_ptt() for the PTT<->LO-powerdown hard tie.
-        self.safety = PlutoSafety(uri)
-        self.safety.prepare_for_start()
+        # Device layer first: attenuation to minimum, LO up (Pluto's
+        # prepare_for_start()) -- BEFORE the GR sink (which enables TX
+        # channels at construction time for Pluto) exists. The device is
+        # returned to its safe/idle state once construction/wiring is
+        # finished below -- see the end of __init__ and key_ptt()/
+        # unkey_ptt() for the PTT<->device-safety hard tie (LO-powerdown on
+        # Pluto; see each TxDevice subclass for its own backend).
+        self.device = devices.build_device(device_type, connection=connection, frequency_hz=self.nominal_freq_hz)
+        self.device.prepare_for_start()
 
         # --- Sources ---------------------------------------------------
         self.mic_source = audio.source(config.AUDIO_RATE, audio_device, True)
@@ -196,12 +192,15 @@ class PlutoTxFlowgraph(gr.top_block):
         )
 
         # --- FM branch: real audio @ AUDIO_RATE -> resample -> FM ---------
-        g = math.gcd(config.QUAD_RATE, config.AUDIO_RATE)
+        # quad_rate is the device's TX baseband rate -- Pluto's is fixed
+        # (devices.pluto.QUAD_RATE); other backends may differ.
+        quad_rate = int(self.device.sample_rate_hz)
+        g = math.gcd(quad_rate, config.AUDIO_RATE)
         self.fm_resampler = filter.rational_resampler_fff(
-            interpolation=config.QUAD_RATE // g, decimation=config.AUDIO_RATE // g,
+            interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
             taps=[], fractional_bw=0.4,
         )
-        self.fm_sensitivity = 2 * math.pi * config.FM_DEVIATION_HZ / config.QUAD_RATE
+        self.fm_sensitivity = 2 * math.pi * config.FM_DEVIATION_HZ / quad_rate
         self.fm_mod = analog.frequency_modulator_fc(self.fm_sensitivity)
 
         # --- SSB branch: Hilbert AT AUDIO RATE (see module docstring),
@@ -213,7 +212,7 @@ class PlutoTxFlowgraph(gr.top_block):
         # across the whole band.
         self.ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
         self.ssb_resampler = filter.rational_resampler_ccf(
-            interpolation=config.QUAD_RATE // g, decimation=config.AUDIO_RATE // g,
+            interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
             taps=[], fractional_bw=0.4,
         )
 
@@ -260,9 +259,9 @@ class PlutoTxFlowgraph(gr.top_block):
             self.m17_fm_mod = analog.frequency_modulator_fc(
                 2 * math.pi * config.M17_DEVIATION_HZ / config.M17_BASEBAND_RATE
             )
-            g_m17_tx = math.gcd(config.QUAD_RATE, config.M17_BASEBAND_RATE)
+            g_m17_tx = math.gcd(quad_rate, config.M17_BASEBAND_RATE)
             self.m17_tx_resampler = filter.rational_resampler_ccf(
-                interpolation=config.QUAD_RATE // g_m17_tx, decimation=config.M17_BASEBAND_RATE // g_m17_tx,
+                interpolation=quad_rate // g_m17_tx, decimation=config.M17_BASEBAND_RATE // g_m17_tx,
                 taps=[], fractional_bw=0.4,
             )
 
@@ -296,7 +295,7 @@ class PlutoTxFlowgraph(gr.top_block):
             )
             self.freedv_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
             self.freedv_ssb_resampler = filter.rational_resampler_ccf(
-                interpolation=config.QUAD_RATE // g, decimation=config.AUDIO_RATE // g,
+                interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
                 taps=[], fractional_bw=0.4,
             )
 
@@ -320,7 +319,27 @@ class PlutoTxFlowgraph(gr.top_block):
         self.mode_selector = blocks.selector(gr.sizeof_gr_complex, 1 if mode == self.MODE_SSB else 0, 0)
         self.mode_selector.set_enabled(True)
 
-        self.tx_gain = blocks.multiply_const_cc(1.0 + 0j)
+        # Starts MUTED (0), not the pass-through 1.0+0j it used to be:
+        # ptt_mute alone (upstream, before every modulator) is NOT
+        # sufficient to guarantee zero output downstream -- confirmed on
+        # real HackRF hardware. FM-modulating silence is mathematically a
+        # full-amplitude, unmodulated CARRIER (frequency_modulator_fc maps
+        # a constant zero input to a constant, non-zero complex output), and
+        # FreeDV's OFDM modem keeps emitting pilot/sync tones continuously
+        # regardless of speech content -- neither is "silence" downstream of
+        # ptt_mute, even though the input truly is. This was always true,
+        # even before HackRF existed in this app; it was just invisible on
+        # Pluto, whose ~90dB attenuator + LO powerdown buried it regardless
+        # of what the digital baseband was actually carrying. HackRF has
+        # neither, so the operator saw it directly: a carrier present from
+        # the moment the flowgraph started (tx_gain defaulted to
+        # pass-through), not just something that appeared on key_ptt().
+        # key_ptt()/unkey_ptt()/finish_unkey_m17() now mute/unmute tx_gain
+        # in lockstep with ptt_mute -- the actual RF path is severed at the
+        # LAST point before the device, downstream of every modulation
+        # branch, instead of relying on each modulator happening to produce
+        # zero output for zero input (SSB/M17 do; FM/FreeDV don't).
+        self.tx_gain = blocks.multiply_const_cc(0.0 + 0j)
 
         # Whichever of {mode_selector, m17_tx_resampler, freedv_ssb_resampler}
         # is NOT currently feeding tx_gain must still drain into something --
@@ -341,17 +360,19 @@ class PlutoTxFlowgraph(gr.top_block):
         self.waterfall = None
         if enable_waterfall:
             self.waterfall = qtgui.waterfall_sink_c(
-                1024, window.WIN_BLACKMAN_hARRIS, 0, config.QUAD_RATE, "TX Basisband (vor Pluto-Sink)", 1
+                1024, window.WIN_BLACKMAN_hARRIS, 0, quad_rate, "TX Basisband (vor Geraete-Sink)", 1
             )
 
-        # --- PlutoSDR sink: ALWAYS constructed at MIN_ATTEN, never the
-        # operator's target power (the constructor enables TX channels
-        # immediately, before tb.start() is ever called).
-        self.pluto_sink = iio.fmcomms2_sink_fc32(uri, [True, True], 0x8000, False)
-        self.pluto_sink.set_bandwidth(config.DEFAULT_BANDWIDTH)
-        self.pluto_sink.set_frequency(int(self.nominal_freq_hz))
-        self.pluto_sink.set_samplerate(config.QUAD_RATE)
-        self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
+        # --- Device sink: build_sink() ALWAYS constructs at the device's
+        # minimum power, never the operator's target power (Pluto's sink
+        # constructor enables TX channels immediately, before tb.start() is
+        # ever called -- see device.prepare_for_start() above). Stored on
+        # self (not just a local var) because _rebuild_device_sink() below
+        # needs to disconnect/replace it later, for devices where zeroing
+        # gain alone doesn't actually stop transmission (confirmed for
+        # HackRF -- see devices/hackrf.py and devices/base.py's
+        # supports_persistent_sink).
+        self._device_sink = self.device.build_sink()
 
         # --- Wiring ---------------------------------------------------
         self.connect(self.mic_source, (self.source_selector, self.SRC_MIC))
@@ -407,15 +428,16 @@ class PlutoTxFlowgraph(gr.top_block):
             if producer is not active_producer:
                 self.connect(producer, self._null_sink_for(producer))
 
-        self.connect(self.tx_gain, self.pluto_sink)
+        self.connect(self.tx_gain, self._device_sink)
         if self.waterfall is not None:
             self.connect(self.tx_gain, self.waterfall)
 
-        # Idle state once construction is done: LO powered back down. The
-        # sink constructor above needs the LO up to initialize (see the
-        # comment on prepare_for_start() above), but the app starts unkeyed
-        # -- see key_ptt()/unkey_ptt() for the PTT<->LO-powerdown hard tie.
-        self.safety.power_down_lo(True)
+        # Idle state once construction is done (e.g. Pluto: LO powered back
+        # down -- its sink constructor needs the LO up to initialize, see
+        # the comment on prepare_for_start() above, but the app starts
+        # unkeyed). See key_ptt()/unkey_ptt() for the PTT<->device-safety
+        # hard tie.
+        self.device.post_unkey()
 
     def _build_file_source(self, wav_path):
         """Return a mono, AUDIO_RATE float stream from a WAV file of any
@@ -567,70 +589,117 @@ class PlutoTxFlowgraph(gr.top_block):
 
     def set_fine_offset(self, offset_hz: float):
         self.fine_offset_hz = offset_hz
-        self.pluto_sink.set_frequency(int(self.nominal_freq_hz + self.fine_offset_hz))
+        self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
 
     def set_frequency(self, freq_hz: float):
         self.nominal_freq_hz = freq_hz
-        self.pluto_sink.set_frequency(int(self.nominal_freq_hz + self.fine_offset_hz))
+        self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
 
-    def set_target_power(self, atten_db: float):
-        self.target_atten_db = max(config.MIN_ATTEN, min(self.atten_ceiling_db, atten_db))
+    def set_target_power(self, value: float):
+        stage = self.device.primary_stage
+        self.target_power = max(stage.min_value, min(self.power_ceiling, value))
         if self._keyed:
-            self.pluto_sink.set_attenuation(0, _gr_atten(self.target_atten_db))
+            self.device.set_power(stage.name, self.target_power)
+
+    def set_secondary_power(self, stage_name: str, value):
+        """For non-primary power stages (e.g. HackRF's coarse AMP on/off)
+        that the power ceiling/'unlock full power' clamp doesn't apply to --
+        no equivalent exists on single-stage devices like Pluto. Stored and
+        applied immediately if already keyed, exactly like
+        set_target_power() for the primary stage. unkey_ptt()/
+        finish_unkey_m17() don't need to separately reset this: the device's
+        own post_unkey() hook is responsible for forcing every non-primary
+        stage back to its safe/off value between transmissions (see each
+        TxDevice subclass) -- the cached value here just gets re-applied at
+        the next key_ptt(), matching how target_power persists across
+        key/unkey cycles too."""
+        self._secondary_power[stage_name] = value
+        if self._keyed:
+            self.device.set_power(stage_name, value)
 
     @property
     def keyed(self):
         return self._keyed
 
     def key_ptt(self):
-        """PTT press: power the TX LO back up (it's kept powered down
-        whenever unkeyed -- see unkey_ptt()/finish_unkey_m17()/config.
-        LO_RELOCK_S), wait for the synthesizer to relock, then unmute audio
-        and raise RF power. In M17 mode, also sends SOT (start of
-        transmission) -- without it m17_coder silently discards all input
-        and emits nothing (verified this session).
+        """PTT press: run the device's pre-key hook (on Pluto: power the TX
+        LO back up -- it's kept powered down whenever unkeyed, see
+        unkey_ptt()/finish_unkey_m17() -- and wait for the synthesizer to
+        relock), then unmute audio AND tx_gain, then raise RF power. In M17
+        mode, also sends SOT (start of transmission) -- without it
+        m17_coder silently discards all input and emits nothing (verified
+        this session).
 
-        The LO powerdown/power-up is hard-tied to PTT in every mode, not
-        just at app shutdown: the TX attenuator alone (down to MIN_ATTEN)
-        does not fully suppress LO leakage, and an external PA connected to
-        the Pluto's TX port amplifies that residual leakage into a real,
-        measurable spike whenever the LO is left running between
-        transmissions. Powering the synthesizer off (not just attenuating
-        it) is the only way to actually make it disappear, regardless of
-        which modulation branch is active."""
+        tx_gain (the last block before the device sink, downstream of
+        EVERY modulation branch) is unmuted here alongside ptt_mute, not
+        left permanently at pass-through -- see the comment on tx_gain's
+        construction above for why muting only upstream (ptt_mute) isn't
+        enough: FM-modulating silence is a full-amplitude carrier, and
+        FreeDV's OFDM modem keeps emitting pilot/sync tones regardless of
+        speech content. Confirmed on real HackRF hardware: a carrier was
+        present from the moment the flowgraph started, not just after
+        key_ptt(), because tx_gain used to default to pass-through.
+
+        The device's pre-key/post-unkey hooks are hard-tied to PTT in every
+        mode, not just at app shutdown: on Pluto, the TX attenuator alone
+        (down to MIN_ATTEN) does not fully suppress LO leakage, and an
+        external PA connected to the TX port amplifies that residual
+        leakage into a real, measurable spike whenever the LO is left
+        running between transmissions -- powering the synthesizer off (not
+        just attenuating it) is the only way to actually make it disappear,
+        regardless of which modulation branch is active. See each TxDevice
+        subclass (pluto_tx/devices/) for what its own pre_key()/post_unkey()
+        actually does."""
         self._m17_ending = False
-        self.safety.power_down_lo(False)
-        time.sleep(config.LO_RELOCK_S)
+        self.device.pre_key()
         if self.mode == self.MODE_M17:
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
             self.m17_codec2_encoder.post(_pmt.intern("state_reset"), _pmt.intern("SOT"))
         self.ptt_mute.set_k(1.0)
-        self.pluto_sink.set_attenuation(0, _gr_atten(self.target_atten_db))
+        self.tx_gain.set_k(1.0 + 0j)
+        self.device.set_power(self.device.primary_stage.name, self.target_power)
+        # Only apply cached secondary-stage values the CURRENT device
+        # actually has -- self._secondary_power can carry a stale entry from
+        # a previous device_type (e.g. the GUI unconditionally caches
+        # HackRF's "AMP" checkbox state even while Pluto, which has no such
+        # stage, is connected).
+        device_stage_names = {s.name for s in self.device.power_stages}
+        for stage_name, value in self._secondary_power.items():
+            if stage_name in device_stage_names:
+                self.device.set_power(stage_name, value)
         self._keyed = True
 
     def unkey_ptt(self):
-        """PTT release. FM/SSB: kill RF power FIRST, mute audio, then power
-        the LO down (order is safety-critical -- attenuation to minimum
-        before the LO bit even matters, LO-off is what finally kills the
-        leakage spike for good). M17 is different: muting audio and sending
-        EOT happen immediately, but RF (and therefore the LO) must stay up
-        briefly afterward for the encoder's EOT tail (final frame + EOT
-        frames, ~80ms minimum) to actually transmit -- cutting RF instantly
-        would leave the receiver hanging with no clean end-of-stream.
-        self._keyed stays True and self._m17_ending is set; the GUI drives
+        """PTT release. FM/SSB: mute tx_gain FIRST (severs the actual RF
+        path at the last point before the device, downstream of every
+        modulator -- see tx_gain's construction comment for why ptt_mute
+        alone isn't sufficient), then kill RF power, mute audio, then run
+        the device's post-unkey hook (order is safety-critical -- power to
+        minimum before that hook even runs; on Pluto, LO-off is what finally
+        kills the leakage spike for good). M17 is different: muting audio
+        and sending EOT happen immediately, but RF (and therefore whatever
+        the post-unkey hook would otherwise do) must stay up briefly
+        afterward for the encoder's EOT tail (final frame + EOT frames,
+        ~80ms minimum) to actually transmit -- cutting RF instantly would
+        leave the receiver hanging with no clean end-of-stream. self._keyed
+        stays True and self._m17_ending is set; the GUI drives
         finish_unkey_m17() after a bounded delay to actually lower power and
-        power the LO down. This tail is NOT a safety gap: force_safe_state()
-        (E-STOP, shutdown_safe()) forces attenuation down AND the LO off
-        immediately regardless, via the independent PlutoSafety layer, at
-        any point during the tail."""
+        run the post-unkey hook. This tail is NOT a safety gap:
+        force_safe_state() (E-STOP, shutdown_safe()) forces the device dark
+        immediately regardless, via the device's own independent safety
+        layer, at any point during the tail."""
         if self.mode == self.MODE_M17:
             self.ptt_mute.set_k(0.0)
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("EOT"))
             self._m17_ending = True
         else:
-            self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
+            self.tx_gain.set_k(0.0 + 0j)
+            stage = self.device.primary_stage
+            self.device.set_power(stage.name, stage.off_value)
             self.ptt_mute.set_k(0.0)
-            self.safety.power_down_lo(True)
+            self.device.post_unkey()
+            if not self.device.supports_persistent_sink:
+                self._rebuild_device_sink()
             self._keyed = False
 
     def finish_unkey_m17(self):
@@ -640,10 +709,37 @@ class PlutoTxFlowgraph(gr.top_block):
         _m17_ending, making a stale pending call here harmless)."""
         if not self._m17_ending:
             return
-        self.pluto_sink.set_attenuation(0, _gr_atten(config.MIN_ATTEN))
-        self.safety.power_down_lo(True)
+        self.tx_gain.set_k(0.0 + 0j)
+        stage = self.device.primary_stage
+        self.device.set_power(stage.name, stage.off_value)
+        self.device.post_unkey()
+        if not self.device.supports_persistent_sink:
+            self._rebuild_device_sink()
         self._m17_ending = False
         self._keyed = False
+
+    def _rebuild_device_sink(self):
+        """For devices where zeroing every power stage isn't enough to
+        actually stop transmission (TxDevice.supports_persistent_sink=False
+        -- confirmed on real hardware for HackRF, see devices/hackrf.py):
+        close and reopen the device's sink block, via the same
+        lock()/disconnect()/connect()/unlock() pattern already proven safe
+        here for mode switching (set_mode()/set_freedv_variant() above).
+        The old sink's only remaining Python reference is overwritten
+        below, so it's garbage-collected (releasing the underlying
+        hardware/USB handle) immediately -- the same effect Disconnect
+        already had, just scoped to the device sink instead of tearing
+        down the whole flowgraph. build_sink() always constructs at the
+        device's minimum power (see its docstring), so the freshly rebuilt
+        sink is silent by construction, not just by a gain setting that
+        turned out not to be trustworthy on its own."""
+        self.lock()
+        try:
+            self.disconnect(self.tx_gain, self._device_sink)
+            self._device_sink = self.device.build_sink()
+            self.connect(self.tx_gain, self._device_sink)
+        finally:
+            self.unlock()
 
     def shutdown_safe(self):
         """Stop the flowgraph and force the TX chain dark. Safe to call more than once."""
@@ -654,4 +750,4 @@ class PlutoTxFlowgraph(gr.top_block):
             self.wait()
         except Exception as e:
             print(f"WARNING: flowgraph stop() failed: {e}", file=sys.stderr)
-        self.safety.force_safe_state()
+        self.device.force_safe_state()
