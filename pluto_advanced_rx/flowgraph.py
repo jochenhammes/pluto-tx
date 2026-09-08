@@ -8,24 +8,29 @@ PlutoRxFlowgraph -- see pluto_advanced_rx/config.py's module docstring for
 why. Independent of pluto_tx: RX can't radiate, so none of pluto_tx's
 attenuation/LO-powerdown safety machinery applies here.
 
-Signal path: pluto_source (RX_BANDWIDTH, "zoom" span) --> IF decimation
+Signal path: device source (RX_BANDWIDTH, "zoom" span) --> IF decimation
 filter (real-tap low-pass, complex in/out) down to a FIXED DEMOD_IF_RATE -->
 both demodulator branches always connected (FM: quadrature_demod_cf; SSB: a
 complex band-pass that selects only the upper-sideband region, then
 complex_to_real) --> resample to AUDIO_RATE --> blocks.selector picks the
 active mode --> NF (audio) gain --> rx_mute (starts muted, see
-set_rx_muted()) --> audio.sink. In parallel, FftProbe taps pluto_source
-directly (full RX_BANDWIDTH span, before IF decimation) and exposes FFT
-rows for the waterfall widget to poll.
+set_rx_muted()) --> audio.sink. In parallel, FftProbe taps the device source
+directly (full RX_BANDWIDTH span, before IF decimation) and exposes FFT rows
+for the waterfall widget to poll.
+
+Backend-agnostic via devices/ (RxDevice/GainStage) -- see devices/base.py.
+Only "pluto" is registered so far; device_type defaults to "pluto" so this
+constructor's signature and behavior are unchanged for existing callers.
 """
 import math
 import sys
 
-from gnuradio import gr, blocks, filter, analog, audio, iio
+from gnuradio import gr, blocks, filter, analog, audio
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
 from . import config
+from . import devices
 from .fft_probe import FftProbe
 
 
@@ -38,7 +43,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  manual_gain_db=config.DEFAULT_MANUAL_GAIN_DB, demod_mode=MODE_FM,
                  nf_gain=config.DEFAULT_NF_GAIN, fft_size=config.DEFAULT_FFT_SIZE,
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
-                 ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ):
+                 ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto"):
         super().__init__("AdvancedRxFlowgraph")
 
         self.uri = uri
@@ -46,15 +51,15 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
 
-        self.pluto_source = iio.fmcomms2_source_fc32(uri, [True, True], 0x8000)
-        self.pluto_source.set_frequency(int(self.nominal_freq_hz))
-        self.pluto_source.set_samplerate(int(sample_rate))
-        self.pluto_source.set_gain_mode(0, gain_mode)
-        self.pluto_source.set_gain(0, manual_gain_db)
-        self.pluto_source.set_quadrature(True)
-        self.pluto_source.set_rfdc(True)
-        self.pluto_source.set_bbdc(True)
-        self.pluto_source.set_filter_params("Auto", "", 0, 0)
+        self.device = devices.build_device(
+            device_type, connection=uri, frequency_hz=self.nominal_freq_hz,
+            sample_rate_hz=sample_rate, bandwidth_hz=None,
+        )
+        # Constructed first, gain configured right after -- mirrors
+        # TxDevice.build_sink()'s "construct, then configure power" split.
+        self.pluto_source = self.device.build_source()
+        self.device.set_gain_mode(gain_mode)
+        self.device.set_gain("gain", manual_gain_db)
 
         # --- FFT probe for the interactive waterfall widget: taps the full
         # RX_BANDWIDTH span directly off pluto_source, same point pluto_rx's
@@ -159,7 +164,7 @@ class AdvancedRxFlowgraph(gr.top_block):
 
     def _retune(self):
         actual = self.nominal_freq_hz + self.fine_offset_hz
-        self.pluto_source.set_frequency(int(actual))
+        self.device.set_frequency(actual)
 
     def set_frequency(self, freq_hz: float):
         self.nominal_freq_hz = freq_hz
@@ -170,10 +175,10 @@ class AdvancedRxFlowgraph(gr.top_block):
         self._retune()
 
     def set_gain_mode(self, mode: str):
-        self.pluto_source.set_gain_mode(0, mode)
+        self.device.set_gain_mode(mode)
 
     def set_manual_gain(self, gain_db: float):
-        self.pluto_source.set_gain(0, gain_db)
+        self.device.set_gain("gain", gain_db)
 
     def set_demod_mode(self, mode: int):
         self.demod_selector.set_input_index(mode)
