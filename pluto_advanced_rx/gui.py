@@ -299,6 +299,18 @@ class MainWindow(QtWidgets.QMainWindow):
         db_sliders_col.addWidget(QtWidgets.QLabel("Ceiling"), alignment=QtCore.Qt.AlignHCenter)
         self.db_ceiling_slider = QtWidgets.QSlider(QtCore.Qt.Vertical)
         self.db_ceiling_slider.setRange(-150, 40)
+        # Inverted: Qt's default vertical-slider orientation is min-at-
+        # bottom/max-at-top, but Ceiling and Floor are two SEPARATE
+        # full-range sliders stacked in one column (not one double-handled
+        # range slider) -- with the default orientation the Ceiling slider
+        # (top half of the column) and Floor slider (bottom half) each still
+        # run bottom-to-top internally, which reads backwards for a
+        # "ceiling"/"floor" pair. Inverted appearance+controls (mouse drag,
+        # wheel, and arrow keys) puts max at the bottom of each slider's own
+        # track instead, so dragging DOWN raises the value on both --
+        # requested for UX reasons.
+        self.db_ceiling_slider.setInvertedAppearance(True)
+        self.db_ceiling_slider.setInvertedControls(True)
         self.db_ceiling_slider.setValue(int(db_hi))
         self.db_ceiling_slider.valueChanged.connect(self._on_db_range_changed)
         db_sliders_col.addWidget(self.db_ceiling_slider, 1, alignment=QtCore.Qt.AlignHCenter)
@@ -308,6 +320,8 @@ class MainWindow(QtWidgets.QMainWindow):
         db_sliders_col.addWidget(QtWidgets.QLabel("Floor"), alignment=QtCore.Qt.AlignHCenter)
         self.db_floor_slider = QtWidgets.QSlider(QtCore.Qt.Vertical)
         self.db_floor_slider.setRange(-150, 40)
+        self.db_floor_slider.setInvertedAppearance(True)  # see db_ceiling_slider's comment above
+        self.db_floor_slider.setInvertedControls(True)
         self.db_floor_slider.setValue(int(db_lo))
         self.db_floor_slider.valueChanged.connect(self._on_db_range_changed)
         db_sliders_col.addWidget(self.db_floor_slider, 1, alignment=QtCore.Qt.AlignHCenter)
