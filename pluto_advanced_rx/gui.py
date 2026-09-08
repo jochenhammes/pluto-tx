@@ -21,9 +21,8 @@ import sys
 
 from PyQt5 import QtCore, QtWidgets
 
-from pluto_tx.netutil import probe_uri_with_timeout, scan_devices_with_timeout
-
 from . import config
+from . import devices
 from .flowgraph import AdvancedRxFlowgraph
 from .waterfall_widget import AdvancedWaterfallWidget
 
@@ -49,21 +48,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
-        # --- Device group: URI entry/scan/connect -------------------------
+        # --- Device group: type + connection, scan/connect -----------------
+        # One connection combo shared by every backend (a libiio URI for
+        # Pluto, a serial/Soapy-args string for HackRF/RTL-SDR) -- mirrors
+        # pluto_tx/gui.py's identical device_type_combo + uri_combo pattern.
+        # Relabelled/retooltipped by _on_device_type_changed() below.
         device_group = QtWidgets.QGroupBox("Device")
         device_row = QtWidgets.QHBoxLayout(device_group)
-        device_row.addWidget(QtWidgets.QLabel("Hostname or IP:"))
+        device_row.addWidget(QtWidgets.QLabel("Device Type:"))
+        self.device_type_combo = QtWidgets.QComboBox()
+        for dtype, device_cls in devices.DEVICE_REGISTRY.items():
+            self.device_type_combo.addItem(device_cls.display_name, dtype)
+        self.device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
+        device_row.addWidget(self.device_type_combo)
+        self.device_label = QtWidgets.QLabel("Device (hostname or IP):")
+        device_row.addWidget(self.device_label)
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
         self.uri_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
         self.uri_combo.addItem(uri)
         self.uri_combo.setEnabled(False)  # editable only while disconnected
-        self.uri_combo.setToolTip(
-            "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
-            "URI like usb:1.5.5 to pick a specific device when more than one "
-            "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
-            "automatically. Use Scan to discover devices on the network/USB."
-        )
         device_row.addWidget(self.uri_combo, 1)
         self.scan_button = QtWidgets.QPushButton("Scan")
         self.scan_button.clicked.connect(self._on_scan_clicked)
@@ -72,6 +76,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
         layout.addWidget(device_group)
+        self._update_device_connection_labels()
 
         # --- Receiver group: frequency, demodulator, gain, bandwidth ------
         receiver_group = QtWidgets.QGroupBox("Receiver")
@@ -139,27 +144,47 @@ class MainWindow(QtWidgets.QMainWindow):
         demod_row.addWidget(self.width_label)
         receiver_layout.addLayout(demod_row)
 
-        gain_row = QtWidgets.QHBoxLayout()
-        gain_row.addWidget(QtWidgets.QLabel("Gain Mode:"))
+        # Two mutually-exclusive gain panels, switched by device type (only
+        # one is ever visible at a time) -- agc_gain_widget for AGC-capable
+        # single-stage backends (Pluto, RTL-SDR: a mode combo + one slider,
+        # unchanged from before the device abstraction existed), and
+        # manual_gain_widget for backends with no AGC stage at all (HackRF:
+        # one row per gain_stage, built dynamically from GainStage data by
+        # _rebuild_manual_gain_panel() rather than hardcoded per device).
+        self.agc_gain_widget = QtWidgets.QWidget()
+        agc_gain_row = QtWidgets.QHBoxLayout(self.agc_gain_widget)
+        agc_gain_row.setContentsMargins(0, 0, 0, 0)
+        agc_gain_row.addWidget(QtWidgets.QLabel("Gain Mode:"))
         self.gain_mode_combo = QtWidgets.QComboBox()
         for m in config.GAIN_MODES:
             self.gain_mode_combo.addItem(m, m)
         self.gain_mode_combo.setCurrentText(gain_mode)
         self.gain_mode_combo.currentIndexChanged.connect(self._on_gain_mode_changed)
-        gain_row.addWidget(self.gain_mode_combo)
+        agc_gain_row.addWidget(self.gain_mode_combo)
 
-        gain_row.addWidget(QtWidgets.QLabel("RF Gain (dB):"))
+        agc_gain_row.addWidget(QtWidgets.QLabel("RF Gain (dB):"))
         self.gain_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         lo, hi = config.MANUAL_GAIN_RANGE_DB
         self.gain_slider.setRange(int(lo), int(hi))
         self.gain_slider.setValue(int(manual_gain_db))
         self.gain_slider.setEnabled(gain_mode == "manual")
         self.gain_slider.valueChanged.connect(self._on_gain_changed)
-        gain_row.addWidget(self.gain_slider)
+        agc_gain_row.addWidget(self.gain_slider)
         self.gain_label = QtWidgets.QLabel(f"{int(manual_gain_db)} dB")
         self.gain_label.setMinimumWidth(50)
-        gain_row.addWidget(self.gain_label)
-        receiver_layout.addLayout(gain_row)
+        agc_gain_row.addWidget(self.gain_label)
+        receiver_layout.addWidget(self.agc_gain_widget)
+
+        # Rebuilt per-device by _rebuild_manual_gain_panel() (called from
+        # _sync_device_dependent_widgets() on a device-type switch) --
+        # empty and hidden at construction, since the app always starts on
+        # Pluto (AGC-capable, uses agc_gain_widget above instead).
+        self.manual_gain_widget = QtWidgets.QWidget()
+        self.manual_gain_layout = QtWidgets.QVBoxLayout(self.manual_gain_widget)
+        self.manual_gain_layout.setContentsMargins(0, 0, 0, 0)
+        self.manual_gain_widget.setVisible(False)
+        self._manual_gain_controls = {}  # stage_name -> (widget, value_label_or_None, GainStage)
+        receiver_layout.addWidget(self.manual_gain_widget)
 
         nf_row = QtWidgets.QHBoxLayout()
         nf_row.addWidget(QtWidgets.QLabel("Audio Gain:"))
@@ -265,6 +290,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.device_type_combo.setEnabled(True)
         self._connect(uri)
 
     @staticmethod
@@ -273,8 +299,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_connected_controls_enabled(self, enabled: bool):
         for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
-                  self.gain_mode_combo, self.nf_gain_slider, self.bandwidth_combo, self.fft_size_combo,
-                  self.receive_button):
+                  self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
+                  self.bandwidth_combo, self.fft_size_combo, self.receive_button):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
 
@@ -282,6 +308,152 @@ class MainWindow(QtWidgets.QMainWindow):
         self.receive_button.setText("Receiving (click to mute)" if receiving else "Muted (click to receive)")
         color = "#27ae60" if receiving else "#7f8c8d"
         self.receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
+
+    def _update_device_connection_labels(self):
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        if device_cls.connection_kind == "uri":
+            self.device_label.setText("Device (hostname or IP):")
+            self.uri_combo.setToolTip(
+                "libiio context URI, e.g. plutoplus.local, 192.168.1.50, or a full "
+                "URI like usb:1.5.5 to pick a specific device when more than one "
+                "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
+                "automatically. Use Scan to discover devices on the network/USB."
+            )
+        else:
+            self.device_label.setText(f"{device_cls.display_name} Serial (blank = auto):")
+            self.uri_combo.setToolTip(
+                f"{device_cls.display_name} serial number, or leave blank to use the "
+                f"only attached one. Use Scan to discover attached devices (needs "
+                f"python3-soapysdr, see install.sh). A full Soapy device-args string "
+                f"(containing 'driver=') is also accepted unchanged, e.g. for "
+                f"SoapyRemote network access -- documented as a capability, not "
+                f"tested end-to-end (no second machine available this session)."
+            )
+
+    def _on_device_type_changed(self, idx):
+        """Only takes effect on the next Connect -- device_type_combo (like
+        uri_combo) is only editable while disconnected. Also clears the
+        connection field: a Pluto URI left behind after switching to
+        HackRF/RTL-SDR (or vice versa) looks like a valid value but isn't --
+        the operator has to notice and clear it manually otherwise (the
+        exact bug already found and fixed on the pluto_tx side this
+        session)."""
+        self.uri_combo.blockSignals(True)
+        self.uri_combo.clear()
+        self.uri_combo.clearEditText()
+        self.uri_combo.blockSignals(False)
+        self._sync_device_dependent_widgets()
+
+    def _sync_device_dependent_widgets(self):
+        """Range/item-list/visibility updates only, never touches self.tb.
+        Called ONLY from _on_device_type_changed() above -- deliberately NOT
+        also once at the end of __init__ the way pluto_tx/gui.py's version
+        is: the widgets built during __init__ are already correctly
+        Pluto-shaped (bandwidth_combo/gain_mode_combo/gain_slider match
+        PlutoDevice's own choices exactly), so an extra call here would only
+        risk clobbering the constructor's caller-supplied sample_rate/
+        gain_mode/manual_gain_db with PlutoDevice's class defaults instead.
+        On an ACTUAL type switch there's no equivalent concern -- the old
+        values don't even apply to the new device's different value domain
+        (a HackRF sample rate isn't a valid Pluto one), so resetting to the
+        new device's own defaults here is correct, not just convenient."""
+        self._update_device_connection_labels()
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+
+        lo_hz, hi_hz = device_cls.frequency_range_hz
+        self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
+
+        self.bandwidth_combo.blockSignals(True)
+        self.bandwidth_combo.clear()
+        for bw in device_cls.sample_rate_hz_choices:
+            self.bandwidth_combo.addItem(self._format_hz(bw), bw)
+        default_idx = device_cls.sample_rate_hz_choices.index(device_cls.default_sample_rate_hz)
+        self.bandwidth_combo.setCurrentIndex(default_idx)
+        self.bandwidth_combo.blockSignals(False)
+
+        if device_cls.supports_agc_mode:
+            self.agc_gain_widget.setVisible(True)
+            self.manual_gain_widget.setVisible(False)
+            self.gain_mode_combo.blockSignals(True)
+            self.gain_mode_combo.clear()
+            for m in device_cls.agc_modes:
+                self.gain_mode_combo.addItem(m, m)
+            default_mode_idx = self.gain_mode_combo.findData(device_cls.default_gain_mode)
+            self.gain_mode_combo.setCurrentIndex(default_mode_idx if default_mode_idx >= 0 else 0)
+            self.gain_mode_combo.blockSignals(False)
+            agc_stage = next(s for s in device_cls.gain_stages if s.controls_agc)
+            self.gain_slider.blockSignals(True)
+            self.gain_slider.setRange(int(round(agc_stage.min_value)), int(round(agc_stage.max_value)))
+            self.gain_slider.setValue(int(round(agc_stage.default_value)))
+            self.gain_slider.blockSignals(False)
+            self.gain_slider.setEnabled(self.gain_mode_combo.currentData() == "manual")
+            self.gain_label.setText(f"{int(round(agc_stage.default_value))} {agc_stage.unit}")
+        else:
+            self.agc_gain_widget.setVisible(False)
+            self.manual_gain_widget.setVisible(True)
+            self._rebuild_manual_gain_panel(device_cls)
+
+    def _rebuild_manual_gain_panel(self, device_cls):
+        """(Re)builds manual_gain_widget's contents from scratch, one row
+        per device_cls.gain_stages entry -- generic over stage count/kind
+        rather than hardcoded per device, so a future manual-only backend
+        with a different stage count needs no GUI changes here. Only HackRF
+        exercises this today (LNA/AMP/VGA)."""
+        while self.manual_gain_layout.count():
+            item = self.manual_gain_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._manual_gain_controls = {}
+        for stage in device_cls.gain_stages:
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(QtWidgets.QLabel(f"{stage.label}:"))
+            if stage.kind == "bool":
+                widget = QtWidgets.QCheckBox()
+                widget.setChecked(bool(stage.default_value))
+                widget.toggled.connect(lambda _checked, name=stage.name: self._on_manual_gain_changed(name))
+                row.addWidget(widget)
+                self._manual_gain_controls[stage.name] = (widget, None, stage)
+            else:
+                widget = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+                widget.setRange(int(round(stage.min_value)), int(round(stage.max_value)))
+                widget.setValue(int(round(stage.default_value)))
+                value_label = QtWidgets.QLabel(f"{int(round(stage.default_value))} {stage.unit}")
+                value_label.setMinimumWidth(60)
+                widget.valueChanged.connect(lambda _v, name=stage.name: self._on_manual_gain_changed(name))
+                row.addWidget(widget)
+                row.addWidget(value_label)
+                self._manual_gain_controls[stage.name] = (widget, value_label, stage)
+            row_widget = QtWidgets.QWidget()
+            row_widget.setLayout(row)
+            self.manual_gain_layout.addWidget(row_widget)
+
+    def _on_manual_gain_changed(self, stage_name):
+        widget, label, stage = self._manual_gain_controls[stage_name]
+        if stage.kind == "bool":
+            value = widget.isChecked()
+        else:
+            value = float(widget.value())
+            if label is not None:
+                label.setText(f"{int(value)} {stage.unit}")
+        if self.tb is not None:
+            self.tb.device.set_gain(stage_name, value)
+
+    def _current_gain_kwargs(self, device_cls):
+        """gain_mode/manual_gain_db for an AGC-capable device (Pluto/
+        RTL-SDR, read from gain_mode_combo/gain_slider), or gain_values for
+        a purely-manual one (HackRF, read from the per-stage manual gain
+        panel). AdvancedRxFlowgraph accepts both unconditionally -- the
+        unused one is simply inert for that backend (see its own
+        docstring) -- so the caller doesn't need to branch on device_cls
+        itself, just call this and pass the result through."""
+        if device_cls.supports_agc_mode:
+            return dict(gain_mode=self.gain_mode_combo.currentData(),
+                        manual_gain_db=float(self.gain_slider.value()), gain_values=None)
+        gain_values = {name: (widget.isChecked() if stage.kind == "bool" else float(widget.value()))
+                       for name, (widget, _label, stage) in self._manual_gain_controls.items()}
+        return dict(gain_mode=config.DEFAULT_GAIN_MODE, manual_gain_db=0.0, gain_values=gain_values)
 
     def _sync_waterfall(self):
         """Push the current tuned frequency/span/demod-band to the waterfall
@@ -417,11 +589,10 @@ class MainWindow(QtWidgets.QMainWindow):
         swapped -- it persists, just gets a new frequency range."""
         if self.tb is None:
             return
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         new_rate = self.bandwidth_combo.currentData()
         freq = self.tb.nominal_freq_hz
         fine = self.tb.fine_offset_hz
-        gain_mode = self.gain_mode_combo.currentData()
-        gain_db = float(self.gain_slider.value())
         demod_mode = self.demod_combo.currentData()
         nf_gain = self.nf_gain_slider.value() / 100.0
         fft_size = self.fft_size_combo.currentData()
@@ -430,14 +601,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         try:
             new_tb = AdvancedRxFlowgraph(
-                uri=self.tb.uri, frequency=freq, sample_rate=new_rate, gain_mode=gain_mode,
-                manual_gain_db=gain_db, demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
+                uri=self.tb.uri, frequency=freq, sample_rate=new_rate,
+                demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
+                device_type=device_cls.device_type, **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
             self.status_label.setText(f"Could not switch to {self._format_hz(new_rate)}: {e}")
             self.bandwidth_combo.blockSignals(True)
-            self.bandwidth_combo.setCurrentIndex(config.RX_BANDWIDTH_PRESETS.index(int(self.tb.sample_rate)))
+            self.bandwidth_combo.setCurrentIndex(device_cls.sample_rate_hz_choices.index(int(self.tb.sample_rate)))
             self.bandwidth_combo.blockSignals(False)
             return
 
@@ -458,26 +630,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self._connect(self.uri_combo.currentText())
 
     def _on_scan_clicked(self):
-        self.status_label.setText("Scanning for devices...")
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        self.status_label.setText(f"Scanning for {device_cls.display_name} devices...")
         QtWidgets.QApplication.processEvents()
-        devices, error = scan_devices_with_timeout()
+        found, error = device_cls.scan_devices_with_timeout()
         if error is not None:
             self.status_label.setText(f"Scan failed: {error}")
             return
-        devices.pop("local:", None)  # this machine's own sensors, never a Pluto
+        found.pop("local:", None)  # libiio's local-context artifact, never a Pluto (harmless no-op for HackRF/RTL-SDR)
         current = self.uri_combo.currentText()
         self.uri_combo.blockSignals(True)
         self.uri_combo.clear()
-        for uri, desc in devices.items():
+        for connection, desc in found.items():
             idx = self.uri_combo.count()
-            self.uri_combo.addItem(uri)
+            self.uri_combo.addItem(connection)
             self.uri_combo.setItemData(idx, desc, QtCore.Qt.ToolTipRole)
         if current and self.uri_combo.findText(current) < 0:
             self.uri_combo.addItem(current)
         if current:
             self.uri_combo.setCurrentText(current)
         self.uri_combo.blockSignals(False)
-        self.status_label.setText(f"Found {len(devices)} device(s)." if devices else "No devices found.")
+        self.status_label.setText(f"Found {len(found)} device(s)." if found else "No devices found.")
 
     def _disconnect(self):
         self.tb.shutdown()
@@ -487,6 +660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.device_type_combo.setEnabled(True)
         self.status_label.setText("Disconnected.")
         # Reset to muted -- only here and at fresh app startup, NOT on
         # in-session rebuilds (_on_bandwidth_changed), which carry the
@@ -498,15 +672,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._style_receive_button(receiving=False)
 
     def _connect(self, uri_text):
-        uri = config.normalize_uri(uri_text)
-        if not uri:
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        # Pluto's connection is a libiio URI (bare hostname/IP gets 'ip:'
+        # prefixed); HackRF/RTL-SDR's is a bare serial (or blank for "the
+        # only attached one"), or a full Soapy device-args string --
+        # normalize_uri() would wrongly mangle either of those.
+        connection = config.normalize_uri(uri_text) if device_cls.connection_kind == "uri" else uri_text.strip()
+        if device_cls.connection_kind == "uri" and not connection:
             self.status_label.setText("Please enter a device hostname, IP, or URI.")
             return
-        self.status_label.setText(f"Connecting to {uri}...")
+        self.status_label.setText(f"Connecting to {device_cls.display_name}...")
         QtWidgets.QApplication.processEvents()
-        probe_error = probe_uri_with_timeout(uri)
+        probe_error = device_cls.probe_with_timeout(connection)
         if probe_error is not None:
-            self.status_label.setText(f"Could not connect to {uri}: {probe_error}")
+            self.status_label.setText(f"Could not connect to {device_cls.display_name}: {probe_error}")
             return
         # self.tb is always None here (that's the precondition for calling
         # _connect), so there's no old flowgraph to read the OTHER mode's
@@ -521,18 +700,17 @@ class MainWindow(QtWidgets.QMainWindow):
             fm_width = config.FM_DEMOD_WIDTH_DEFAULT_HZ
         try:
             new_tb = AdvancedRxFlowgraph(
-                uri=uri,
+                uri=connection,
                 frequency=self.freq_spin.value() * 1e6,
                 sample_rate=self.bandwidth_combo.currentData(),
-                gain_mode=self.gain_mode_combo.currentData(),
-                manual_gain_db=float(self.gain_slider.value()),
                 demod_mode=self.demod_combo.currentData(),
                 nf_gain=self.nf_gain_slider.value() / 100.0,
                 fft_size=self.fft_size_combo.currentData(),
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
+                device_type=device_cls.device_type, **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
-            self.status_label.setText(f"Could not connect to {uri}: {e}")
+            self.status_label.setText(f"Could not connect to {device_cls.display_name}: {e}")
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_rx_muted(self._rx_muted)  # True here (see _disconnect()/__init__) -- fresh connect starts muted
@@ -543,7 +721,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(True)
         self.connect_button.setText("Disconnect")
         self.uri_combo.setEnabled(False)
-        self.status_label.setText(f"Connected to {uri}.")
+        self.device_type_combo.setEnabled(False)
+        self.status_label.setText(f"Connected to {device_cls.display_name} ({connection or 'auto-detect'}).")
 
     def closeEvent(self, event):
         if self.tb is not None:
