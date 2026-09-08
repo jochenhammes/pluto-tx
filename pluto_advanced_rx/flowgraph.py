@@ -33,10 +33,17 @@ from . import config
 from . import devices
 from .fft_probe import FftProbe
 
+# RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
+# install-rade.sh), not something every user has.
+from . import rade_ctypes as _rade_ctypes
+from .rade import RadeDecoder
+RADE_AVAILABLE = _rade_ctypes.RADE_AVAILABLE
+
 
 class AdvancedRxFlowgraph(gr.top_block):
     MODE_FM = 0
     MODE_SSB = 1
+    MODE_RADE = 2
 
     def __init__(self, uri=None, frequency=config.DEFAULT_FREQUENCY,
                  sample_rate=config.DEFAULT_RX_BANDWIDTH, gain_mode=config.DEFAULT_GAIN_MODE,
@@ -65,6 +72,14 @@ class AdvancedRxFlowgraph(gr.top_block):
         independent: a device could in principle have both an AGC stage and
         further manual-only stages, though none implemented so far do."""
         super().__init__("AdvancedRxFlowgraph")
+
+        if demod_mode == self.MODE_RADE and not RADE_AVAILABLE:
+            # demod_selector below would otherwise be constructed pointing
+            # at a mode it can't actually decode (RADE bypasses it entirely
+            # -- see below) -- fall back rather than build a broken
+            # flowgraph, same pattern as pluto_tx's MODE_RADE fallback.
+            demod_mode = self.MODE_FM
+        self.demod_mode = demod_mode  # tracked so set_demod_mode() knows the PREVIOUS producer to swap away from
 
         self.sample_rate = sample_rate
         self.nominal_freq_hz = float(frequency)
@@ -162,13 +177,74 @@ class AdvancedRxFlowgraph(gr.top_block):
         # actually running -- the initial index must go through the
         # constructor (see pluto_tx/flowgraph.py for the full explanation of
         # this gotcha). set_demod_mode() below is for RUNTIME switching only.
-        self.demod_selector = blocks.selector(gr.sizeof_float, demod_mode, 0)
+        # demod_selector only ever carries FM/SSB (2 inputs) -- RADE is
+        # deliberately NOT a third selector input, same scheduler-risk
+        # reasoning as pluto_tx's M17/FreeDV/RADE producers (a frame-
+        # quantized block -- RadeDecoder's variable nin()/irregular output
+        # cadence is an even more extreme profile than those TX-side
+        # blocks). Its initial index is irrelevant when demod_mode==MODE_RADE
+        # (demod_selector's output drains into a null_sink in that case, see
+        # _audio_producer_map()/set_demod_mode() below) -- clamp to a valid
+        # FM/SSB index either way, never MODE_RADE.
+        self.demod_selector = blocks.selector(gr.sizeof_float, 1 if demod_mode == self.MODE_SSB else 0, 0)
         self.demod_selector.set_enabled(True)
         self.connect(self.fm_resampler, (self.demod_selector, self.MODE_FM))
         self.connect(self.ssb_resampler, (self.demod_selector, self.MODE_SSB))
 
+        # --- RADE V1 branch (optional, only if librade.so + lpcnet_demo are
+        # both available -- see RADE_AVAILABLE above). Taps if_filter's
+        # output (already decimated to the fixed DEMOD_IF_RATE, e.g.
+        # 50kHz), NOT pluto_source directly -- a real bug caught this
+        # session: decimating straight from the RX bandwidth preset
+        # (2.5Msps default) down to 8kHz in one rational_resampler_ccf stage
+        # demands a huge single-call input chunk (>10000 items) that
+        # exceeds GNU Radio's default max buffer size (8191), crashing the
+        # scheduler ("requesting more input data than we can provide") --
+        # confirmed reproducible at the app's own DEFAULT sample rate, not
+        # just an extreme preset. Tapping if_filter instead keeps the
+        # decimation ratio small (e.g. 25:4 at the default preset instead
+        # of 625:2) with no functional difference for RADE's actual signal
+        # content: if_filter's anti-alias low-pass is transparent to a
+        # signal RADE's own few-kHz-wide OFDM waveform sits well inside of,
+        # the same reasoning FM/SSB already rely on sharing that same
+        # if_filter output. Runs THROUGH nf_gain/rx_mute afterward, same as
+        # FM/SSB -- pure output volume/mute, none of TX's pre-modulator
+        # dynamics-risk reasoning applies on the RX side.
+        if RADE_AVAILABLE:
+            g_rade = math.gcd(int(self.if_rate), _rade_ctypes.RADE_MODEM_SAMPLE_RATE)
+            self.rade_rx_resampler = filter.rational_resampler_ccf(
+                interpolation=_rade_ctypes.RADE_MODEM_SAMPLE_RATE // g_rade,
+                decimation=int(self.if_rate) // g_rade,
+                taps=[], fractional_bw=0.4,
+            )
+            self.connect(self.if_filter, self.rade_rx_resampler)
+            self.rade_decoder = RadeDecoder()
+            self.connect(self.rade_rx_resampler, self.rade_decoder)
+            self.rade_short_to_float = blocks.short_to_float(1, 32767.0)
+            self.connect(self.rade_decoder, self.rade_short_to_float)
+            g_rade_up = math.gcd(_rade_ctypes.RADE_SPEECH_SAMPLE_RATE, config.AUDIO_RATE)
+            self.rade_audio_resampler_up = filter.rational_resampler_fff(
+                interpolation=config.AUDIO_RATE // g_rade_up,
+                decimation=_rade_ctypes.RADE_SPEECH_SAMPLE_RATE // g_rade_up,
+                taps=[], fractional_bw=0.4,
+            )
+            self.connect(self.rade_short_to_float, self.rade_audio_resampler_up)
+
         self.nf_gain = blocks.multiply_const_ff(nf_gain)
-        self.connect(self.demod_selector, self.nf_gain)
+        # Exactly one of {demod_selector, rade_audio_resampler_up} feeds
+        # nf_gain at a time -- the other drains into a null_sink. See
+        # _audio_producer_map()/set_demod_mode() for the runtime swap logic
+        # (RX-side mirror of PlutoTxFlowgraph.set_mode()'s tx_gain producer
+        # swap, same lock()/connect()/disconnect() pattern).
+        self._null_sink_selector = blocks.null_sink(gr.sizeof_float)
+        if RADE_AVAILABLE:
+            self._null_sink_rade = blocks.null_sink(gr.sizeof_float)
+        producers = self._audio_producer_map()
+        active_producer = producers[self.demod_mode]
+        self.connect(active_producer, self.nf_gain)
+        for producer in set(producers.values()):
+            if producer is not active_producer:
+                self.connect(producer, self._null_sink_for_audio(producer))
 
         # Mute gate, last block before the physical output -- starts muted
         # (0.0) regardless of what rx_muted the caller eventually asks for,
@@ -211,8 +287,49 @@ class AdvancedRxFlowgraph(gr.top_block):
         agc_stage = next(s for s in self.device.gain_stages if s.controls_agc)
         self.device.set_gain(agc_stage.name, gain_db)
 
+    def _audio_producer_map(self):
+        """mode -> the block that should feed nf_gain in that mode. FM/SSB
+        share demod_selector (fast index switch, no reconnect); RADE gets
+        its own dedicated producer (see the comment above demod_selector's
+        construction for why it can't share it)."""
+        producers = {self.MODE_FM: self.demod_selector, self.MODE_SSB: self.demod_selector}
+        if RADE_AVAILABLE:
+            producers[self.MODE_RADE] = self.rade_audio_resampler_up
+        return producers
+
+    def _null_sink_for_audio(self, producer):
+        if producer is self.demod_selector:
+            return self._null_sink_selector
+        if RADE_AVAILABLE and producer is self.rade_audio_resampler_up:
+            return self._null_sink_rade
+        raise ValueError(f"no null_sink registered for producer {producer!r}")
+
     def set_demod_mode(self, mode: int):
-        self.demod_selector.set_input_index(mode)
+        prev_mode = self.demod_mode
+        producers = self._audio_producer_map()
+        prev_producer = producers[prev_mode]
+        new_producer = producers[mode]
+        self.demod_mode = mode
+
+        if new_producer is not prev_producer:
+            # Entering/leaving RADE mode: reroute nf_gain's upstream
+            # connection. Brief pause (lock/unlock), same pattern already
+            # proven on real hardware for pluto_tx's M17/FreeDV/RADE mode
+            # switching. FM<->SSB switching never hits this branch (both
+            # map to the same demod_selector producer).
+            self.lock()
+            try:
+                self.disconnect(prev_producer, self.nf_gain)
+                self.disconnect(new_producer, self._null_sink_for_audio(new_producer))
+                self.connect(new_producer, self.nf_gain)
+                self.connect(prev_producer, self._null_sink_for_audio(prev_producer))
+            finally:
+                self.unlock()
+
+        if mode == self.MODE_RADE:
+            return  # bypasses demod_selector entirely, nothing to retap there
+
+        self.demod_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
