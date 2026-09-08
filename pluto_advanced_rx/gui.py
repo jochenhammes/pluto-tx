@@ -23,7 +23,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from . import config
 from . import devices
-from .flowgraph import AdvancedRxFlowgraph
+from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE
 from .waterfall_widget import AdvancedWaterfallWidget
 
 
@@ -126,6 +126,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demod_combo = QtWidgets.QComboBox()
         self.demod_combo.addItem("FM", AdvancedRxFlowgraph.MODE_FM)
         self.demod_combo.addItem("SSB (USB)", AdvancedRxFlowgraph.MODE_SSB)
+        self.demod_combo.addItem("RADE", AdvancedRxFlowgraph.MODE_RADE)
+        if not RADE_AVAILABLE:
+            # rade_c is an optional, from-source dependency (see
+            # install-rade.sh) -- grey out rather than hide, same as
+            # pluto_tx's M17/FreeDV/RADE mode entries.
+            rade_item_idx = self.demod_combo.findData(AdvancedRxFlowgraph.MODE_RADE)
+            item = self.demod_combo.model().item(rade_item_idx)
+            item.setEnabled(False)
+            self.demod_combo.setItemData(
+                rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
+                QtCore.Qt.ToolTipRole,
+            )
         initial_demod_idx = self.demod_combo.findData(demod_mode)
         if initial_demod_idx >= 0:
             self.demod_combo.setCurrentIndex(initial_demod_idx)
@@ -143,6 +155,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.width_label.setMinimumWidth(60)
         demod_row.addWidget(self.width_label)
         receiver_layout.addLayout(demod_row)
+
+        # RADE status row -- only VISIBLE in RADE mode, same "hide the whole
+        # row" reasoning as pluto_tx's M17/FreeDV/RADE rows. Updated by the
+        # existing FFT poll timer (_poll_fft) -- cheap enough to piggyback
+        # on rather than adding a second timer.
+        rade_row = QtWidgets.QHBoxLayout()
+        self.rade_status_label = QtWidgets.QLabel("Not synced")
+        rade_row.addWidget(self.rade_status_label)
+        rade_row.addStretch(1)
+        self.rade_row_widget = QtWidgets.QWidget()
+        self.rade_row_widget.setLayout(rade_row)
+        self.rade_row_widget.setVisible(False)
+        receiver_layout.addWidget(self.rade_row_widget)
 
         # Two mutually-exclusive gain panels, switched by device type (only
         # one is ever visible at a time) -- agc_gain_widget for AGC-capable
@@ -473,12 +498,15 @@ class MainWindow(QtWidgets.QMainWindow):
         freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
         self.waterfall.set_frequency_range(freq, self.tb.sample_rate)
         self.waterfall.set_tuned_frequency(freq)
-        if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_FM:
+        mode = self.demod_combo.currentData()
+        if mode == AdvancedRxFlowgraph.MODE_FM:
             half_bw = self.tb.fm_demod_width_hz / 2
             self.waterfall.set_demod_band(freq - half_bw, freq + half_bw)
-        else:
+        elif mode == AdvancedRxFlowgraph.MODE_SSB:
             f_lo = config.SSB_AUDIO_BAND_HZ[0]
             self.waterfall.set_demod_band(freq + f_lo, freq + f_lo + self.tb.ssb_demod_width_hz)
+        # RADE: no operator-adjustable demod width/filter to shade -- leave
+        # the band overlay as it was.
 
     def _poll_fft(self):
         if self.tb is None:
@@ -486,6 +514,14 @@ class MainWindow(QtWidgets.QMainWindow):
         row, self._fft_gen = self.tb.fft_probe.get_latest_row(self._fft_gen)
         if row is not None:
             self.waterfall.push_fft_row(row)
+        if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_RADE and RADE_AVAILABLE:
+            dec = self.tb.rade_decoder
+            if dec.synced:
+                self.rade_status_label.setText(
+                    f"Synced -- freq offset: {dec.freq_offset_hz:.1f} Hz, SNR: {dec.snr_db:.1f} dB"
+                )
+            else:
+                self.rade_status_label.setText("Not synced")
 
     # --- slots ------------------------------------------------------
     def _on_freq_changed(self, mhz):
@@ -502,23 +538,35 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_demod_changed(self, idx):
         mode = self.demod_combo.currentData()
-        # The width slider always shows/edits whichever mode is now
-        # selected -- its range and current value come straight from the
-        # flowgraph's own per-mode state (tb.fm_demod_width_hz /
-        # tb.ssb_demod_width_hz), which is untouched by merely switching
-        # which branch demod_selector picks, so any earlier customization
-        # for that mode is preserved rather than reset to a default.
-        if mode == AdvancedRxFlowgraph.MODE_FM:
-            w_lo, w_hi = config.FM_DEMOD_WIDTH_RANGE_HZ
-            width = self.tb.fm_demod_width_hz if self.tb is not None else config.FM_DEMOD_WIDTH_DEFAULT_HZ
-        else:
-            w_lo, w_hi = config.SSB_DEMOD_WIDTH_RANGE_HZ
-            width = self.tb.ssb_demod_width_hz if self.tb is not None else config.SSB_DEMOD_WIDTH_DEFAULT_HZ
-        self.width_slider.blockSignals(True)
-        self.width_slider.setRange(int(w_lo), int(w_hi))
-        self.width_slider.setValue(int(width))
-        self.width_slider.blockSignals(False)
-        self.width_label.setText(f"{int(width)} Hz")
+        is_rade_mode = mode == AdvancedRxFlowgraph.MODE_RADE
+        # No operator-adjustable demod width for RADE -- hide the whole
+        # width control rather than leave it interactive-but-meaningless,
+        # same "hide, don't just grey out" reasoning as the RADE status row.
+        self.width_slider.setVisible(not is_rade_mode)
+        self.width_label.setVisible(not is_rade_mode)
+        self.rade_row_widget.setVisible(is_rade_mode)
+        if not is_rade_mode:
+            self.rade_status_label.setText("Not synced")
+
+        if not is_rade_mode:
+            # The width slider always shows/edits whichever mode is now
+            # selected -- its range and current value come straight from
+            # the flowgraph's own per-mode state (tb.fm_demod_width_hz /
+            # tb.ssb_demod_width_hz), which is untouched by merely
+            # switching which branch demod_selector picks, so any earlier
+            # customization for that mode is preserved rather than reset to
+            # a default.
+            if mode == AdvancedRxFlowgraph.MODE_FM:
+                w_lo, w_hi = config.FM_DEMOD_WIDTH_RANGE_HZ
+                width = self.tb.fm_demod_width_hz if self.tb is not None else config.FM_DEMOD_WIDTH_DEFAULT_HZ
+            else:
+                w_lo, w_hi = config.SSB_DEMOD_WIDTH_RANGE_HZ
+                width = self.tb.ssb_demod_width_hz if self.tb is not None else config.SSB_DEMOD_WIDTH_DEFAULT_HZ
+            self.width_slider.blockSignals(True)
+            self.width_slider.setRange(int(w_lo), int(w_hi))
+            self.width_slider.setValue(int(width))
+            self.width_slider.blockSignals(False)
+            self.width_label.setText(f"{int(width)} Hz")
 
         if self.tb is None:
             return
@@ -531,7 +579,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_FM:
             self.tb.set_fm_demod_width(float(value))
-        else:
+        elif self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_SSB:
             self.tb.set_ssb_demod_width(float(value))
         self._sync_waterfall()
 
