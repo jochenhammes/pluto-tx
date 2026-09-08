@@ -1,14 +1,14 @@
 """RX device backend registry. Adding a new backend: implement RxDevice in a
-new module here, register it below -- no changes needed to flowgraph.py.
-
-RTL-SDR is added in a later phase of the RX device-abstraction plan."""
+new module here, register it below -- no changes needed to flowgraph.py."""
 from .base import GainStage, RxDevice
 from .pluto import PlutoDevice
 from .hackrf import HackRFDevice
+from .rtlsdr import RtlSdrDevice
 
 DEVICE_REGISTRY = {
     "pluto": PlutoDevice,
     "hackrf": HackRFDevice,
+    "rtlsdr": RtlSdrDevice,
 }
 
 

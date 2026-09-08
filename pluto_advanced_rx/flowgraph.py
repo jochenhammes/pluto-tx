@@ -202,7 +202,14 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.device.set_gain_mode(mode)
 
     def set_manual_gain(self, gain_db: float):
-        self.device.set_gain("gain", gain_db)
+        """Applies to the device's AGC-controlled stage (Pluto: "gain",
+        RTL-SDR: "TUNER") -- looked up by controls_agc, not hardcoded, so
+        this works unchanged for every AGC-capable backend. A backend with
+        no AGC stage at all (HackRF) has no single "the" gain for this to
+        mean anything -- its stages are set individually instead, see
+        __init__'s gain_values."""
+        agc_stage = next(s for s in self.device.gain_stages if s.controls_agc)
+        self.device.set_gain(agc_stage.name, gain_db)
 
     def set_demod_mode(self, mode: int):
         self.demod_selector.set_input_index(mode)
