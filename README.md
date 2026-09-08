@@ -179,6 +179,15 @@ Echter Empfang brauchte manuell viel Frequenz-/Gain-Feintuning (V1 hat anders al
 
 **Real verifiziert** (Pluto→RTL-SDR, 432,15MHz): aus absichtlich verstimmtem Start (+900Hz, Gain 5dB statt optimal ~30dB) fand Auto Fine-Tune über die Stufe-2-Frequenzsuche echten RADE-Sync. `RADE_AUTOTUNE_TARGET_SNR_DB`/`_DWELL_S` (`config.py`) sind aber weiterhin nur grob kalibriert — ein Datenpunkt, eine Antennenaufstellung (siehe ToDo).
 
+### RADE über Soundkarte (externes SSB-Funkgerät)
+
+Alternative zum SDR-Pfad: RADE über ein per Audio-Interface angeschlossenes, klassisches SSB-Funkgerät senden/empfangen, statt über Pluto/HackRF/RTL-SDR. Im `rade_c`-Quellcode verifiziert (nicht angenommen): RADEs komplexes 8kHz-IQ ist so konstruiert, dass **der Realteil allein** direkt als Mono-Audio in ein SSB-Funkgerät passt — die OFDM-Träger sind in `librade.so` bereits fest bei 1500Hz (Mitte des SSB-Passbands) zentriert (`rade_ofdm.c`). Kein Hilbert-Transform, kein Frequenzversatz nötig.
+
+- **TX** (`pluto_tx`): "Output"-Combo im RADE-Modus, SDR **oder** Soundkarte (wählbare Alternative, nicht gleichzeitig — kein unnötiges Abstrahlen über den Pluto, wenn nur das externe Funkgerät senden soll). Im Soundkarten-Modus bleibt das SDR-Gerät bei PTT komplett unberührt (kein LO/Dämpfung-Wechsel) — `complex_to_real` + Resample auf `AUDIO_RATE` (48kHz) → `audio.sink` (Systemstandard).
+- **RX** (`pluto_advanced_rx`): "Audio Input" als 4. gleichwertiges Geräte-Backend neben Pluto/HackRF/RTL-SDR, inkl. eigenem Spektrum/Wasserfall (0–10kHz, Aufnahme bei 20kHz). Realer Audio-Eingang wird per `imag=0` + 2×Gain in komplexes IQ gewandelt (exakt `rade_rx_wav.c`s dokumentierte Konvention für reines Audio-Signal, kein Hilbert-Transform) — danach unverändert dieselbe Demod-Kette wie jedes SDR-Backend.
+
+**Verifiziert**: real auf Pluto-Hardware (SDR-Modus unverändert, Audio-Modus lässt das SDR-Gerät bei PTT nachweislich unberührt — Register-Readback identisch vor/während/nach) sowie ein echter Offline-Rundlauf durch die neuen Audio-DSP-Ketten über eine reale 48kHz-Mono-WAV-Datei (RADE-Sync erreicht, SNR 35,7dB). Ein Test mit einem echten externen Funkgerät über ein reales Audio-Interface steht noch aus (siehe ToDo).
+
 ## Bekannte Einschränkungen
 
 - **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere Unterbrechung.
@@ -204,6 +213,7 @@ Editierbares Dropdown ("Device") plus Scan- und Connect/Disconnect-Buttons; Star
 - **RADE-EOO-Tail braucht eigene, isolierte Hardware-Verifikation** — Mechanismus existiert (`rade_eoo_enabled`), ist aber standardmäßig aus und wurde diese Session nicht real getestet (nur der Standardpfad ohne Tail).
 - **RADE Auto Fine-Tune (`pluto_advanced_rx`) nur grob kalibriert** — `RADE_AUTOTUNE_TARGET_SNR_DB`/`_DWELL_S`/die Sweep-Schrittweiten (`config.py`) beruhen auf genau einem realen Pluto→RTL-SDR-Testaufbau (432,15MHz, ein Datenpunkt für die SNR-vs-Gain-Kurve). Noch nicht getestet: HackRF als RX-Backend (der Auto-Tune-Code behandelt dessen 3-stufiges Gain-Modell nur über die VGA-Stufe, LNA/AMP bleiben unangetastet), größere absichtliche Verstimmungen, unterschiedliche Antennenaufbauten/Abstände. Der erreichte Lock im realen Test war zudem knapp (~-4dB SNR, kurzzeitig) — bei besserer HF-Verbindung sollte das robuster werden, aber ungetestet.
 - **SoapyRemote (Netzwerkzugriff für HackRF/RTL-SDR in `pluto_advanced_rx`) nur als Fähigkeit dokumentiert, nicht Ende-zu-Ende getestet** — kein Zweitrechner verfügbar.
+- **RADE über Soundkarte nicht mit echtem externem SSB-Funkgerät getestet** — TX/RX-Pfad ist real auf Pluto-Hardware sicherheitsverifiziert und der Audio-DSP-Rundlauf offline über eine echte WAV-Datei bestätigt (Sync, SNR 35,7dB), aber ein Test mit echtem Audio-Interface + Transceiver steht noch aus (kein solches Gerät verfügbar).
 - **FreeDV `reliable_text` beim gepackten libcodec2 (1.2.0-4) melden/reparieren** — echter, per `gdb` bestätigter SIGFPE-Absturz (siehe oben). Nächste Schritte: Bug bei drowe67/codec2 melden, oder neuere libcodec2-Version testen.
 - **Vermutete AD9361-IQ-Imbalance untersuchen/kalibrieren** (siehe FreeDV-Abschnitt oben) — braucht einen realen Hardware-Loopback-Test zur Quantifizierung, bevor über eine Korrektur entschieden wird.
 - **Geteilter AD9361-Takt zwischen `pluto_rx`/`pluto_tx` beheben** — ein erster Versuch (Takt vor jedem Senden zurückholen) hat das Problem nicht gelöst und wurde wieder entfernt. Nötig: Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+.
