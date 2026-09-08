@@ -52,6 +52,12 @@ from . import freedv_ctypes as _freedv_ctypes
 from .freedv import FreeDVEncoder
 FREEDV_AVAILABLE = _freedv_ctypes.FREEDV_AVAILABLE
 
+# RADE V1 is also optional, same reasoning as M17: from-source build (see
+# install-rade.sh), not something every user has.
+from . import rade_ctypes as _rade_ctypes
+from .rade import RadeEncoder
+RADE_AVAILABLE = _rade_ctypes.RADE_AVAILABLE
+
 _PLACEHOLDER_WAV = os.path.join(os.path.dirname(__file__), "_silence.wav")
 _DEFAULT_WAV = os.path.join(os.path.dirname(__file__), "da2jh-test.wav")
 
@@ -79,6 +85,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_SSB = 1
     MODE_M17 = 2
     MODE_FREEDV = 3
+    MODE_RADE = 4
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -97,6 +104,10 @@ class PlutoTxFlowgraph(gr.top_block):
         self.target_power = power_ceiling
         self._keyed = False
         self._m17_ending = False  # True during the brief EOT tail after unkey_ptt() in M17 mode
+        self._rade_ending = False  # True during the brief EOO tail after unkey_ptt() in RADE mode (if enabled)
+        self._rade_eoo_source = None
+        self.rade_eoo_enabled = False  # off by default -- see unkey_ptt()'s RADE branch; needs its own
+        # isolated hardware verification (Phase I2 of the RADE integration plan) before being turned on.
         self._secondary_power = {}  # non-primary power stages (e.g. HackRF's AMP), see set_secondary_power()
 
         if mode == self.MODE_M17 and not M17_AVAILABLE:
@@ -106,6 +117,8 @@ class PlutoTxFlowgraph(gr.top_block):
             # broken flowgraph.
             mode = self.MODE_FM
         if mode == self.MODE_FREEDV and not FREEDV_AVAILABLE:
+            mode = self.MODE_FM
+        if mode == self.MODE_RADE and not RADE_AVAILABLE:
             mode = self.MODE_FM
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
@@ -299,6 +312,34 @@ class PlutoTxFlowgraph(gr.top_block):
                 taps=[], fractional_bw=0.4,
             )
 
+        # --- RADE V1 branch (optional, only if librade.so + lpcnet_demo are
+        # both available -- see RADE_AVAILABLE above). Also bypasses the NF
+        # dynamics chain, same reasoning as M17/FreeDV: RadeEncoder's own
+        # FARGAN/OFDM pipeline has its own internal level handling: an
+        # upstream compressor/AGC would just distort what it feeds in.
+        # Unlike FreeDV (an audio-band modem meant for a normal SSB mic
+        # input) RADE outputs raw complex IQ directly at RADE_MODEM_SAMPLE_
+        # RATE (8kHz, confirmed via rade_api.h and this session's own
+        # feasibility spike reading rade_tx_wav.c's WAV writer) -- so its
+        # resampler goes straight to quad_rate, no Hilbert/SSB modulation
+        # step at all (the OFDM modulation is already baked into
+        # RadeEncoder's IQ output).
+        if RADE_AVAILABLE:
+            g_rade_down = math.gcd(config.AUDIO_RATE, _rade_ctypes.RADE_SPEECH_SAMPLE_RATE)
+            self.rade_audio_resampler = filter.rational_resampler_fff(
+                interpolation=_rade_ctypes.RADE_SPEECH_SAMPLE_RATE // g_rade_down,
+                decimation=config.AUDIO_RATE // g_rade_down,
+                taps=[], fractional_bw=0.4,
+            )
+            self.rade_float_to_short = blocks.float_to_short(1, 32767.0)
+            self.rade_encoder = RadeEncoder()
+            g_rade_up = math.gcd(quad_rate, _rade_ctypes.RADE_MODEM_SAMPLE_RATE)
+            self.rade_tx_resampler = filter.rational_resampler_ccf(
+                interpolation=quad_rate // g_rade_up,
+                decimation=_rade_ctypes.RADE_MODEM_SAMPLE_RATE // g_rade_up,
+                taps=[], fractional_bw=0.4,
+            )
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -352,6 +393,8 @@ class PlutoTxFlowgraph(gr.top_block):
             self._null_sink_m17 = blocks.null_sink(gr.sizeof_gr_complex)
         if FREEDV_AVAILABLE:
             self._null_sink_freedv = blocks.null_sink(gr.sizeof_gr_complex)
+        if RADE_AVAILABLE:
+            self._null_sink_rade = blocks.null_sink(gr.sizeof_gr_complex)
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -432,8 +475,18 @@ class PlutoTxFlowgraph(gr.top_block):
             self.connect(self.freedv_audio_resampler_up, self.freedv_ssb_mod)
             self.connect(self.freedv_ssb_mod, self.freedv_ssb_resampler)
 
-        # Exactly one of {mode_selector, m17_tx_resampler, freedv_ssb_resampler}
-        # feeds tx_gain at a time -- the rest drain into their null_sinks.
+        if RADE_AVAILABLE:
+            # Taps ptt_mute directly -- see the RADE branch construction
+            # comment above. No Hilbert/SSB step: RadeEncoder's output is
+            # already modulated IQ, just resampled up to quad_rate.
+            self.connect(self.ptt_mute, self.rade_audio_resampler)
+            self.connect(self.rade_audio_resampler, self.rade_float_to_short)
+            self.connect(self.rade_float_to_short, self.rade_encoder)
+            self.connect(self.rade_encoder, self.rade_tx_resampler)
+
+        # Exactly one of {mode_selector, m17_tx_resampler, freedv_ssb_resampler,
+        # rade_tx_resampler} feeds tx_gain at a time -- the rest drain into
+        # their null_sinks.
         # See _tx_gain_producer_map()/set_mode() for the runtime swap logic
         # (same lock()/connect()/disconnect() pattern proven on real
         # hardware for M17 this session, reused here for FreeDV).
@@ -499,6 +552,8 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_M17] = self.m17_tx_resampler
         if FREEDV_AVAILABLE:
             producers[self.MODE_FREEDV] = self.freedv_ssb_resampler
+        if RADE_AVAILABLE:
+            producers[self.MODE_RADE] = self.rade_tx_resampler
         return producers
 
     def _null_sink_for(self, producer):
@@ -508,6 +563,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_m17
         if FREEDV_AVAILABLE and producer is self.freedv_ssb_resampler:
             return self._null_sink_freedv
+        if RADE_AVAILABLE and producer is self.rade_tx_resampler:
+            return self._null_sink_rade
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def set_mode(self, mode: int):
@@ -533,8 +590,8 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
 
-        if mode in (self.MODE_M17, self.MODE_FREEDV):
-            return  # both bypass the NF filter/dynamics chain entirely, nothing to retap
+        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE):
+            return  # all three bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
@@ -668,6 +725,7 @@ class PlutoTxFlowgraph(gr.top_block):
         subclass (pluto_tx/devices/) for what its own pre_key()/post_unkey()
         actually does."""
         self._m17_ending = False
+        self._rade_ending = False
         self.device.pre_key()
         if self.mode == self.MODE_M17:
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
@@ -704,11 +762,36 @@ class PlutoTxFlowgraph(gr.top_block):
         run the post-unkey hook. This tail is NOT a safety gap:
         force_safe_state() (E-STOP, shutdown_safe()) forces the device dark
         immediately regardless, via the device's own independent safety
-        layer, at any point during the tail."""
+        layer, at any point during the tail.
+
+        RADE is a THIRD variant, only when rade_eoo_enabled=True (off by
+        default -- see its own docstring): unlike M17's autonomous coder-
+        driven tail, RADE's End-of-Over is one explicit, deterministic,
+        one-shot call (send_eoo(), n_tx_eoo_out samples = 144ms at
+        RADE_MODEM_SAMPLE_RATE) -- not a continuous stream to keep feeding.
+        tx_gain's upstream is briefly rerouted from rade_tx_resampler to a
+        one-shot vector_source_c holding exactly that EOO IQ, held up for
+        rade_eoo_hold_s (computed from n_tx_eoo_out, not a guessed
+        constant), then finish_unkey_rade() (GUI-timer-driven, same pattern
+        as finish_unkey_m17()) restores the normal streaming connection and
+        actually lowers power. With rade_eoo_enabled=False (default), RADE
+        falls through to the plain else branch below -- immediate full
+        unkey, no tail, identical to FreeDV's behavior."""
         if self.mode == self.MODE_M17:
             self.ptt_mute.set_k(0.0)
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("EOT"))
             self._m17_ending = True
+        elif self.mode == self.MODE_RADE and self.rade_eoo_enabled:
+            self.ptt_mute.set_k(0.0)
+            eoo_iq = self.rade_encoder.send_eoo()
+            self._rade_eoo_source = blocks.vector_source_c(eoo_iq.tolist(), repeat=False)
+            self.lock()
+            try:
+                self.disconnect(self.rade_tx_resampler, self.tx_gain)
+                self.connect(self._rade_eoo_source, self.tx_gain)
+            finally:
+                self.unlock()
+            self._rade_ending = True
         else:
             self.tx_gain.set_k(0.0 + 0j)
             stage = self.device.primary_stage
@@ -718,6 +801,15 @@ class PlutoTxFlowgraph(gr.top_block):
             if not self.device.supports_persistent_sink:
                 self._rebuild_device_sink()
             self._keyed = False
+
+    @property
+    def rade_eoo_hold_s(self):
+        """Seconds the GUI must hold RF up after unkey_ptt() in RADE mode
+        with rade_eoo_enabled=True before calling finish_unkey_rade() --
+        computed from the encoder's own n_tx_eoo_out, not a guessed
+        constant (mirrors M17_EOT_HOLD_S's real-hardware-calibrated intent,
+        but here it's exact by construction rather than measured)."""
+        return self.rade_encoder.n_tx_eoo_out / _rade_ctypes.RADE_MODEM_SAMPLE_RATE if RADE_AVAILABLE else 0.0
 
     def finish_unkey_m17(self):
         """Called by the GUI a bounded delay after unkey_ptt() in M17 mode,
@@ -734,6 +826,34 @@ class PlutoTxFlowgraph(gr.top_block):
             self._rebuild_device_sink()
         self._m17_ending = False
         self._keyed = False
+
+    def finish_unkey_rade(self):
+        """Called by the GUI a bounded delay (rade_eoo_hold_s) after
+        unkey_ptt() in RADE mode with rade_eoo_enabled=True, once the EOO
+        tail has had time to actually transmit. No-op if the operator
+        already keyed up again in the meantime (key_ptt() clears
+        _rade_ending, making a stale pending call here harmless) -- same
+        contract as finish_unkey_m17()."""
+        if not self._rade_ending:
+            return
+        self.tx_gain.set_k(0.0 + 0j)
+        stage = self.device.primary_stage
+        self.device.set_power(stage.name, stage.off_value)
+        self.device.post_unkey()
+        if not self.device.supports_persistent_sink:
+            self._rebuild_device_sink()
+        self.lock()
+        try:
+            self.disconnect(self._rade_eoo_source, self.tx_gain)
+            self.connect(self.rade_tx_resampler, self.tx_gain)
+        finally:
+            self.unlock()
+        self._rade_eoo_source = None
+        self._rade_ending = False
+        self._keyed = False
+
+    def set_rade_eoo_enabled(self, enabled: bool):
+        self.rade_eoo_enabled = enabled
 
     def _rebuild_device_sink(self):
         """For devices where zeroing every power stage isn't enough to

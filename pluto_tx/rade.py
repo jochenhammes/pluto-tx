@@ -39,6 +39,7 @@ class RadeEncoder(gr.basic_block):
 
         self._n_pcm_per_frame = LPCNET_FRAME_SIZE * LPCNET_FRAMES_PER_RADE_FRAME  # 1920
         self._n_iq_per_frame = self._session.n_tx_out  # 960
+        self.n_tx_eoo_out = self._session.n_tx_eoo_out  # public -- flowgraph.py computes its EOO hold time from this
 
         self.set_output_multiple(self._n_iq_per_frame)
         self.set_relative_rate(self._n_iq_per_frame, self._n_pcm_per_frame)

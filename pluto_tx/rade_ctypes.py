@@ -20,6 +20,11 @@ import shutil
 
 import numpy as np
 
+# Sample rates used by the RADE modem (rade_api.h) -- fixed, not queried at
+# runtime (rade_api.h itself defines them as compile-time constants).
+RADE_MODEM_SAMPLE_RATE = 8000    # IQ waveform sample rate
+RADE_SPEECH_SAMPLE_RATE = 16000  # speech (lpcnet_demo) sample rate
+
 RADE_AVAILABLE = False
 _lib = None
 
