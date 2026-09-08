@@ -4,11 +4,13 @@ from .base import GainStage, RxDevice
 from .pluto import PlutoDevice
 from .hackrf import HackRFDevice
 from .rtlsdr import RtlSdrDevice
+from .audio import AudioDevice
 
 DEVICE_REGISTRY = {
     "pluto": PlutoDevice,
     "hackrf": HackRFDevice,
     "rtlsdr": RtlSdrDevice,
+    "audio": AudioDevice,
 }
 
 

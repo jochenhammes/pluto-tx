@@ -404,6 +404,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
                 "automatically. Use Scan to discover devices on the network/USB."
             )
+        elif device_cls.connection_kind == "audio_device":
+            self.device_label.setText("Audio Device (blank = system default):")
+            self.uri_combo.setToolTip(
+                "ALSA/PortAudio device name, or leave blank to use the system's "
+                "default input. No structured device scan exists for sound cards -- "
+                "Scan will report 0 devices found; enter a name manually if the "
+                "default isn't the right one."
+            )
         else:
             self.device_label.setText(f"{device_cls.display_name} Serial (blank = auto):")
             self.uri_combo.setToolTip(
@@ -445,8 +453,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_device_connection_labels()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
 
-        lo_hz, hi_hz = device_cls.frequency_range_hz
-        self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
+        # No RF tuning concept for a sound card -- hide rather than just
+        # grey out (same "hide, don't just grey out" principle already used
+        # for the RADE-mode width slider).
+        has_frequency = device_cls.frequency_range_hz != (0.0, 0.0)
+        self.freq_spin.setVisible(has_frequency)
+        self.fine_slider.setVisible(has_frequency)
+        self.fine_label.setVisible(has_frequency)
+        if has_frequency:
+            lo_hz, hi_hz = device_cls.frequency_range_hz
+            self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
 
         self.bandwidth_combo.blockSignals(True)
         self.bandwidth_combo.clear()
@@ -1071,10 +1087,15 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             ssb_width = float(self.width_slider.value())
             fm_width = config.FM_DEMOD_WIDTH_DEFAULT_HZ
+        # freq_spin is hidden (not reset) for a frequency-less device like
+        # Audio Input -- its value could be a stale RF frequency left over
+        # from whatever device was previously selected, so don't trust it
+        # for a device with no frequency concept at all.
+        frequency_hz = 0.0 if device_cls.frequency_range_hz == (0.0, 0.0) else self.freq_spin.value() * 1e6
         try:
             new_tb = AdvancedRxFlowgraph(
                 uri=connection,
-                frequency=self.freq_spin.value() * 1e6,
+                frequency=frequency_hz,
                 sample_rate=self.bandwidth_combo.currentData(),
                 demod_mode=self.demod_combo.currentData(),
                 nf_gain=self.nf_gain_slider.value() / 100.0,

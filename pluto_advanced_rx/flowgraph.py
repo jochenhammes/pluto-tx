@@ -46,7 +46,7 @@ class AdvancedRxFlowgraph(gr.top_block):
     MODE_RADE = 2
 
     def __init__(self, uri=None, frequency=config.DEFAULT_FREQUENCY,
-                 sample_rate=config.DEFAULT_RX_BANDWIDTH, gain_mode=config.DEFAULT_GAIN_MODE,
+                 sample_rate=None, gain_mode=config.DEFAULT_GAIN_MODE,
                  manual_gain_db=config.DEFAULT_MANUAL_GAIN_DB, demod_mode=MODE_FM,
                  nf_gain=config.DEFAULT_NF_GAIN, fft_size=config.DEFAULT_FFT_SIZE,
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
@@ -62,6 +62,15 @@ class AdvancedRxFlowgraph(gr.top_block):
         pluto_tx/flowgraph.py's connection=None pattern. Existing Pluto
         callers (gui.py) always pass uri explicitly, so this is unchanged
         behavior for them.
+
+        sample_rate has the EXACT same "don't let one device's default leak
+        into another's" issue and fix -- default is None, not
+        config.DEFAULT_RX_BANDWIDTH (a real bug caught adding AudioDevice
+        this session: omitting sample_rate for device_type="audio" silently
+        tried to open a sound card at Pluto's 2.5Msps default, which ALSA
+        naturally can't honor). build_device() already applies each device
+        class's own default_sample_rate_hz when None is passed -- this just
+        stops shadowing that fallback with a Pluto-specific literal.
 
         gain_mode/manual_gain_db apply only to an AGC-capable device's one
         AGC-controlled stage (Pluto's "gain") -- unchanged from before the
@@ -81,7 +90,6 @@ class AdvancedRxFlowgraph(gr.top_block):
             demod_mode = self.MODE_FM
         self.demod_mode = demod_mode  # tracked so set_demod_mode() knows the PREVIOUS producer to swap away from
 
-        self.sample_rate = sample_rate
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
 
@@ -90,6 +98,7 @@ class AdvancedRxFlowgraph(gr.top_block):
             sample_rate_hz=sample_rate, bandwidth_hz=None,
         )
         self.uri = self.device.connection  # the actual (possibly defaulted) connection string
+        self.sample_rate = self.device.sample_rate_hz  # the actual (possibly defaulted) sample rate
         # Constructed first, gain configured right after -- mirrors
         # TxDevice.build_sink()'s "construct, then configure power" split.
         self.pluto_source = self.device.build_source()
@@ -105,7 +114,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         # qtgui.waterfall_sink_c attaches at. Always on -- cheap enough
         # (throttled compute rate, see fft_probe.py) that there's no need
         # for pluto_rx's enable_waterfall toggle.
-        self.fft_probe = FftProbe(fft_size, sample_rate, config.WATERFALL_WINDOW, config.FFT_COMPUTE_RATE_HZ)
+        self.fft_probe = FftProbe(fft_size, self.sample_rate, config.WATERFALL_WINDOW, config.FFT_COMPUTE_RATE_HZ)
         self.connect(self.pluto_source, self.fft_probe)
 
         # --- IF stage: decimate from the RX bandwidth preset down to the
@@ -114,8 +123,8 @@ class AdvancedRxFlowgraph(gr.top_block):
         # identical comment for why this beats a firdes.low_pass'd filter
         # with a fixed absolute-Hz transition width (thousands of taps at
         # wider presets for no accuracy benefit).
-        decim = max(1, round(sample_rate / config.DEMOD_IF_RATE))
-        self.if_rate = sample_rate / decim
+        decim = max(1, round(self.sample_rate / config.DEMOD_IF_RATE))
+        self.if_rate = self.sample_rate / decim
         self.if_filter = filter.rational_resampler_ccf(
             interpolation=1, decimation=decim, taps=[], fractional_bw=0.4,
         )
