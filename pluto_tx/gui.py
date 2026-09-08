@@ -12,7 +12,7 @@ from PyQt5 import QtCore, QtWidgets, sip
 from . import config
 from . import devices
 from .devices import pluto as pluto_device
-from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, _default_wav_path
+from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, _default_wav_path
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 
 
@@ -144,6 +144,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mode_combo.setItemData(
                 freedv_item_idx, "libcodec2 on this system lacks FreeDV 2020/2020B support", QtCore.Qt.ToolTipRole
             )
+        self.mode_combo.addItem("RADE", PlutoTxFlowgraph.MODE_RADE)
+        if not RADE_AVAILABLE:
+            # rade_c is an optional, from-source dependency (see
+            # install-rade.sh) -- grey out rather than hide, same as M17.
+            rade_item_idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE)
+            item = self.mode_combo.model().item(rade_item_idx)
+            item.setEnabled(False)
+            self.mode_combo.setItemData(
+                rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
+                QtCore.Qt.ToolTipRole,
+            )
         # Sync to the flowgraph's ACTUAL mode before wiring the change
         # signal -- otherwise the combo always shows "FM" regardless of
         # what mode tb was actually constructed with (e.g. --mode ssb, or
@@ -235,6 +246,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freedv_row_widget.setLayout(freedv_row)
         layout.addWidget(self.freedv_row_widget)
         self._update_freedv_controls_enabled()
+
+        # --- RADE EOO (End-of-Over) row -- only VISIBLE in RADE mode, same
+        # "hide the whole row" reasoning as M17/FreeDV above. Off by default
+        # and needs its own isolated real-hardware verification (Phase I2 of
+        # the RADE integration plan, not done yet this session) before being
+        # a safe default to turn on -- see flowgraph.py's
+        # rade_eoo_enabled docstring.
+        rade_row = QtWidgets.QHBoxLayout()
+        self.rade_eoo_checkbox = QtWidgets.QCheckBox("Send EOO tail on unkey")
+        self.rade_eoo_checkbox.setChecked(False)
+        self.rade_eoo_checkbox.setToolTip(
+            "Transmits a brief (144ms) End-of-Over IQ tail after PTT release, "
+            "so a receiver gets a clean end-of-stream instead of a hard cutoff. "
+            "Off by default -- not yet verified on real hardware."
+        )
+        self.rade_eoo_checkbox.toggled.connect(self._on_rade_eoo_changed)
+        rade_row.addWidget(self.rade_eoo_checkbox)
+        rade_row.addStretch(1)
+        self.rade_row_widget = QtWidgets.QWidget()
+        self.rade_row_widget.setLayout(rade_row)
+        layout.addWidget(self.rade_row_widget)
+        self._update_rade_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
         # power_slider is reused across backends (relabelled/reranged by
@@ -458,6 +491,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_m17_controls_enabled()
         self._freedv_connected = enabled
         self._update_freedv_controls_enabled()
+        self._rade_connected = enabled
+        self._update_rade_controls_enabled()
 
     def _update_m17_controls_enabled(self):
         # Visibility follows the selected mode (row hidden entirely outside
@@ -477,6 +512,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freedv_row_widget.setVisible(is_freedv_mode)
         connected = getattr(self, "_freedv_connected", True)
         self.freedv_variant_combo.setEnabled(connected)
+
+    def _update_rade_controls_enabled(self):
+        # Visibility follows the selected mode (row hidden entirely outside
+        # RADE); enabled state within a visible row still follows connection
+        # state, same as every other control in the app.
+        is_rade_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_RADE
+        self.rade_row_widget.setVisible(is_rade_mode)
+        connected = getattr(self, "_rade_connected", True)
+        self.rade_eoo_checkbox.setEnabled(connected)
         # freedv_callsign_edit is NOT touched here -- it's permanently
         # disabled at construction (see the comment above its creation):
         # linking FreeDV's reliable_text station-ID sideband crashes this
@@ -637,6 +681,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_mode(self.mode_combo.currentData())
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
+        self._update_rade_controls_enabled()
+
+    def _on_rade_eoo_changed(self, checked):
+        if self.tb is not None:
+            self.tb.set_rade_eoo_enabled(checked)
 
     def _on_m17_src_callsign_changed(self, text):
         if self.tb is not None:
@@ -759,12 +808,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_M17:
             self._set_indicator_ending()
             QtCore.QTimer.singleShot(int(config.M17_EOT_HOLD_S * 1000), self._finish_m17_unkey)
+        elif self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_RADE and self.tb.rade_eoo_enabled:
+            self._set_indicator_ending()
+            QtCore.QTimer.singleShot(int(self.tb.rade_eoo_hold_s * 1000), self._finish_rade_unkey)
         else:
             self._set_indicator_idle()
 
     def _finish_m17_unkey(self):
         if self.tb is not None:
             self.tb.finish_unkey_m17()
+        self._set_indicator_idle()
+
+    def _finish_rade_unkey(self):
+        if self.tb is not None:
+            self.tb.finish_unkey_rade()
         self._set_indicator_idle()
 
     def _on_connect_clicked(self):
@@ -902,6 +959,7 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_compressor_ratio(float(self.compressor_ratio_slider.value()))
         new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
         new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
+        new_tb.set_rade_eoo_enabled(self.rade_eoo_checkbox.isChecked())
         self._wav_path = new_tb.wav_path
         self.tb = new_tb
         self._embed_waterfall(new_tb)
