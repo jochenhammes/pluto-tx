@@ -23,6 +23,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from . import config
 from . import devices
+from . import rade_autotune
 from .fft_probe import FftProbe
 from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE
 from .waterfall_widget import AdvancedWaterfallWidget
@@ -165,6 +166,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_status_label = QtWidgets.QLabel("Not synced")
         rade_row.addWidget(self.rade_status_label)
         rade_row.addStretch(1)
+        # One-shot auto fine-tune: RF-domain frequency/gain centering, with
+        # a bounded RADE-lock-feedback fallback sweep if that alone isn't
+        # enough -- see _autotune_* below. Click again while running to
+        # cancel.
+        self.autotune_button = QtWidgets.QPushButton("Auto Fine-Tune")
+        self.autotune_button.clicked.connect(self._on_autotune_clicked)
+        rade_row.addWidget(self.autotune_button)
+        self._autotune_token = None  # set to a fresh object() while a run is in flight, checked by
+        # every scheduled step so a stale QTimer callback (after cancel/disconnect/mode-change)
+        # silently no-ops instead of touching a torn-down flowgraph.
         self.rade_row_widget = QtWidgets.QWidget()
         self.rade_row_widget.setLayout(rade_row)
         self.rade_row_widget.setVisible(False)
@@ -372,9 +383,11 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
                   self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
                   self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
-                  self.receive_button):
+                  self.receive_button, self.autotune_button):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
+        if not enabled:
+            self._autotune_cancel()
 
     def _style_receive_button(self, receiving: bool):
         self.receive_button.setText("Receiving (click to mute)" if receiving else "Muted (click to receive)")
@@ -565,7 +578,8 @@ class MainWindow(QtWidgets.QMainWindow):
         row, self._fft_gen = self.tb.fft_probe.get_latest_row(self._fft_gen)
         if row is not None:
             self.waterfall.push_fft_row(row)
-        if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_RADE and RADE_AVAILABLE:
+        if (self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_RADE and RADE_AVAILABLE
+                and self._autotune_token is None):  # suppressed while an autotune run owns the status label
             dec = self.tb.rade_decoder
             if dec.synced:
                 self.rade_status_label.setText(
@@ -590,6 +604,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_demod_changed(self, idx):
         mode = self.demod_combo.currentData()
         is_rade_mode = mode == AdvancedRxFlowgraph.MODE_RADE
+        self._autotune_cancel()  # leaving/re-entering RADE mode invalidates any in-flight run
         # No operator-adjustable demod width for RADE -- hide the whole
         # width control rather than leave it interactive-but-meaningless,
         # same "hide, don't just grey out" reasoning as the RADE status row.
@@ -687,6 +702,247 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb.set_fft_avg_count(value)
         self.avg_label.setText("1 (off)" if value == 1 else str(value))
 
+    # --- RADE Auto Fine-Tune -------------------------------------------
+    # A one-shot, multi-step process (RF-domain frequency/gain centering,
+    # then a bounded RADE-lock-feedback fallback sweep) driven by a chain of
+    # QTimer.singleShot() calls -- the same idiom already used for
+    # _finish_m17_unkey()/_finish_rade_unkey()-style delayed follow-ups,
+    # just longer. self._autotune_token is both the "is a run in progress"
+    # flag (None = idle) and a staleness guard: every scheduled step closes
+    # over the token it was scheduled under and checks it's still the
+    # current one before touching anything, so a callback left over from a
+    # cancelled/superseded run (disconnect, bandwidth rebuild, leaving RADE
+    # mode) silently no-ops instead of acting on a torn-down flowgraph.
+    def _autotune_gain_stage(self, device_cls):
+        """The GainStage this feature treats as "the" gain lever -- the
+        AGC-controlled one for AGC-capable devices (Pluto/RTL-SDR), or the
+        "VGA" stage for HackRF (matching how the existing manual gain panel
+        already treats VGA as the primary drive-level control; LNA/AMP are
+        deliberately left alone -- a 3-stage grid search would need
+        RADE-lock feedback per combination, far too slow). None if neither
+        applies (shouldn't happen for any backend implemented so far)."""
+        if device_cls.supports_agc_mode:
+            return next(s for s in device_cls.gain_stages if s.controls_agc)
+        for s in device_cls.gain_stages:
+            if s.name == "VGA":
+                return s
+        return None
+
+    def _autotune_force_manual_gain(self, device_cls):
+        """AGC devices reject direct gain writes while AGC is active, and a
+        live AGC adjustment mid-reception would fight RADE V1's total lack
+        of internal input-level compensation (confirmed in rade_api.h:
+        rade_rx_set_agc is V2-only) -- so force manual and leave it there."""
+        if not device_cls.supports_agc_mode:
+            return
+        idx = self.gain_mode_combo.findData("manual")
+        if idx >= 0:
+            self.gain_mode_combo.setCurrentIndex(idx)  # -> _on_gain_mode_changed -> tb.set_gain_mode + enables gain_slider
+
+    def _autotune_read_gain_db(self, stage):
+        if stage.name in self._manual_gain_controls:
+            widget, _label, _stage = self._manual_gain_controls[stage.name]
+            return float(widget.value())
+        return float(self.gain_slider.value())
+
+    def _autotune_apply_gain_db(self, stage, value):
+        """Clamps to the stage's own range and drives it through the
+        existing slider (so the already-wired _on_gain_changed/
+        _on_manual_gain_changed handlers do the real tb.device.set_gain()
+        call) -- returns the actually-applied (clamped, rounded) value."""
+        value = max(stage.min_value, min(stage.max_value, value))
+        if stage.name in self._manual_gain_controls:
+            widget, _label, _stage = self._manual_gain_controls[stage.name]
+            widget.setValue(int(round(value)))
+        else:
+            self.gain_slider.setValue(int(round(value)))
+        return value
+
+    def _autotune_set_controls_enabled(self, enabled):
+        for w in (self.fine_slider, self.agc_gain_widget, self.manual_gain_widget, self.zoom_slider):
+            w.setEnabled(enabled)
+        if enabled:
+            self.gain_slider.setEnabled(self.gain_mode_combo.currentData() == "manual")
+
+    def _autotune_valid(self, token):
+        return (self._autotune_token is token and self.tb is not None
+                and self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_RADE)
+
+    def _autotune_finish(self, success):
+        self._autotune_token = None
+        self.autotune_button.setText("Auto Fine-Tune")
+        self._autotune_set_controls_enabled(True)
+        if success and self.tb is not None:
+            dec = self.tb.rade_decoder
+            self.rade_status_label.setText(
+                f"Auto fine-tune: locked! freq offset: {dec.freq_offset_hz:.1f} Hz, SNR: {dec.snr_db:.1f} dB"
+            )
+        elif not success:
+            self.rade_status_label.setText("Auto fine-tune: could not lock -- try adjusting manually.")
+
+    def _autotune_cancel(self):
+        if self._autotune_token is None:
+            return
+        self._autotune_token = None
+        self.autotune_button.setText("Auto Fine-Tune")
+        self._autotune_set_controls_enabled(True)
+
+    def _on_autotune_clicked(self):
+        if self._autotune_token is not None:
+            self._autotune_cancel()
+            self.rade_status_label.setText("Auto fine-tune cancelled.")
+            return
+        if self.tb is None or self.demod_combo.currentData() != AdvancedRxFlowgraph.MODE_RADE:
+            return
+        token = object()
+        self._autotune_token = token
+        self.autotune_button.setText("Cancel Auto Fine-Tune")
+        self._autotune_set_controls_enabled(False)
+        self.rade_status_label.setText("Auto fine-tune: preparing...")
+        QtCore.QTimer.singleShot(0, lambda: self._autotune_step_prepare(token))
+
+    def _autotune_step_prepare(self, token):
+        """Stage 1 start: bump zoom for adequate frequency resolution (left
+        zoomed in afterward -- a good side effect, the operator can see the
+        now-centered signal) -- see FftProbe's zoom-FFT technique, no
+        rebuild needed."""
+        if not self._autotune_valid(token):
+            return
+        zoom = max(self.zoom_slider.value(), config.RADE_AUTOTUNE_MIN_ZOOM)
+        if zoom != self.zoom_slider.value():
+            self.zoom_slider.setValue(zoom)
+        QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_SETTLE_S * 1000),
+                                  lambda: self._autotune_step_center_freq(token))
+
+    def _autotune_step_center_freq(self, token):
+        """Stage 1a: power-weighted centroid within +/-FINE_TUNE_RANGE_HZ of
+        the current tuning (reusing the fine-tune slider's own existing
+        bound, not a new arbitrary search radius)."""
+        if not self._autotune_valid(token):
+            return
+        self.rade_status_label.setText("Auto fine-tune: centering frequency...")
+        row, _gen = self.tb.fft_probe.get_latest_row(-1)
+        if row is not None:
+            center_hz = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
+            span_hz = self.tb.sample_rate / self.tb.fft_probe.zoom
+            est = rade_autotune.estimate_signal_center(
+                row, center_hz, span_hz, center_hz, config.FINE_TUNE_RANGE_HZ,
+            )
+            if est is not None:
+                new_fine = self.tb.fine_offset_hz + (est - center_hz)
+                new_fine = max(-config.FINE_TUNE_RANGE_HZ, min(config.FINE_TUNE_RANGE_HZ, new_fine))
+                self.fine_slider.setValue(int(round(new_fine)))
+        QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_SETTLE_S * 1000),
+                                  lambda: self._autotune_step_gain(token))
+
+    def _autotune_step_gain(self, token):
+        """Stage 1b start: force manual gain (AGC devices), then hand off to
+        the measure/adjust loop."""
+        if not self._autotune_valid(token):
+            return
+        self.rade_status_label.setText("Auto fine-tune: adjusting gain...")
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        stage = self._autotune_gain_stage(device_cls)
+        if stage is None:
+            QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_DWELL_S * 1000),
+                                      lambda: self._autotune_step_check_initial_sync(token))
+            return
+        self._autotune_force_manual_gain(device_cls)
+        self._autotune_gain_iterations = 0
+        QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_SETTLE_S * 1000),
+                                  lambda: self._autotune_step_gain_iterate(token, stage))
+
+    def _autotune_step_gain_iterate(self, token, stage):
+        """Up to 2 damped proportional correction steps toward
+        RADE_AUTOTUNE_TARGET_SNR_DB -- relative to the window's own local
+        noise floor, NOT an absolute FftProbe dB reading (an explicit
+        unmeasured placeholder either way -- see config.py), each clamped
+        to +/-MAX_GAIN_STEP_DB to avoid a wild single-step jump."""
+        if not self._autotune_valid(token):
+            return
+        row, _gen = self.tb.fft_probe.get_latest_row(-1)
+        if row is not None:
+            center_hz = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
+            span_hz = self.tb.sample_rate / self.tb.fft_probe.zoom
+            snr_db = rade_autotune.measure_peak_snr_db(row, center_hz, span_hz, center_hz, config.FINE_TUNE_RANGE_HZ)
+            delta = config.RADE_AUTOTUNE_TARGET_SNR_DB - snr_db
+            delta = max(-config.RADE_AUTOTUNE_MAX_GAIN_STEP_DB, min(config.RADE_AUTOTUNE_MAX_GAIN_STEP_DB, delta))
+            self._autotune_apply_gain_db(stage, self._autotune_read_gain_db(stage) + delta)
+            self._autotune_gain_iterations += 1
+            if abs(delta) > config.RADE_AUTOTUNE_SNR_TOLERANCE_DB and self._autotune_gain_iterations < 2:
+                QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_SETTLE_S * 1000),
+                                          lambda: self._autotune_step_gain_iterate(token, stage))
+                return
+        QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_DWELL_S * 1000),
+                                  lambda: self._autotune_step_check_initial_sync(token))
+
+    def _autotune_step_check_initial_sync(self, token):
+        """End of Stage 1: already locked? Done. Otherwise start Stage 2's
+        bounded frequency sweep (RADE gives no usable continuous feedback
+        pre-sync -- rade_freq_offset()/snrdB_3k_est() are only valid once
+        already synced, confirmed in rade_api.h and in RadeDecoder itself
+        -- so this is a plain sequential search, not gradient-following)."""
+        if not self._autotune_valid(token):
+            return
+        if self.tb.rade_decoder.synced:
+            self._autotune_finish(success=True)
+            return
+        self.rade_status_label.setText("Auto fine-tune: not locked yet, trying nearby frequencies...")
+        self._autotune_base_fine = self.tb.fine_offset_hz
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        stage = self._autotune_gain_stage(device_cls)
+        self._autotune_base_gain = self._autotune_read_gain_db(stage) if stage is not None else None
+        QtCore.QTimer.singleShot(0, lambda: self._autotune_step_freq_sweep(token, 0))
+
+    def _autotune_step_freq_sweep(self, token, index):
+        if not self._autotune_valid(token):
+            return
+        steps = config.RADE_AUTOTUNE_FREQ_SWEEP_STEPS_HZ
+        if index >= len(steps):
+            QtCore.QTimer.singleShot(0, lambda: self._autotune_step_gain_sweep(token, 0))
+            return
+        candidate = max(-config.FINE_TUNE_RANGE_HZ,
+                         min(config.FINE_TUNE_RANGE_HZ, self._autotune_base_fine + steps[index]))
+        self.fine_slider.setValue(int(round(candidate)))
+        self.rade_status_label.setText(
+            f"Auto fine-tune: trying {candidate:+.0f} Hz ({index + 1}/{len(steps)})..."
+        )
+        QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_DWELL_S * 1000),
+                                  lambda: self._autotune_step_freq_sweep_check(token, index))
+
+    def _autotune_step_freq_sweep_check(self, token, index):
+        if not self._autotune_valid(token):
+            return
+        if self.tb.rade_decoder.synced:
+            self._autotune_finish(success=True)
+            return
+        QtCore.QTimer.singleShot(0, lambda: self._autotune_step_freq_sweep(token, index + 1))
+
+    def _autotune_step_gain_sweep(self, token, index):
+        if not self._autotune_valid(token):
+            return
+        self.fine_slider.setValue(int(round(self._autotune_base_fine)))  # back to Stage 1's best frequency
+        steps = config.RADE_AUTOTUNE_GAIN_SWEEP_STEPS_DB
+        if index >= len(steps) or self._autotune_base_gain is None:
+            self._autotune_finish(success=False)
+            return
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        stage = self._autotune_gain_stage(device_cls)
+        candidate = self._autotune_apply_gain_db(stage, self._autotune_base_gain + steps[index])
+        self.rade_status_label.setText(
+            f"Auto fine-tune: trying gain {candidate:.0f}dB ({index + 1}/{len(steps)})..."
+        )
+        QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_DWELL_S * 1000),
+                                  lambda: self._autotune_step_gain_sweep_check(token, index))
+
+    def _autotune_step_gain_sweep_check(self, token, index):
+        if not self._autotune_valid(token):
+            return
+        if self.tb.rade_decoder.synced:
+            self._autotune_finish(success=True)
+            return
+        QtCore.QTimer.singleShot(0, lambda: self._autotune_step_gain_sweep(token, index + 1))
+
     def _on_waterfall_clicked(self, freq_hz):
         if self.tb is None:
             return
@@ -703,6 +959,7 @@ class MainWindow(QtWidgets.QMainWindow):
         swapped -- it persists, just gets a new frequency range."""
         if self.tb is None:
             return
+        self._autotune_cancel()  # a rebuild replaces self.tb -- any in-flight run's captured state is now stale
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         new_rate = self.bandwidth_combo.currentData()
         freq = self.tb.nominal_freq_hz

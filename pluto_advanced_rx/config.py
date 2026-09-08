@@ -92,3 +92,30 @@ FFT_COMPUTE_RATE_HZ = 30  # fft_probe's own compute throttle, independent of pol
 WATERFALL_WINDOW = window.WIN_BLACKMAN_hARRIS  # matches pluto_rx's qtgui.waterfall_sink_c window
 WATERFALL_COLORMAP = "viridis"
 WATERFALL_DB_RANGE = (-80.0, 0.0)  # fixed color/Y-axis levels (no per-frame autoscale)
+
+# --- RADE V1 "Auto Fine-Tune" (rade_autotune.py + gui.py's _autotune_*
+# state machine) -- see the RADE auto-tune plan for the full rationale.
+# TARGET_SNR_DB is relative to the window's own local noise floor, NOT an
+# absolute FftProbe dB reading -- a real bug found calibrating this on real
+# hardware: FftProbe's dB scale is unnormalized FFT output, so its absolute
+# magnitude shifts by tens of dB with fft_size/zoom (measured: peak_db=53
+# at zoom=16 for a signal that would read far lower at zoom=1). An absolute
+# target read a genuinely overloaded RTL-SDR front-end as needing MORE
+# gain. peak-floor cancels that offset out -- see
+# rade_autotune.measure_peak_snr_db()'s docstring.
+# TARGET_SNR_DB/DWELL_S got a first real-hardware validation pass this
+# session (Pluto TX -> RTL-SDR RX, both real, at 432.15MHz): a real-hardware
+# SNR-vs-gain sweep found this RTL-SDR's own peak SNR sits right around
+# 29dB at a non-overloaded TX power, and a full deliberately-mistuned
+# (+900Hz, 5dB gain, true optimum ~30dB) end-to-end Auto Fine-Tune run
+# reached genuine RADE sync via the Stage 2 frequency sweep. Still coarse --
+# only one antenna/distance/TX-power combination tested, and the reached
+# lock was marginal (SNR ~-4dB, brief) -- but no longer a pure guess.
+RADE_AUTOTUNE_TARGET_SNR_DB = 30.0
+RADE_AUTOTUNE_SNR_TOLERANCE_DB = 5.0
+RADE_AUTOTUNE_MAX_GAIN_STEP_DB = 20.0  # per-iteration clamp, safety against wild single-step jumps
+RADE_AUTOTUNE_DWELL_S = 4.0
+RADE_AUTOTUNE_FREQ_SWEEP_STEPS_HZ = (100, -100, 200, -200, 400, -400, 800, -800)
+RADE_AUTOTUNE_GAIN_SWEEP_STEPS_DB = (-6.0, 6.0, -12.0, 12.0)
+RADE_AUTOTUNE_MIN_ZOOM = 16
+RADE_AUTOTUNE_SETTLE_S = 0.4  # after a zoom/frequency/gain change, before trusting a fresh FFT row
