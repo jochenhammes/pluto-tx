@@ -38,15 +38,34 @@ class AdvancedRxFlowgraph(gr.top_block):
     MODE_FM = 0
     MODE_SSB = 1
 
-    def __init__(self, uri=config.DEFAULT_URI, frequency=config.DEFAULT_FREQUENCY,
+    def __init__(self, uri=None, frequency=config.DEFAULT_FREQUENCY,
                  sample_rate=config.DEFAULT_RX_BANDWIDTH, gain_mode=config.DEFAULT_GAIN_MODE,
                  manual_gain_db=config.DEFAULT_MANUAL_GAIN_DB, demod_mode=MODE_FM,
                  nf_gain=config.DEFAULT_NF_GAIN, fft_size=config.DEFAULT_FFT_SIZE,
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
-                 ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto"):
+                 ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
+                 gain_values=None):
+        """uri doubles as the generic "connection" string for every backend
+        (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
+        default is None, NOT config.DEFAULT_URI: that Pluto-specific default
+        must not leak into a non-Pluto device_type (a real bug caught this
+        session -- an omitted uri for device_type="hackrf" was silently
+        passed to Soapy as a bogus serial). None lets build_device() apply
+        each device class's own DEFAULT_CONNECTION instead, exactly mirroring
+        pluto_tx/flowgraph.py's connection=None pattern. Existing Pluto
+        callers (gui.py) always pass uri explicitly, so this is unchanged
+        behavior for them.
+
+        gain_mode/manual_gain_db apply only to an AGC-capable device's one
+        AGC-controlled stage (Pluto's "gain") -- unchanged from before the
+        device abstraction existed, so Pluto callers don't need to change.
+        gain_values is a {stage_name: value} dict for backends with no AGC
+        stage at all (HackRF: LNA/AMP/VGA, all independently manual) --
+        unset stages keep build_source()'s own defaults. The two are
+        independent: a device could in principle have both an AGC stage and
+        further manual-only stages, though none implemented so far do."""
         super().__init__("AdvancedRxFlowgraph")
 
-        self.uri = uri
         self.sample_rate = sample_rate
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
@@ -55,11 +74,16 @@ class AdvancedRxFlowgraph(gr.top_block):
             device_type, connection=uri, frequency_hz=self.nominal_freq_hz,
             sample_rate_hz=sample_rate, bandwidth_hz=None,
         )
+        self.uri = self.device.connection  # the actual (possibly defaulted) connection string
         # Constructed first, gain configured right after -- mirrors
         # TxDevice.build_sink()'s "construct, then configure power" split.
         self.pluto_source = self.device.build_source()
-        self.device.set_gain_mode(gain_mode)
-        self.device.set_gain("gain", manual_gain_db)
+        self.device.set_gain_mode(gain_mode)  # no-op unless device.supports_agc_mode
+        if self.device.supports_agc_mode:
+            agc_stage = next(s for s in self.device.gain_stages if s.controls_agc)
+            self.device.set_gain(agc_stage.name, manual_gain_db)
+        for stage_name, value in (gain_values or {}).items():
+            self.device.set_gain(stage_name, value)
 
         # --- FFT probe for the interactive waterfall widget: taps the full
         # RX_BANDWIDTH span directly off pluto_source, same point pluto_rx's

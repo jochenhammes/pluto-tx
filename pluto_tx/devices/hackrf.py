@@ -194,7 +194,8 @@ class HackRFDevice(TxDevice):
             return None, e
         devices = {}
         for args in results:
-            serial = args.get("serial", "")
-            label = args.get("label", serial or "HackRF One")
+            d = args.asdict()  # SoapySDRKwargs, not a real dict -- no .get()
+            serial = d.get("serial", "")
+            label = d.get("label", serial or "HackRF One")
             devices[serial] = label
         return devices, None
