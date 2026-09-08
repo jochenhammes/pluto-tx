@@ -254,6 +254,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # a safe default to turn on -- see flowgraph.py's
         # rade_eoo_enabled docstring.
         rade_row = QtWidgets.QHBoxLayout()
+        rade_row.addWidget(QtWidgets.QLabel("Output:"))
+        self.rade_output_combo = QtWidgets.QComboBox()
+        self.rade_output_combo.addItem("SDR", "sdr")
+        self.rade_output_combo.addItem("Soundcard", "audio")
+        self.rade_output_combo.setToolTip(
+            "SDR: transmit via this app's own connected device (Pluto/HackRF), as "
+            "in every other mode. Soundcard: output RADE's audio-injectable signal "
+            "(the real part of its IQ, already SSB-centered by librade.so) to the "
+            "system's default audio output instead, for an externally-connected SSB "
+            "radio to transmit -- the SDR device stays completely untouched/dark, "
+            "no LO/power change at all, while this is selected."
+        )
+        self.rade_output_combo.currentIndexChanged.connect(self._on_rade_output_changed)
+        rade_row.addWidget(self.rade_output_combo)
         self.rade_eoo_checkbox = QtWidgets.QCheckBox("Send EOO tail on unkey")
         self.rade_eoo_checkbox.setChecked(False)
         self.rade_eoo_checkbox.setToolTip(
@@ -521,6 +535,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_row_widget.setVisible(is_rade_mode)
         connected = getattr(self, "_rade_connected", True)
         self.rade_eoo_checkbox.setEnabled(connected)
+        self.rade_output_combo.setEnabled(connected)
         # freedv_callsign_edit is NOT touched here -- it's permanently
         # disabled at construction (see the comment above its creation):
         # linking FreeDV's reliable_text station-ID sideband crashes this
@@ -686,6 +701,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_rade_eoo_changed(self, checked):
         if self.tb is not None:
             self.tb.set_rade_eoo_enabled(checked)
+
+    def _on_rade_output_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_rade_output_mode(self.rade_output_combo.currentData())
 
     def _on_m17_src_callsign_changed(self, text):
         if self.tb is not None:
@@ -960,6 +979,7 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
         new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
         new_tb.set_rade_eoo_enabled(self.rade_eoo_checkbox.isChecked())
+        new_tb.set_rade_output_mode(self.rade_output_combo.currentData())
         self._wav_path = new_tb.wav_path
         self.tb = new_tb
         self._embed_waterfall(new_tb)
