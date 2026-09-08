@@ -13,9 +13,10 @@ filter (real-tap low-pass, complex in/out) down to a FIXED DEMOD_IF_RATE -->
 both demodulator branches always connected (FM: quadrature_demod_cf; SSB: a
 complex band-pass that selects only the upper-sideband region, then
 complex_to_real) --> resample to AUDIO_RATE --> blocks.selector picks the
-active mode --> NF (audio) gain --> audio.sink. In parallel, FftProbe taps
-pluto_source directly (full RX_BANDWIDTH span, before IF decimation) and
-exposes FFT rows for the waterfall widget to poll.
+active mode --> NF (audio) gain --> rx_mute (starts muted, see
+set_rx_muted()) --> audio.sink. In parallel, FftProbe taps pluto_source
+directly (full RX_BANDWIDTH span, before IF decimation) and exposes FFT
+rows for the waterfall widget to poll.
 """
 import math
 import sys
@@ -140,9 +141,21 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.nf_gain = blocks.multiply_const_ff(nf_gain)
         self.connect(self.demod_selector, self.nf_gain)
 
+        # Mute gate, last block before the physical output -- starts muted
+        # (0.0) regardless of what rx_muted the caller eventually asks for,
+        # exactly mirroring pluto_tx's tx_gain lesson (2026-09-07 session):
+        # a block right before hardware/output should default to silent and
+        # only be explicitly unmuted, not default to pass-through and rely
+        # on something further upstream to gate it. Deliberately AFTER
+        # nf_gain, not before -- a pure on/off gate, independent of the
+        # continuous "Audio Gain" volume control, so muting/unmuting never
+        # depends on (or interferes with) whatever volume is currently set.
+        self.rx_mute = blocks.multiply_const_ff(0.0)
+        self.connect(self.nf_gain, self.rx_mute)
+
         # Standard Linux default audio output (empty device string).
         self.audio_sink = audio.sink(config.AUDIO_RATE, "", True)
-        self.connect(self.nf_gain, self.audio_sink)
+        self.connect(self.rx_mute, self.audio_sink)
 
     def _retune(self):
         actual = self.nominal_freq_hz + self.fine_offset_hz
@@ -167,6 +180,9 @@ class AdvancedRxFlowgraph(gr.top_block):
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
+
+    def set_rx_muted(self, muted: bool):
+        self.rx_mute.set_k(0.0 if muted else 1.0)
 
     def set_fft_size(self, n: int):
         self.fft_probe.set_fft_size(n)

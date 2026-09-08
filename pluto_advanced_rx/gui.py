@@ -42,6 +42,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.tb = None
         self._fft_gen = -1
+        self._rx_muted = True  # reset True only on fresh connect/disconnect, see _disconnect()/_connect()
         self.setWindowTitle("PlutoSDR Advanced RX")
 
         central = QtWidgets.QWidget()
@@ -75,6 +76,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Receiver group: frequency, demodulator, gain, bandwidth ------
         receiver_group = QtWidgets.QGroupBox("Receiver")
         receiver_layout = QtWidgets.QVBoxLayout(receiver_group)
+
+        # Persistent mute gate (not a momentary control like pluto_tx's PTT) --
+        # starts muted so a fresh connect never immediately blasts audio, see
+        # AdvancedRxFlowgraph.set_rx_muted()/rx_mute's construction comment.
+        # Independent of the "Audio Gain" slider below (a volume control, not
+        # a gate).
+        mute_row = QtWidgets.QHBoxLayout()
+        self.receive_button = QtWidgets.QPushButton()
+        self.receive_button.setCheckable(True)
+        self.receive_button.setChecked(False)
+        self.receive_button.setMinimumHeight(40)
+        self.receive_button.toggled.connect(self._on_receive_toggled)
+        self._style_receive_button(receiving=False)
+        mute_row.addWidget(self.receive_button)
+        receiver_layout.addLayout(mute_row)
 
         freq_row = QtWidgets.QHBoxLayout()
         freq_row.addWidget(QtWidgets.QLabel("Frequency (MHz):"))
@@ -257,9 +273,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_connected_controls_enabled(self, enabled: bool):
         for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
-                  self.gain_mode_combo, self.nf_gain_slider, self.bandwidth_combo, self.fft_size_combo):
+                  self.gain_mode_combo, self.nf_gain_slider, self.bandwidth_combo, self.fft_size_combo,
+                  self.receive_button):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
+
+    def _style_receive_button(self, receiving: bool):
+        self.receive_button.setText("Receiving (click to mute)" if receiving else "Muted (click to receive)")
+        color = "#27ae60" if receiving else "#7f8c8d"
+        self.receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
 
     def _sync_waterfall(self):
         """Push the current tuned frequency/span/demod-band to the waterfall
@@ -366,6 +388,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_nf_gain(value / 100.0)
         self.nf_gain_label.setText(f"{value} %")
 
+    def _on_receive_toggled(self, checked):
+        self._rx_muted = not checked
+        self._style_receive_button(receiving=checked)
+        if self.tb is not None:
+            self.tb.set_rx_muted(self._rx_muted)
+
     def _on_fft_size_changed(self, idx):
         if self.tb is None:
             return
@@ -414,6 +442,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         new_tb.set_fine_offset(fine)
+        new_tb.set_rx_muted(self._rx_muted)  # carry the CURRENT mute state over -- this is an
+        # in-session rebuild, not a fresh connect, so it must not reset to muted (see _disconnect()).
         self._fft_gen = -1
         self.tb.shutdown()
         self.tb = new_tb
@@ -458,6 +488,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
         self.status_label.setText("Disconnected.")
+        # Reset to muted -- only here and at fresh app startup, NOT on
+        # in-session rebuilds (_on_bandwidth_changed), which carry the
+        # current value over instead. See AdvancedRxFlowgraph.set_rx_muted().
+        self._rx_muted = True
+        self.receive_button.blockSignals(True)
+        self.receive_button.setChecked(False)
+        self.receive_button.blockSignals(False)
+        self._style_receive_button(receiving=False)
 
     def _connect(self, uri_text):
         uri = config.normalize_uri(uri_text)
@@ -497,6 +535,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText(f"Could not connect to {uri}: {e}")
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
+        new_tb.set_rx_muted(self._rx_muted)  # True here (see _disconnect()/__init__) -- fresh connect starts muted
         self._fft_gen = -1
         self.tb = new_tb
         self._sync_waterfall()
