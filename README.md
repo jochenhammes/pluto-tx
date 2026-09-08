@@ -17,7 +17,8 @@ Für Debian/Ubuntu (`apt-get`). Installiert:
 - `libiio-utils` — `iio_info`/`iio_attr` zur manuellen Fehlersuche
 - `avahi-daemon` — löst `*.local`-Hostnamen wie `plutoplus.local` auf (wird aktiviert per `systemctl enable --now`)
 - `python3-pyqtgraph` — für `pluto_advanced_rx`s Wasserfall
-- `soapysdr-module-hackrf`, `hackrf`, `python3-soapysdr` — für HackRF-Unterstützung in `pluto_tx`
+- `soapysdr-module-hackrf`, `hackrf`, `python3-soapysdr` — für HackRF-Unterstützung in `pluto_tx` (TX) und `pluto_advanced_rx` (RX)
+- `soapysdr-module-rtlsdr`, `rtl-sdr` — für RTL-SDR-Unterstützung in `pluto_advanced_rx`
 - `git`
 
 Prüft danach per echtem Python-Import, ob alles verfügbar ist, und legt `~/.local/bin/pluto-tx`, `pluto-rx`, `pluto-advanced-rx` an. Beliebig oft wiederholbar.
@@ -38,24 +39,38 @@ Baut `gr-m17` (gepinnter Commit) nach `$HOME/.local`, regeneriert den `pluto-tx`
 
 `libcodec2` mit LPCNet/2020/2020B-Support ist bereits transitive Abhängigkeit von `gnuradio`.
 
+### Optional: RADE V1
+
+Ohne separaten Build ist der RADE-Moduseintrag (in `pluto_tx` **und** `pluto_advanced_rx`) ausgegraut, Rest der App läuft normal.
+
+```
+./install-rade.sh
+```
+
+Baut [`freedv/rade_c`](https://github.com/freedv/rade_c) (gepinnter Commit, inkl. eigenem gepatchtem Opus/FARGAN-Fork) nach `rade_c/` im Projektverzeichnis (kein `make install` — das Projekt hat kein Install-Target) und regeneriert **beide** Starter (`pluto-tx`, `pluto-advanced-rx`) mit passendem `LD_LIBRARY_PATH` (`librade.so`) und `PATH` (`lpcnet_demo`). Merge-sicher: ein bereits von `install-m17.sh` gesetzter `LD_LIBRARY_PATH`-Eintrag bleibt erhalten.
+
 ## Struktur
 
 ```
-install.sh / install-m17.sh
+install.sh / install-m17.sh / install-rade.sh
 pluto_tx/
 ├── config.py         # geräteunabhängige Konstanten
-├── devices/           # Geräte-Abstraktionsschicht (siehe unten)
+├── devices/           # TX-Geräte-Abstraktionsschicht (siehe unten)
 │   ├── base.py          # TxDevice-ABC, PowerStage
 │   ├── pluto.py          # PlutoDevice (gr-iio + safety.py)
 │   └── hackrf.py          # HackRFDevice (gr-soapy)
 ├── safety.py          # PlutoSafety: rohes python3-libiio, unabhängig von GNU Radio
-├── flowgraph.py        # PlutoTxFlowgraph: FM/SSB/M17/FreeDV-Signalkette
+├── flowgraph.py        # PlutoTxFlowgraph: FM/SSB/M17/FreeDV/RADE-Signalkette
 ├── dynamics.py         # Kompressor/Limiter
 ├── freedv_ctypes.py / freedv.py   # FreeDV-Anbindung
+├── rade_ctypes.py / lpcnet_subprocess.py / rade.py   # RADE-Anbindung (RadeEncoder)
 ├── gui.py / app.py
 └── da2jh-test.wav       # Standard-Testaufnahme
 pluto_rx/                # einfacher RX (Frequenz, Gain, Wasserfall)
 pluto_advanced_rx/        # RX mit interaktivem SDR++-artigem Wasserfall (eigenständige Kopie von pluto_rx)
+├── devices/           # RX-Geräte-Abstraktionsschicht: PlutoDevice/HackRFDevice/RtlSdrDevice
+├── rade_ctypes.py / lpcnet_subprocess.py / rade.py   # RADE-Anbindung (RadeDecoder) -- eigene Kopie, kein Import aus pluto_tx
+└── ...
 pluto_tx_carrier.py        # Carrier-Test-Skript (Fallback/Referenz)
 ```
 
@@ -99,6 +114,8 @@ PTT ist in jedem Modus und auf jedem Gerät hart mit dem tatsächlichen HF-Absch
 
 Der TX-Wasserfall zeigt einen auf 50 kHz gezoomten Ausschnitt statt der vollen Geräte-Samplerate (2,5–8+ MHz), damit das eigentliche Signal sichtbar groß ist.
 
+**`pluto_advanced_rx/devices/`** spiegelt dasselbe Prinzip für RX (eigene, einfachere `RxDevice`-ABC — kein PTT, kein Pegel-Ceiling, RX kann nicht senden): **PlutoDevice** (eine AGC-fähige Gain-Stufe), **HackRFDevice** (drei rein manuelle Stufen — LNA 0–40dB, AMP +14dB an/aus, VGA 0–62dB, kein AGC), **RtlSdrDevice** (eine Stufe, echtes Hardware-AGC). Verbindungsfeld akzeptiert bei HackRF/RTL-SDR auch einen vollständigen Soapy-Device-Args-String (`driver=remote,...`) für SoapyRemote-Netzwerkzugriff — dokumentierte Fähigkeit, nicht Ende-zu-Ende getestet (kein Zweitrechner verfügbar).
+
 ## NF-Verarbeitung (Noise Gate, Kompressor, Limiter)
 
 ```
@@ -139,6 +156,18 @@ Anders als M17 liefert `freedv_tx()` fertiges moduliertes AUDIO (kein rohes IQ) 
 
 **Bekannte Einschränkung**: beim realen Sendetest war unterhalb der Trägerfrequenz ein breiteres, gespiegeltes Signalabbild sichtbar (echtes Seitenband-Leck). Die reine digitale Basisbandkette misst dagegen offline sauber (65,5dB USB/LSB-Unterdrückung im belegten Band) — vermutlich AD9361-IQ-Imbalance im analogen Pfad, die eine rein digitale Messung nicht erfasst. OFDM-Signale wie FreeDVs Modem sind dafür empfindlicher als Sprache/M17. Nicht weiter untersucht (siehe ToDo).
 
+## RADE V1 Digitalsprache (TX in `pluto_tx`, RX in `pluto_advanced_rx`)
+
+Modus für [RADE](https://github.com/freedv/rade_c) (Radio Autoencoder, neuronaler HF-Sprachcodec: FARGAN-Vocoder + neuronaler Encoder/Decoder + OFDM). Braucht `librade.so` **und** `lpcnet_demo` (siehe `install-rade.sh`) — ohne die ist der Moduseintrag in beiden Apps ausgegraut. Nur V1 (V2 rät das Projekt selbst von On-Air-Nutzung ab).
+
+Zweistufige Pipeline, kein fertiges GNU-Radio-Bindings vorhanden: `rade_ctypes.py` (ctypes gegen `librade.so`, Sprach-Feature-Vektoren ↔ IQ) + `lpcnet_subprocess.py` (persistenter `lpcnet_demo`-Subprozess für die Sprache↔Feature-Konvertierung, die `librade.so` selbst **nicht** exportiert). Beide Dateien existieren dupliziert in `pluto_tx` und `pluto_advanced_rx` (kein Cross-App-Import, wie überall sonst in diesem Projekt). `lpcnet_demo`s stdout ist von Haus aus voll gepuffert (kein `fflush()` im Quellcode) — der Subprozess läuft deshalb unter `stdbuf -o0 -i0`, sonst blockiert das synchrone Schreiben/Lesen pro Frame.
+
+TX (`pluto_tx/rade.py`, `RadeEncoder`): 16kHz Sprache rein, 8kHz komplexes IQ raus. Wie M17 **nicht** über `mode_selector`, sondern eigene `lock()/connect()/disconnect()`-Verbindung zu `tx_gain`. Ein „End-of-Over"-Tail (144ms, ein Aufruf) existiert, ist aber **standardmäßig aus** (GUI-Checkbox) — braucht noch eine eigene, isolierte Hardware-Verifikation.
+
+RX (`pluto_advanced_rx/rade.py`, `RadeDecoder`): 8kHz IQ rein, 16kHz Sprache raus. Zapft `if_filter`s bereits dezimierten Ausgang an (**nicht** die rohe Gerätequelle direkt — ein Dezimierungsverhältnis von der vollen RX-Bandbreite auf 8kHz sprengt bei Plutos Standard-2,5Msps GNU Radios Puffergrenzen). Kein fester `relative_rate`: die RX-Eingabegröße (`rade_nin()`) variiert mit dem Sync-Zustand. GUI zeigt Sync/Frequenzoffset/SNR, wenn der Modus aktiv ist.
+
+**Verifiziert**: Offline-Rundlauftest (verständliche Sprache, Echtzeitfaktor ≈0,03–0,05), realer Low-Power-Sendetest (Register-Ebene: Dämpfung/LO korrekt bei Key/Unkey, wie jeder andere Modus), reale Über-die-Luft-Paarung Pluto→RTL-SDR über die tatsächliche `pluto_advanced_rx`-Produktionskette (echter RADE-Sync erreicht, mit Bitfehlern/schwachem SNR — plausibel reine Streckenqualität bei diesem improvisierten Nahfeld-Aufbau, kein Code-Fehler).
+
 ## Bekannte Einschränkungen
 
 - **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere Unterbrechung.
@@ -161,7 +190,9 @@ Editierbares Dropdown ("Device") plus Scan- und Connect/Disconnect-Buttons; Star
 
 - **HackRF-„Spike"-Beobachtung nicht abschließend geklärt**: ein kurzer Ausschlag beim ersten realen PTT-Test konnte mangels präziser Zeitkorrelation nicht sicher als "während der Sendung" (erwartet) oder "im Ruhezustand" (der interessante Fall) eingeordnet werden. Für eine echte Klärung: Aufnahme mit geloggten Zeitstempeln statt Live-Beobachtung.
 - **HackRFDevice hat keine von GNU Radio unabhängige Sicherheitsschicht** wie `PlutoSafety` — bewusste Entscheidung, da die aktuellen `gnuradio.soapy`-Bindings dafür keine Grundlage bieten. Falls nötig: roher SoapySDR-Zugriff über `python3-soapysdr`, unabhängig vom laufenden GNU-Radio-Block.
-- **RADE V1** als weiterer Digitalsprache-Modus (TX in `pluto_tx`, RX in `pluto_advanced_rx`) ist geplant, siehe `~/.claude/plans/` bzw. das nächste Arbeitspaket. Machbarkeit bereits verifiziert: `rade_c` ([freedv/rade_c](https://github.com/freedv/rade_c)) lässt sich bauen, `librade.so` exportiert die volle `rade_api.h`; die fehlende Sprache↔Feature-Konvertierung wird über einen `lpcnet_demo`-Subprozess (bestätigt streamfähig) gelöst. RADE liefert wie M17 rohes IQ, kein audio-injizierbares Signal wie FreeDV.
+- **RADE-EOO-Tail braucht eigene, isolierte Hardware-Verifikation** — Mechanismus existiert (`rade_eoo_enabled`), ist aber standardmäßig aus und wurde diese Session nicht real getestet (nur der Standardpfad ohne Tail).
+- **RADE-Über-die-Luft-Verbindung nur bei niedriger Leistung getestet** — echter Sync wurde erreicht, aber mit Bitfehlern/schwachem SNR bei diesem improvisierten Nahfeld-Aufbau. Kein Hinweis auf einen Code-Fehler (Register-Ebene und Konstruktion sind sauber verifiziert), aber ein Test unter besseren HF-Bedingungen (echte Antennen, mehr Abstand, höhere Leistung im erlaubten Rahmen) steht noch aus.
+- **SoapyRemote (Netzwerkzugriff für HackRF/RTL-SDR in `pluto_advanced_rx`) nur als Fähigkeit dokumentiert, nicht Ende-zu-Ende getestet** — kein Zweitrechner verfügbar.
 - **FreeDV `reliable_text` beim gepackten libcodec2 (1.2.0-4) melden/reparieren** — echter, per `gdb` bestätigter SIGFPE-Absturz (siehe oben). Nächste Schritte: Bug bei drowe67/codec2 melden, oder neuere libcodec2-Version testen.
 - **Vermutete AD9361-IQ-Imbalance untersuchen/kalibrieren** (siehe FreeDV-Abschnitt oben) — braucht einen realen Hardware-Loopback-Test zur Quantifizierung, bevor über eine Korrektur entschieden wird.
 - **Geteilter AD9361-Takt zwischen `pluto_rx`/`pluto_tx` beheben** — ein erster Versuch (Takt vor jedem Senden zurückholen) hat das Problem nicht gelöst und wurde wieder entfernt. Nötig: Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+.

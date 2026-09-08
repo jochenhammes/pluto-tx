@@ -12,9 +12,10 @@
 # apt "Suggests", so it's easy to end up without it on a fresh install),
 # python3-pyqtgraph (pluto_advanced_rx's interactive waterfall widget --
 # only a "Recommends" of "gnuradio", not a hard dependency, so also easy to
-# end up without on a fresh install), and the HackRF/SoapySDR pieces pluto_tx
-# needs for its HackRF One TX backend (gnuradio.soapy itself ships inside
-# "gnuradio" already -- these three packages are the only missing bits).
+# end up without on a fresh install), and the HackRF/RTL-SDR/SoapySDR pieces
+# pluto_tx (HackRF TX) and pluto_advanced_rx (HackRF/RTL-SDR RX) need for
+# their non-Pluto device backends (gnuradio.soapy itself ships inside
+# "gnuradio" already -- these packages are the missing driver/tooling bits).
 #
 # Usage:
 #   ./install.sh
@@ -41,7 +42,9 @@ launcher scripts and the self-test:
   - python3-pyqtgraph, if you want to use pluto_advanced_rx's interactive
     waterfall
   - soapysdr-module-hackrf, hackrf, and python3-soapysdr, if you want to use
-    pluto_tx's HackRF One TX backend
+    pluto_tx's HackRF One TX backend or pluto_advanced_rx's HackRF RX backend
+  - soapysdr-module-rtlsdr and rtl-sdr, if you want to use pluto_advanced_rx's
+    RTL-SDR RX backend
 EOF
     exit 1
 fi
@@ -53,11 +56,14 @@ PACKAGES=(
     avahi-daemon      # resolves "*.local" mDNS hostnames; libiio only gets the client libs for free
     python3-pyqtgraph # pluto_advanced_rx's interactive waterfall -- only a gnuradio "Recommends", not a hard dep
     soapysdr-module-hackrf # gr-soapy's HackRF driver .so -- gnuradio.soapy itself is already
-                            # part of "gnuradio" above; this is the one missing piece for pluto_tx's HackRF backend
+                            # part of "gnuradio" above; this is the one missing piece for the
+                            # HackRF backends in pluto_tx (TX) and pluto_advanced_rx (RX)
     hackrf            # hackrf_info etc., for manual troubleshooting -- mirrors libiio-utils above
-    python3-soapysdr  # raw SoapySDR Python bindings, used only for structured HackRF device
-                       # enumeration in pluto_tx's GUI Scan button -- gnuradio.soapy's own sink block
-                       # doesn't need this, it links libsoapysdr directly in C++
+    soapysdr-module-rtlsdr # gr-soapy's RTL-SDR driver .so, for pluto_advanced_rx's RTL-SDR RX backend
+    rtl-sdr           # rtl_test etc., for manual troubleshooting -- mirrors libiio-utils above
+    python3-soapysdr  # raw SoapySDR Python bindings, used only for structured HackRF/RTL-SDR
+                       # device enumeration in the GUI Scan buttons -- gnuradio.soapy's own
+                       # source/sink blocks don't need this, they link libsoapysdr directly in C++
     git               # to clone/update this repo
 )
 
@@ -88,7 +94,7 @@ try:
     import iio as libiio  # noqa: F401  -- raw python3-libiio, distinct from gnuradio.iio above
     from PyQt5 import QtCore, QtWidgets, sip  # noqa: F401
     import pyqtgraph  # noqa: F401  -- pluto_advanced_rx's interactive waterfall
-    import SoapySDR  # noqa: F401  -- HackRF device scanning in pluto_tx's GUI
+    import SoapySDR  # noqa: F401  -- HackRF/RTL-SDR device scanning in the GUI Scan buttons
 except ImportError as e:
     print(f"FAILED: {e}", file=sys.stderr)
     sys.exit(1)
