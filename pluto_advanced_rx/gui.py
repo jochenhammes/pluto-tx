@@ -23,6 +23,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from . import config
 from . import devices
+from .fft_probe import FftProbe
 from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE
 from .waterfall_widget import AdvancedWaterfallWidget
 
@@ -251,6 +252,37 @@ class MainWindow(QtWidgets.QMainWindow):
         wf_controls_row.addStretch(1)
         waterfall_layout.addLayout(wf_controls_row)
 
+        # Zoom + Averaging, side by side above the spectrum -- both take
+        # effect immediately (no flowgraph rebuild, unlike RX bandwidth/FFT
+        # size): FftProbe.set_zoom()/set_avg_count() are pure Python-side
+        # state changes. Zoom is a "zoom-FFT" crop (see fft_probe.py's
+        # module docstring) -- 1x shows the full RX bandwidth, higher
+        # values narrow the displayed span for more visual detail on a
+        # narrowband signal. Averaging is a rolling mean of the last N
+        # spectra in POWER (not dB) -- reduces noise-floor jitter at the
+        # cost of update responsiveness.
+        zoom_avg_row = QtWidgets.QHBoxLayout()
+        zoom_avg_row.addWidget(QtWidgets.QLabel("Zoom:"))
+        self.zoom_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.zoom_slider.setRange(1, FftProbe.MAX_ZOOM)
+        self.zoom_slider.setValue(1)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        zoom_avg_row.addWidget(self.zoom_slider)
+        self.zoom_label = QtWidgets.QLabel("1x (full span)")
+        self.zoom_label.setMinimumWidth(130)
+        zoom_avg_row.addWidget(self.zoom_label)
+
+        zoom_avg_row.addWidget(QtWidgets.QLabel("Averaging:"))
+        self.avg_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.avg_slider.setRange(1, FftProbe.MAX_AVG)
+        self.avg_slider.setValue(1)
+        self.avg_slider.valueChanged.connect(self._on_avg_changed)
+        zoom_avg_row.addWidget(self.avg_slider)
+        self.avg_label = QtWidgets.QLabel("1 (off)")
+        self.avg_label.setMinimumWidth(60)
+        zoom_avg_row.addWidget(self.avg_label)
+        waterfall_layout.addLayout(zoom_avg_row)
+
         # Built ONCE, persists across every reconnect/rebuild (see module
         # docstring).
         self.waterfall = AdvancedWaterfallWidget(
@@ -325,7 +357,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_connected_controls_enabled(self, enabled: bool):
         for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
                   self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
-                  self.bandwidth_combo, self.fft_size_combo, self.receive_button):
+                  self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
+                  self.receive_button):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
 
@@ -492,11 +525,15 @@ class MainWindow(QtWidgets.QMainWindow):
         reads frequencies off that same stale axis, tuned to the wrong
         place as a direct result). The demod-band shading reflects the
         ACTUAL configured filter width now (tb.fm_demod_width_hz /
-        tb.ssb_demod_width_hz), not an estimate."""
+        tb.ssb_demod_width_hz), not an estimate. The displayed span is the
+        ZOOMED span (sample_rate/zoom), read back from fft_probe itself
+        (not the zoom_slider's own value) so this stays correct even if
+        called before the slider's own state has settled."""
         if self.tb is None:
             return
         freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
-        self.waterfall.set_frequency_range(freq, self.tb.sample_rate)
+        zoomed_span = self.tb.sample_rate / self.tb.fft_probe.zoom
+        self.waterfall.set_frequency_range(freq, zoomed_span)
         self.waterfall.set_tuned_frequency(freq)
         mode = self.demod_combo.currentData()
         if mode == AdvancedRxFlowgraph.MODE_FM:
@@ -621,6 +658,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb.set_fft_size(n)
         self.waterfall.set_fft_size(n)
 
+    def _on_zoom_changed(self, value):
+        if self.tb is None:
+            return
+        self.tb.set_fft_zoom(value)
+        span = self.tb.sample_rate / value
+        self.zoom_label.setText(f"{value}x (full span)" if value == 1 else f"{value}x ({self._format_hz(span)})")
+        self._sync_waterfall()
+        self.waterfall.clear()  # old rows are the WRONG span now -- avoid a stretched/misleading transition
+
+    def _on_avg_changed(self, value):
+        if self.tb is None:
+            return
+        self.tb.set_fft_avg_count(value)
+        self.avg_label.setText("1 (off)" if value == 1 else str(value))
+
     def _on_waterfall_clicked(self, freq_hz):
         if self.tb is None:
             return
@@ -664,6 +716,8 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_fine_offset(fine)
         new_tb.set_rx_muted(self._rx_muted)  # carry the CURRENT mute state over -- this is an
         # in-session rebuild, not a fresh connect, so it must not reset to muted (see _disconnect()).
+        new_tb.set_fft_zoom(self.zoom_slider.value())  # carry the current zoom/averaging over too --
+        new_tb.set_fft_avg_count(self.avg_slider.value())  # a fresh FftProbe otherwise silently resets to 1x/off
         self._fft_gen = -1
         self.tb.shutdown()
         self.tb = new_tb
@@ -762,6 +816,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_rx_muted(self._rx_muted)  # True here (see _disconnect()/__init__) -- fresh connect starts muted
+        new_tb.set_fft_zoom(self.zoom_slider.value())  # carry the operator's current zoom/averaging
+        new_tb.set_fft_avg_count(self.avg_slider.value())  # preference over a fresh connect too
         self._fft_gen = -1
         self.tb = new_tb
         self._sync_waterfall()

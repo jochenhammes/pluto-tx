@@ -340,6 +340,12 @@ class AdvancedRxFlowgraph(gr.top_block):
     def set_fft_size(self, n: int):
         self.fft_probe.set_fft_size(n)
 
+    def set_fft_zoom(self, zoom: int):
+        self.fft_probe.set_zoom(zoom)
+
+    def set_fft_avg_count(self, n: int):
+        self.fft_probe.set_avg_count(n)
+
     def set_fm_demod_width(self, width_hz: float):
         """Retapes fm_channel_filter in place (fir_filter_ccc.set_taps() is
         safe at runtime, no flowgraph rebuild needed -- same technique

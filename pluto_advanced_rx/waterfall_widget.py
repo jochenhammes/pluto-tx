@@ -80,7 +80,11 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
         self.spectrum_plot.setYRange(*db_range, padding=0)
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
         self.spectrum_curve = self.spectrum_plot.plot(pen=pg.mkPen(color="#39d353", width=1))
-        layout.addWidget(self.spectrum_plot, 1)
+        # Stretch 2:3 (spectrum:waterfall) instead of the previous 1:3 --
+        # spectrum_plot's share of the total height doubles exactly (1/4 ->
+        # 2/5 of the combined space), per explicit request that the
+        # frequency spectrum be shown twice as tall.
+        layout.addWidget(self.spectrum_plot, 2)
 
         self.waterfall_plot = pg.PlotWidget(viewBox=TuneViewBox())
         self.waterfall_plot.setXLink(self.spectrum_plot)
