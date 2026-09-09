@@ -108,7 +108,6 @@ class PlutoTxFlowgraph(gr.top_block):
         self._rade_eoo_source = None
         self.rade_eoo_enabled = False  # off by default -- see unkey_ptt()'s RADE branch; needs its own
         # isolated hardware verification (Phase I2 of the RADE integration plan) before being turned on.
-        self.rade_output_mode = "sdr"  # "sdr" | "audio" -- see set_rade_output_mode()/key_ptt()/unkey_ptt()
         self._secondary_power = {}  # non-primary power stages (e.g. HackRF's AMP), see set_secondary_power()
 
         if mode == self.MODE_M17 and not M17_AVAILABLE:
@@ -326,7 +325,8 @@ class PlutoTxFlowgraph(gr.top_block):
         # already baked into RadeEncoder's IQ output). The Soundcard output
         # path (rade_to_real/rade_audio_resampler_out/rade_audio_gain,
         # below) is an ALTERNATIVE to that, not an extra stage on top of
-        # it -- see set_rade_output_mode()/key_ptt()/unkey_ptt().
+        # it -- selected by device_type="soundcard" (devices/soundcard.py),
+        # see key_ptt()/unkey_ptt()'s is_audio_only() branch.
         if RADE_AVAILABLE:
             g_rade_down = math.gcd(config.AUDIO_RATE, _rade_ctypes.RADE_SPEECH_SAMPLE_RATE)
             self.rade_audio_resampler = filter.rational_resampler_fff(
@@ -344,15 +344,20 @@ class PlutoTxFlowgraph(gr.top_block):
             )
 
             # --- Soundcard output alternative: lets an externally-connected
-            # SSB transceiver transmit RADE instead of an SDR. Confirmed in
-            # freedv/rade_c's own source this session (RadeAPIUse.md's
-            # "Scaling to 16 bits" section, rade_tx_wav.c writing only
-            # iq[i].real with no extra scaling): the REAL PART of RadeEncoder's
-            # complex IQ is, by itself, a legitimate SSB-injectable audio
-            # signal -- librade.so already centers the OFDM carriers at
-            # 1500Hz (the middle of a normal SSB passband) internally, so no
-            # Hilbert transform or frequency shift is needed here, unlike
-            # FreeDV's own audio path (freedv_ssb_mod above).
+            # SSB transceiver transmit RADE instead of an SDR, selected by
+            # choosing device_type="soundcard" (devices/soundcard.py) rather
+            # than a mode-internal flag -- see key_ptt()/unkey_ptt()'s
+            # self.device.is_audio_only() branch below, which unmutes THIS
+            # parallel branch instead of the normal tx_gain/device path.
+            # Confirmed in freedv/rade_c's own source this session
+            # (RadeAPIUse.md's "Scaling to 16 bits" section, rade_tx_wav.c
+            # writing only iq[i].real with no extra scaling): the REAL PART
+            # of RadeEncoder's complex IQ is, by itself, a legitimate
+            # SSB-injectable audio signal -- librade.so already centers the
+            # OFDM carriers at 1500Hz (the middle of a normal SSB passband)
+            # internally, so no Hilbert transform or frequency shift is
+            # needed here, unlike FreeDV's own audio path (freedv_ssb_mod
+            # above).
             self.rade_to_real = blocks.complex_to_real()
             self.connect(self.rade_encoder, self.rade_to_real)
             g_rade_audio_out = math.gcd(_rade_ctypes.RADE_MODEM_SAMPLE_RATE, config.AUDIO_RATE)
@@ -363,8 +368,8 @@ class PlutoTxFlowgraph(gr.top_block):
             )
             self.connect(self.rade_to_real, self.rade_audio_resampler_out)
             # Starts muted, exactly like tx_gain -- see key_ptt()/unkey_ptt()'s
-            # new early-return branch for rade_output_mode=="audio", which
-            # unmutes/mutes THIS gate instead of tx_gain/the device.
+            # early-return branch for a Soundcard device (is_audio_only()),
+            # which unmutes/mutes THIS gate instead of tx_gain/the device.
             self.rade_audio_gain = blocks.multiply_const_ff(0.0)
             self.connect(self.rade_audio_resampler_out, self.rade_audio_gain)
             self.rade_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
@@ -755,17 +760,32 @@ class PlutoTxFlowgraph(gr.top_block):
         subclass (pluto_tx/devices/) for what its own pre_key()/post_unkey()
         actually does.
 
-        RADE with rade_output_mode=="audio" is a special case, handled as
-        an early return below: the operator has chosen to transmit via an
-        externally-connected radio over a sound card instead of this app's
-        own SDR, so the SDR device must stay COMPLETELY untouched -- no
-        pre_key(), no LO, no power change of any kind. Only rade_audio_gain
-        (a dedicated mute gate on the soundcard-output branch, starting
-        muted just like tx_gain) is unmuted."""
+        RADE with a Soundcard device selected (device_type="soundcard", see
+        devices/soundcard.py) is a special case, handled as an early return
+        below: the operator has chosen to transmit via an externally-
+        connected radio over a sound card instead of this app's own SDR, so
+        the SDR device must stay COMPLETELY untouched -- no pre_key(), no
+        LO, no power change of any kind. Only rade_audio_gain (a dedicated
+        mute gate on the soundcard-output branch, starting muted just like
+        tx_gain) is unmuted -- PLUS tx_gain itself, unlike every other early
+        return below: SoundcardDevice.build_sink() is a null_sink (nothing
+        downstream to protect), and the TX waterfall taps tx_gain's output
+        (see enable_waterfall below), so leaving it muted here would show a
+        flat/empty waterfall during an otherwise-live transmission (a real
+        bug found by the operator on real hardware -- the waterfall went
+        completely blank in Soundcard mode). The self.mode == self.MODE_RADE
+        check is kept alongside is_audio_only() (not just the latter alone)
+        as a defensive guard for the RADE_AVAILABLE=False edge case, where
+        mode already falls back to FM in __init__ but rade_audio_gain never
+        gets built at all -- unreachable via the GUI (it greys out the
+        Soundcard device entry when RADE is unavailable), but cheap
+        insurance against an AttributeError if ever constructed some other
+        way."""
         self._m17_ending = False
         self._rade_ending = False
-        if self.mode == self.MODE_RADE and self.rade_output_mode == "audio":
+        if self.mode == self.MODE_RADE and self.device.is_audio_only():
             self.ptt_mute.set_k(1.0)
+            self.tx_gain.set_k(1.0 + 0j)
             self.rade_audio_gain.set_k(1.0)
             self._keyed = True
             return
@@ -821,15 +841,18 @@ class PlutoTxFlowgraph(gr.top_block):
         falls through to the plain else branch below -- immediate full
         unkey, no tail, identical to FreeDV's behavior.
 
-        RADE with rade_output_mode=="audio" is, again, an early-return
-        special case (see key_ptt()'s matching branch): mutes ONLY
-        rade_audio_gain, immediately, no tail (EOO is meaningful for a
-        receiving SDR's acquisition state machine, not documented/designed
-        for an audio-injected signal into a conventional radio -- out of
-        scope here regardless of rade_eoo_enabled). The SDR device is never
-        touched, so there's nothing to power down."""
-        if self.mode == self.MODE_RADE and self.rade_output_mode == "audio":
+        RADE with a Soundcard device selected is, again, an early-return
+        special case (see key_ptt()'s matching branch): mutes rade_audio_gain
+        AND tx_gain (both were unmuted there, tx_gain purely so the TX
+        waterfall keeps showing the live signal -- see key_ptt()'s docstring),
+        immediately, no tail (EOO is meaningful for a receiving SDR's
+        acquisition state machine, not documented/designed for an
+        audio-injected signal into a conventional radio -- out of scope here
+        regardless of rade_eoo_enabled). The SDR device is never touched, so
+        there's nothing to power down."""
+        if self.mode == self.MODE_RADE and self.device.is_audio_only():
             self.ptt_mute.set_k(0.0)
+            self.tx_gain.set_k(0.0 + 0j)
             self.rade_audio_gain.set_k(0.0)
             self._keyed = False
             return
@@ -910,16 +933,6 @@ class PlutoTxFlowgraph(gr.top_block):
 
     def set_rade_eoo_enabled(self, enabled: bool):
         self.rade_eoo_enabled = enabled
-
-    def set_rade_output_mode(self, mode: str):
-        """"sdr" (default) or "audio" -- see key_ptt()/unkey_ptt()'s early-
-        return branches. Only takes effect on the NEXT key_ptt() cycle; if
-        called while already keyed, the current transmission continues on
-        whichever path was active when it started (same convention as
-        rade_eoo_enabled -- a plain attribute read at key/unkey time, no
-        extra guard against changing it mid-transmission)."""
-        assert mode in ("sdr", "audio"), f"unknown rade_output_mode {mode!r}"
-        self.rade_output_mode = mode
 
     def _rebuild_device_sink(self):
         """For devices where zeroing every power stage isn't enough to

@@ -86,6 +86,17 @@ class TxDevice(abc.ABC):
     def primary_stage(self) -> PowerStage:
         return next(s for s in self.power_stages if s.is_primary)
 
+    @classmethod
+    def is_audio_only(cls) -> bool:
+        """True for backends with no RF concept at all (frequency_range_hz ==
+        (0.0, 0.0)) -- e.g. SoundcardDevice. The single source of truth for
+        both hiding RF-only GUI controls (gui.py's _sync_device_dependent_
+        widgets()/_sync_mode_combo_availability()) and gating flowgraph.py's
+        audio-only PTT path (PlutoTxFlowgraph.key_ptt()/unkey_ptt()) -- no
+        separate capability flag, to avoid two sources of truth drifting
+        apart."""
+        return cls.frequency_range_hz == (0.0, 0.0)
+
     def set_frequency_correction(self, hz: float):
         """No-op unless supports_frequency_correction=True (see HackRFDevice
         for the one backend that currently overrides this) -- concrete

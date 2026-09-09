@@ -42,6 +42,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
+        # --- 4-section top-level layout: every widget below is constructed
+        # in its usual place (unchanged) but added to one of these section
+        # containers instead of `layout` directly -- Qt layouts are live, so
+        # it doesn't matter that e.g. audio_tab_layout gets its actual
+        # content (mode_row etc.) appended further down in this method; only
+        # the ORDER these few statements install section1/mode_tab_widget
+        # into `layout` itself matters for the top-to-bottom visual order.
+        # See _section_title()/_hline() below.
+        layout.addWidget(self._section_title("Device & TX Power"))
+        section1 = QtWidgets.QVBoxLayout()
+        layout.addLayout(section1)
+        layout.addWidget(self._hline())
+
+        layout.addWidget(self._section_title("Mode"))
+        self.mode_tab_widget = QtWidgets.QTabWidget()
+        audio_tab = QtWidgets.QWidget()
+        audio_tab_layout = QtWidgets.QVBoxLayout(audio_tab)
+        self.mode_tab_widget.addTab(audio_tab, "Audio")
+        # Digimodes/File-Transfer are future work (PSK31/RTTY/FT8-style data
+        # modes, file transfer over the air) -- placeholders, disabled with
+        # a tooltip, same "show it exists, explain why it's off" convention
+        # already used for the M17/FreeDV/RADE mode-combo entries below.
+        digimodes_tab = QtWidgets.QWidget()
+        self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
+        self.mode_tab_widget.setTabEnabled(1, False)
+        self.mode_tab_widget.setTabToolTip(1, "Not implemented yet")
+        filetransfer_tab = QtWidgets.QWidget()
+        self.mode_tab_widget.addTab(filetransfer_tab, "File-Transfer")
+        self.mode_tab_widget.setTabEnabled(2, False)
+        self.mode_tab_widget.setTabToolTip(2, "Not implemented yet")
+        layout.addWidget(self.mode_tab_widget)
+        layout.addWidget(self._hline())
+
+        layout.addWidget(self._section_title("PTT / Control"))
+
         # --- Device type + connection ------------------------------------
         # One connection combo shared by every backend (holds a libiio URI
         # for PlutoSDR, a HackRF serial -- or blank for "the only attached
@@ -54,6 +89,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_type_combo = QtWidgets.QComboBox()
         for device_type, device_cls in devices.DEVICE_REGISTRY.items():
             self.device_type_combo.addItem(device_cls.display_name, device_type)
+        if not RADE_AVAILABLE:
+            # Soundcard output only makes sense for RADE (see devices/
+            # soundcard.py) -- grey out rather than hide, same convention as
+            # the M17/FreeDV/RADE mode-combo entries below.
+            sc_idx = self.device_type_combo.findData("soundcard")
+            item = self.device_type_combo.model().item(sc_idx)
+            item.setEnabled(False)
+            self.device_type_combo.setItemData(
+                sc_idx, "librade.so/lpcnet_demo not found -- Soundcard output is RADE-only, see install-rade.sh",
+                QtCore.Qt.ToolTipRole,
+            )
         self.device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
         device_row.addWidget(self.device_type_combo)
         self.device_label = QtWidgets.QLabel("Device (hostname or IP):")
@@ -70,7 +116,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button = QtWidgets.QPushButton("Disconnect")
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
-        layout.addLayout(device_row)
+        section1.addLayout(device_row)
         self._update_device_connection_labels()
 
         # --- Frequency + fine tune ---------------------------------
@@ -113,7 +159,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_correction_spin.valueChanged.connect(self._on_freq_correction_changed)
         self.freq_correction_spin.setVisible(False)
         freq_row.addWidget(self.freq_correction_spin)
-        layout.addLayout(freq_row)
+        section1.addLayout(freq_row)
 
         # --- Mode + source -------------------------------------------
         mode_row = QtWidgets.QHBoxLayout()
@@ -181,8 +227,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_button.setEnabled(False)
         self.file_button.clicked.connect(self._on_pick_file)
         mode_row.addWidget(self.file_button)
-        layout.addLayout(mode_row)
-        layout.addSpacing(12)
+        audio_tab_layout.addLayout(mode_row)
+        audio_tab_layout.addSpacing(12)
 
         # --- M17 callsigns -- only VISIBLE in M17 mode (not just enabled/
         # disabled like the other controls), per explicit request: these
@@ -204,7 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         m17_row.addStretch(1)
         self.m17_row_widget = QtWidgets.QWidget()
         self.m17_row_widget.setLayout(m17_row)
-        layout.addWidget(self.m17_row_widget)
+        audio_tab_layout.addWidget(self.m17_row_widget)
         self._update_m17_controls_enabled()
 
         # --- FreeDV variant + callsign row -- only VISIBLE in FreeDV mode,
@@ -244,7 +290,7 @@ class MainWindow(QtWidgets.QMainWindow):
         freedv_row.addStretch(1)
         self.freedv_row_widget = QtWidgets.QWidget()
         self.freedv_row_widget.setLayout(freedv_row)
-        layout.addWidget(self.freedv_row_widget)
+        audio_tab_layout.addWidget(self.freedv_row_widget)
         self._update_freedv_controls_enabled()
 
         # --- RADE EOO (End-of-Over) row -- only VISIBLE in RADE mode, same
@@ -252,22 +298,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # and needs its own isolated real-hardware verification (Phase I2 of
         # the RADE integration plan, not done yet this session) before being
         # a safe default to turn on -- see flowgraph.py's
-        # rade_eoo_enabled docstring.
+        # rade_eoo_enabled docstring. The "SDR vs. Soundcard" output choice
+        # that used to live in this row is now the "Soundcard (RADE only)"
+        # entry in the Device Type combo above (devices/soundcard.py) --
+        # a hint label here points operators back to it.
         rade_row = QtWidgets.QHBoxLayout()
-        rade_row.addWidget(QtWidgets.QLabel("Output:"))
-        self.rade_output_combo = QtWidgets.QComboBox()
-        self.rade_output_combo.addItem("SDR", "sdr")
-        self.rade_output_combo.addItem("Soundcard", "audio")
-        self.rade_output_combo.setToolTip(
-            "SDR: transmit via this app's own connected device (Pluto/HackRF), as "
-            "in every other mode. Soundcard: output RADE's audio-injectable signal "
-            "(the real part of its IQ, already SSB-centered by librade.so) to the "
-            "system's default audio output instead, for an externally-connected SSB "
-            "radio to transmit -- the SDR device stays completely untouched/dark, "
-            "no LO/power change at all, while this is selected."
-        )
-        self.rade_output_combo.currentIndexChanged.connect(self._on_rade_output_changed)
-        rade_row.addWidget(self.rade_output_combo)
+        rade_row.addWidget(QtWidgets.QLabel(
+            "(To transmit via an external radio's audio input instead of an SDR, "
+            "select \"Soundcard (RADE only)\" as Device Type above.)"
+        ))
         self.rade_eoo_checkbox = QtWidgets.QCheckBox("Send EOO tail on unkey")
         self.rade_eoo_checkbox.setChecked(False)
         self.rade_eoo_checkbox.setToolTip(
@@ -280,7 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rade_row.addStretch(1)
         self.rade_row_widget = QtWidgets.QWidget()
         self.rade_row_widget.setLayout(rade_row)
-        layout.addWidget(self.rade_row_widget)
+        audio_tab_layout.addWidget(self.rade_row_widget)
         self._update_rade_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
@@ -309,8 +348,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.amp_checkbox.setVisible(False)
         self.amp_checkbox.toggled.connect(self._on_amp_changed)
         power_row.addWidget(self.amp_checkbox)
-        layout.addLayout(power_row)
-        layout.addSpacing(12)
+        section1.addLayout(power_row)
+        section1.addSpacing(8)
         self.power_slider.setValue(int(round(atten_ceiling_db)))
 
         # --- NF (audio) gain -------------------------------------------
@@ -324,7 +363,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nf_gain_label = QtWidgets.QLabel(f"{int(config.DEFAULT_NF_GAIN * 100)} %")
         self.nf_gain_label.setMinimumWidth(50)
         nf_row.addWidget(self.nf_gain_label)
-        layout.addLayout(nf_row)
+        audio_tab_layout.addLayout(nf_row)
 
         # --- NF dynamics processing: noise gate, compressor, limiter -------
         # Attack/release/knee stay fixed (config.py) at all three stages --
@@ -345,7 +384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gate_threshold_label = QtWidgets.QLabel(f"{int(config.GATE_THRESHOLD_DB)} dB")
         self.gate_threshold_label.setMinimumWidth(50)
         gate_row.addWidget(self.gate_threshold_label)
-        layout.addLayout(gate_row)
+        audio_tab_layout.addLayout(gate_row)
 
         comp_row = QtWidgets.QHBoxLayout()
         self.compressor_enable = QtWidgets.QCheckBox("Compressor")
@@ -373,7 +412,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compressor_gr_label = QtWidgets.QLabel("GR: 0.0 dB")
         self.compressor_gr_label.setMinimumWidth(70)
         comp_row.addWidget(self.compressor_gr_label)
-        layout.addLayout(comp_row)
+        audio_tab_layout.addLayout(comp_row)
 
         limiter_row = QtWidgets.QHBoxLayout()
         self.limiter_enable = QtWidgets.QCheckBox("Smooth Limiter (before the hard safety clip)")
@@ -381,8 +420,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.limiter_enable.toggled.connect(self._on_limiter_enabled_changed)
         limiter_row.addWidget(self.limiter_enable)
         limiter_row.addStretch(1)
-        layout.addLayout(limiter_row)
-        layout.addSpacing(16)
+        audio_tab_layout.addLayout(limiter_row)
+        audio_tab_layout.addStretch(1)
 
         # --- PTT + emergency stop + status -------------------------------
         btn_row = QtWidgets.QHBoxLayout()
@@ -427,14 +466,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # 500ms by _tick()'s HW readback, which would otherwise clobber a
         # connect/disconnect/scan message before the operator ever sees it
         # (that's exactly what happened -- the message was there, just
-        # invisible, making Connect look like it silently did nothing).
+        # invisible, making Connect look like it silently did nothing). Lives
+        # in section1 (Device & TX Power), not here next to status_label --
+        # it's a live readback of the connected device's hardware registers.
         self.hw_status_label = QtWidgets.QLabel()
-        layout.addWidget(self.hw_status_label)
+        section1.addWidget(self.hw_status_label)
+
+        layout.addWidget(self._hline())
+        layout.addWidget(self._section_title("Waterfall / Spectrum"))
 
         # --- Live TX waterfall (own sub-layout so it can be swapped out on
         # a device reconnect, which rebuilds the flowgraph) -----------------
         self.waterfall_container = QtWidgets.QVBoxLayout()
-        layout.addLayout(self.waterfall_container)
+        layout.addLayout(self.waterfall_container, 1)
         self._embed_waterfall(None)
 
         # --- Lifecycle: periodic tick doubles as (a) Ctrl-C responsiveness
@@ -465,6 +509,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild(uri, self._wav_path)
 
     # --- helpers ------------------------------------------------------
+    @staticmethod
+    def _section_title(text):
+        label = QtWidgets.QLabel(text)
+        font = label.font()
+        font.setBold(True)
+        font.setPointSize(font.pointSize() + 1)
+        label.setFont(font)
+        return label
+
+    @staticmethod
+    def _hline():
+        frame = QtWidgets.QFrame()
+        frame.setFrameShape(QtWidgets.QFrame.HLine)
+        frame.setFrameShadow(QtWidgets.QFrame.Sunken)
+        return frame
+
     @staticmethod
     def _file_button_text(wav_path):
         from .flowgraph import _PLACEHOLDER_WAV
@@ -535,7 +595,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_row_widget.setVisible(is_rade_mode)
         connected = getattr(self, "_rade_connected", True)
         self.rade_eoo_checkbox.setEnabled(connected)
-        self.rade_output_combo.setEnabled(connected)
         # freedv_callsign_edit is NOT touched here -- it's permanently
         # disabled at construction (see the comment above its creation):
         # linking FreeDV's reliable_text station-ID sideband crashes this
@@ -567,6 +626,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Pluto is reachable. A bare hostname/IP gets 'ip:' prefixed "
                 "automatically. Use Scan to discover devices on the network/USB."
             )
+        elif device_cls.connection_kind == "audio_device":
+            self.device_label.setText("Audio Device (blank = system default):")
+            self.uri_combo.setToolTip(
+                "ALSA/PortAudio device name, or leave blank to use the system's "
+                "default audio output -- the RADE signal is written there for an "
+                "externally-connected SSB transceiver to transmit. Scan reports 0 "
+                "devices here (no structured enumeration exists for gr-audio)."
+            )
         else:
             self.device_label.setText("HackRF Serial (blank = auto):")
             self.uri_combo.setToolTip(
@@ -596,15 +663,23 @@ class MainWindow(QtWidgets.QMainWindow):
         the constructor was given."""
         self._update_device_connection_labels()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        is_rf = not device_cls.is_audio_only()
         lo_hz, hi_hz = device_cls.frequency_range_hz
         self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
+        self.freq_spin.setVisible(is_rf)
+        self.fine_slider.setVisible(is_rf)
+        self.fine_label.setVisible(is_rf)
         self._atten_ceiling_db = device_cls.default_power_ceiling
         stage = devices.primary_power_stage(device_cls.device_type)
         self.power_row_label.setText(f"TX Power ({stage.label}, {stage.unit}):" if stage.unit
                                       else f"TX Power ({stage.label}):")
+        self.power_row_label.setVisible(is_rf)
+        self.power_slider.setVisible(is_rf)
+        self.power_label.setVisible(is_rf)
+        self.unlock_full_power.setVisible(is_rf)
         self._refresh_power_slider_range()
         secondary_stages = [s for s in device_cls.power_stages if not s.is_primary]
-        if secondary_stages:
+        if is_rf and secondary_stages:
             self.amp_checkbox.setText(secondary_stages[0].label)
             self.amp_checkbox.setVisible(True)
         else:
@@ -617,6 +692,33 @@ class MainWindow(QtWidgets.QMainWindow):
         # never on a plain reconnect within the same type, so it never
         # clobbers a value the operator already tuned this session.
         self.freq_correction_spin.setValue(int(getattr(device_cls, "DEFAULT_FREQUENCY_CORRECTION_HZ", 0)))
+        self._sync_mode_combo_availability()
+
+    def _sync_mode_combo_availability(self):
+        """Greys out every mode except RADE when an audio-only device
+        (Soundcard) is selected -- only RADE's IQ is directly SSB-injectable
+        audio (see devices/soundcard.py). Composes with the module-
+        availability graying already applied once at construction time
+        (M17_AVAILABLE/FREEDV_AVAILABLE/RADE_AVAILABLE) -- an item stays
+        disabled if EITHER reason applies. Forces the selection to RADE when
+        switching to an audio-only device with a different mode active;
+        never forces a selection back on switching away (the operator picks
+        freely again once everything is re-enabled)."""
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        is_rf = not device_cls.is_audio_only()
+        module_available = {
+            PlutoTxFlowgraph.MODE_FM: True,
+            PlutoTxFlowgraph.MODE_SSB: True,
+            PlutoTxFlowgraph.MODE_M17: M17_AVAILABLE,
+            PlutoTxFlowgraph.MODE_FREEDV: FREEDV_AVAILABLE,
+            PlutoTxFlowgraph.MODE_RADE: RADE_AVAILABLE,
+        }
+        for mode, available in module_available.items():
+            idx = self.mode_combo.findData(mode)
+            enabled = available and (is_rf or mode == PlutoTxFlowgraph.MODE_RADE)
+            self.mode_combo.model().item(idx).setEnabled(enabled)
+        if not is_rf and RADE_AVAILABLE and self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_RADE:
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE))
 
     def _set_indicator_idle(self):
         self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")
@@ -701,10 +803,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_rade_eoo_changed(self, checked):
         if self.tb is not None:
             self.tb.set_rade_eoo_enabled(checked)
-
-    def _on_rade_output_changed(self, idx):
-        if self.tb is not None:
-            self.tb.set_rade_output_mode(self.rade_output_combo.currentData())
 
     def _on_m17_src_callsign_changed(self, text):
         if self.tb is not None:
@@ -979,7 +1077,6 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
         new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
         new_tb.set_rade_eoo_enabled(self.rade_eoo_checkbox.isChecked())
-        new_tb.set_rade_output_mode(self.rade_output_combo.currentData())
         self._wav_path = new_tb.wav_path
         self.tb = new_tb
         self._embed_waterfall(new_tb)

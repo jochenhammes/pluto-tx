@@ -3,10 +3,12 @@ new module here, register it below -- no changes needed to flowgraph.py."""
 from .base import PowerStage, TxDevice
 from .pluto import PlutoDevice
 from .hackrf import HackRFDevice
+from .soundcard import SoundcardDevice
 
 DEVICE_REGISTRY = {
     "pluto": PlutoDevice,
     "hackrf": HackRFDevice,
+    "soundcard": SoundcardDevice,
 }
 
 
