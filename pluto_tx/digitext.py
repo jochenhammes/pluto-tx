@@ -84,23 +84,33 @@ def _load_font(font_size_px):
     return ImageFont.load_default()
 
 
-def _char_bitmap(ch, font):
-    """Render a single character to a tight (height, width) float32 array,
-    values 0..1. Uses the font's own bounding box, not a fixed cell size --
-    monospace fonts still vary in the exact ink extent per glyph (e.g. a
-    space has zero ink), so this measures rather than assumes."""
-    # A large scratch canvas, cropped to the actual measured bbox below --
-    # simpler and more robust than trying to predict the exact bbox in
-    # advance for an arbitrary/fallback font.
+def _char_bitmap(ch, font, top_ref, height):
+    """Render a single character to a (height, width) float32 array, values
+    0..1. Width is always cropped to the character's own tight ink bbox
+    (monospace fonts still vary in exact ink extent per glyph, e.g. a space
+    has zero ink); top_ref/height place its vertical extent, and the caller
+    decides what those mean (see render_text_bitmap/render_char_bitmaps).
+
+    top_ref is a y-coordinate in the SAME origin `draw.textbbox((0, 0), ...)`
+    already uses for every character (confirmed: PIL returns directly
+    comparable top/bottom values across independent characters at that fixed
+    origin, no shared canvas needed to establish it) -- drawing at
+    (-left, -top_ref) places this character's ink at its correct row
+    relative to whatever baseline top_ref represents for the caller. A real
+    bug found on real hardware: the previous version cropped every character
+    to its OWN tight bbox and then just top-aligned the crops against each
+    other, discarding where that ink actually sits relative to the other
+    characters' baseline -- a short glyph (a comma, a period -- mostly ink
+    BELOW the baseline) got aligned to the image's top like a full-height
+    "D", instead of hanging down near the baseline like every other
+    font-rendering tool would show it."""
     scratch = Image.new("L", (1, 1), color=0)
     draw = ImageDraw.Draw(scratch)
-    bbox = draw.textbbox((0, 0), ch, font=font)
-    left, top, right, bottom = bbox
+    left, _, right, _ = draw.textbbox((0, 0), ch, font=font)
     width = max(1, right - left)
-    height = max(1, bottom - top)
-    img = Image.new("L", (width, height), color=0)
+    img = Image.new("L", (width, max(1, height)), color=0)
     draw = ImageDraw.Draw(img)
-    draw.text((-left, -top), ch, font=font, fill=255)
+    draw.text((-left, -top_ref), ch, font=font, fill=255)
     return np.asarray(img, dtype=np.float32) / 255.0
 
 
@@ -139,30 +149,45 @@ def _downsample_columns(bitmap, factor):
 def render_text_bitmap(text, font_size_px, col_downsample=1, zoom=1):
     """The whole string as ONE bitmap (used by LAYOUT_HORIZONTAL): all
     characters' individual glyph bitmaps (see _char_bitmap) placed
-    side-by-side, top-aligned to a shared font-height row count so every
-    character's column->frequency mapping lands in the same row range."""
+    side-by-side, sharing ONE baseline reference (the union of every
+    character's own top/bottom ink extent actually present in this text) --
+    not each character's own independent tight bbox. This is deliberately
+    text-local, not the font's global ascent/descent: a callsign like
+    "DA2JH" (no descenders) stays exactly as tall as its tallest letter, no
+    wasted blank rows/transmission time for descender space nothing in the
+    message actually uses; a message that DOES include a "g"/"y"/"," grows
+    to fit it, with every character correctly positioned relative to that
+    shared baseline."""
     font = _load_font(font_size_px)
-    chars = [_char_bitmap(ch, font) for ch in text] or [np.zeros((1, 1), dtype=np.float32)]
-    height = max(c.shape[0] for c in chars)
-    padded = []
-    for c in chars:
-        if c.shape[0] < height:
-            pad = np.zeros((height - c.shape[0], c.shape[1]), dtype=np.float32)
-            c = np.concatenate([c, pad], axis=0)
-        padded.append(c)
-    bitmap = np.concatenate(padded, axis=1)
+    scratch = Image.new("L", (1, 1), color=0)
+    draw = ImageDraw.Draw(scratch)
+    bboxes = [draw.textbbox((0, 0), ch, font=font) for ch in text]
+    top = min((b[1] for b in bboxes), default=0)
+    bottom = max((b[3] for b in bboxes), default=1)
+    height = max(1, bottom - top)
+    chars = [_char_bitmap(ch, font, top, height) for ch in text] or [np.zeros((height, 1), dtype=np.float32)]
+    bitmap = np.concatenate(chars, axis=1)
     bitmap = _apply_zoom(bitmap, zoom)
     return _downsample_columns(bitmap, col_downsample)
 
 
 def render_char_bitmaps(text, font_size_px, col_downsample=1, zoom=1):
-    """Per-character bitmaps (used by LAYOUT_VERTICAL) -- NOT padded to a
-    shared height/width the way render_text_bitmap() pads for concatenation
-    along the column axis; each character keeps its own natural size since
-    they're encoded and concatenated independently, one after another in
-    TIME rather than merged into one wide image."""
+    """Per-character bitmaps (used by LAYOUT_VERTICAL), concatenated
+    independently in TIME rather than merged into one wide image -- unlike
+    render_text_bitmap(), each character keeps its OWN independent tight
+    bbox as its baseline reference (no shared-baseline concern: characters
+    are sent one after another in time, never simultaneously side-by-side
+    the way horizontal-layout characters are, so there's nothing for one
+    character's baseline to visually misalign against)."""
     font = _load_font(font_size_px)
-    return [_downsample_columns(_apply_zoom(_char_bitmap(ch, font), zoom), col_downsample) for ch in text]
+    scratch = Image.new("L", (1, 1), color=0)
+    draw = ImageDraw.Draw(scratch)
+    bitmaps = []
+    for ch in text:
+        _, top, _, bottom = draw.textbbox((0, 0), ch, font=font)
+        bmp = _char_bitmap(ch, font, top, bottom - top)
+        bitmaps.append(_downsample_columns(_apply_zoom(bmp, zoom), col_downsample))
+    return bitmaps
 
 
 def encode_bitmap_to_audio(bitmap, sample_rate, hz_per_col, row_dwell_s, min_freq_hz=300.0,
@@ -268,10 +293,11 @@ def estimate_bandwidth_and_duration(text, layout, font_size_px, sample_rate, hz_
 
     Row count (-> duration) is measured from the ACTUAL text's own
     characters, not a fixed proxy string -- render_text_bitmap()'s real row
-    count is the max height over whichever characters are actually present
-    (e.g. a string with no descenders like "DA2JH" renders shorter than one
-    with "y"/"g" in it), so a fixed-string proxy would systematically
-    mis-estimate depending on the message content.
+    count (horizontal layout) is the union of every character's own ink
+    extent relative to one shared baseline (e.g. a string with no
+    descenders like "DA2JH" renders shorter than one with "y"/"g"/"," in
+    it), so a fixed-string proxy would systematically mis-estimate
+    depending on the message content.
 
     zoom: must match what encode_text() will actually be called with (see
     _apply_zoom) -- scales both the estimated bandwidth (more columns) and
@@ -290,9 +316,16 @@ def estimate_bandwidth_and_duration(text, layout, font_size_px, sample_rate, hz_
         row_count = max((b[3] - b[1] for b in bboxes), default=1)
         n_units = len(text)
     else:
+        # Matches render_text_bitmap()'s shared-baseline union (max bottom -
+        # min top across the actual characters present), NOT max(per-char
+        # height) -- two characters can each be individually shorter than
+        # the union of where their ink sits relative to one shared baseline
+        # (e.g. a cap-height letter's top plus a descender's bottom).
         bbox = draw.textbbox((0, 0), text, font=font)
         width_px = bbox[2] - bbox[0]
-        row_count = max((b[3] - b[1] for b in bboxes), default=1)
+        top = min((b[1] for b in bboxes), default=0)
+        bottom = max((b[3] for b in bboxes), default=1)
+        row_count = max(1, bottom - top)
         n_units = 1
     zoom = max(1, int(zoom))
     width_cols = max(1, -(-(width_px * zoom) // max(1, col_downsample)))  # ceil division

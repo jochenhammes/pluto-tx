@@ -256,7 +256,7 @@ Wort klar lesbar, belegt bei `DIGITEXT_MIN_FREQ_HZ=4000` den Bereich ~4,0-6,16kH
 als auch Vertikal ("DA2", jeder Buchstabe einzeln klar lesbar, untereinander, ~4,0-
 4,9kHz) zeigen den Text tatsächlich korrekt im Wasserfall, mit deutlich sichtbarem
 Restrauschen/Körnigkeit im Buchstabenbild (RTL-SDR-Empfangsqualität, siehe ToDo) —
-nach insgesamt acht echten Bug-Funden in dieser und der vorherigen Session:
+nach insgesamt neun echten Bug-Funden in dieser und der vorherigen Session:
 
 1. **Unlesbarer Text, nur ultraschmalbandiges Signal sichtbar (1. Ursache).** Die
    ursprüngliche ISTFT-Kodierung platzierte den Bildinhalt nur ~23Hz oberhalb von DC
@@ -330,6 +330,21 @@ nach insgesamt acht echten Bug-Funden in dieser und der vorherigen Session:
    Übertragung ein. Verifiziert durch gezielte Nachbildung der exakten
    Race-Condition (nicht auf echter Hardware -- reine GUI-Timer-Logik, unabhängig
    von HF/Empfang).
+9. **Harte Bandbreiten-Obergrenze bei ~18000Hz, Zeichen langsam ausgefadet statt
+   abrupt abgeschnitten.** Nicht der Hilbert-Modulator (`digitext_ssb_mod`,
+   offline mit Einzeltönen gemessen: flach bis auf 0.1dB bis 23.8kHz) --
+   sondern `digitext_ssb_resampler`s automatisch entworfener Anti-Alias-Filter
+   (`fractional_bw=0.4`, wie jeder andere SSB-Resampler in dieser App). Offline
+   mit Einzeltönen durch die exakte Resampler-Konfiguration gemessen: bei 0.4
+   flach nur bis ~18-19kHz, bei 20kHz schon -1.2dB, bei 23kHz praktisch weg --
+   genau das langsame, nicht-abrupte Ausfaden, das gemeldet wurde. Fix: nur für
+   `digitext_ssb_resampler` (nicht die anderen SSB-Pfade, die nie in die Nähe
+   von 18kHz kommen) `fractional_bw` auf 0.47 angehoben -- verschiebt die
+   Passband-Kante Richtung Nyquist (0.5 wäre die mathematische Grenze, bei der
+   die nötige Filter-Übergangsbreite gegen null geht). Ergebnis (Ton durch die
+   volle Kette Hilbert+Resampler gemessen): flach bis 22kHz, erst danach
+   Abfall -- rund 3.5-4kHz mehr nutzbare Bandbreite oberhalb von
+   `DIGITEXT_MIN_FREQ_HZ`.
 
 **`errno 113` beim Pluto-Connect geklärt** (kein Code-Bug): `plutoplus.local` löst
 per mDNS auf eine Heimnetz-Adresse auf, die vom Rechner aus zeitweise nicht

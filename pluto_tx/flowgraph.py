@@ -406,9 +406,29 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_duration_s = 0.0
         self.digitext_source = blocks.vector_source_f([0.0], repeat=False)
         self.digitext_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+        # fractional_bw=0.47, not the 0.4 every other SSB-ish resampler in
+        # this file uses -- a real bug found on real hardware this session:
+        # operators hit a hard ceiling around 18000Hz of occupied bandwidth
+        # (text cut off with a slow fade, not an abrupt edge -- exactly a
+        # resampler passband roll-off signature, not a hard clip). Measured
+        # offline (pure tones through this exact resampler config, 48kHz in
+        # -> Pluto's QUAD_RATE out): at 0.4 the passband is flat only to
+        # ~18-19kHz, already rolled off to -6dB by 20kHz and near-zero by
+        # 23.5kHz -- NOT the Hilbert modulator (digitext_ssb_mod measured
+        # flat to within 0.1dB up to 23.8kHz in isolation, so that's not the
+        # bottleneck). Raising fractional_bw pushes the resampler's own
+        # passband edge outward (0.45->flat to ~21kHz, 0.47->flat to
+        # ~22kHz); 0.5 is the mathematical Nyquist limit where the required
+        # transition band shrinks to zero (infeasible). 0.47 leaves a
+        # deliberate ~2kHz safety margin below Nyquist (24kHz) for the
+        # anti-alias stopband while giving Digitext roughly 4kHz more usable
+        # bandwidth than the previous default -- specific to THIS resampler,
+        # not changed for ssb_resampler/freedv_ssb_resampler (real SSB voice
+        # and FreeDV's own audio never get remotely close to 18kHz anyway,
+        # no reason to touch their filter design).
         self.digitext_ssb_resampler = filter.rational_resampler_ccf(
             interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
-            taps=[], fractional_bw=0.4,
+            taps=[], fractional_bw=0.47,
         )
         self.connect(self.digitext_source, self.digitext_ssb_mod)
         self.connect(self.digitext_ssb_mod, self.digitext_ssb_resampler)
