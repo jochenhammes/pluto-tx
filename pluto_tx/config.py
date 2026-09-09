@@ -126,6 +126,90 @@ FREEDV_DEFAULT_MODE = 8  # FREEDV_MODE_2020 (vs. FREEDV_MODE_2020B = 16)
 
 FREEDV_CALLSIGN_MAX_LEN = 9  # matches M17_CALLSIGN_MAX_LEN; reliable_text itself allows more
 
+# --- Digitext (waterfall-text digimode, pluto_tx/digitext.py) --------------
+# Renders ASCII text to a pixel bitmap (Pillow) and encodes it via direct
+# additive sine-tone synthesis so ANY receiver's FFT/waterfall shows the
+# text, right-side up and readable -- see digitext.py's module docstring for
+# the exact column->frequency/row->time mapping and the horizontal/vertical
+# layout distinction. Like M17/FreeDV, bypasses the analog dynamics chain
+# (nf_filter/gate/agc/compressor/nf_gain/limiter_smooth/limiter) and, unlike
+# ALL of them, doesn't tap ptt_mute's mic/file audio at all -- the "source"
+# is the typed text, not live audio, so there's nothing upstream to mute.
+#
+# Second real-hardware round this session: the FIRST implementation (an
+# inverse-STFT/overlap-add encoding, with DIGITEXT_FRAME_LEN/_HOP_LEN/
+# _ROW_HOLD_FRAMES -- since removed) turned out to only reconstruct cleanly
+# when a receiver's OWN analysis FFT happened to match those internal
+# parameters -- verified offline this session: the same signal looked
+# reasonable under matching analysis parameters but degraded into
+# unrecognizable noise under an independent, mismatched FFT size, which is
+# exactly what any real, independent receiver (SDR++, GQRX, RTL-SDR) is.
+# Replaced with direct additive tone synthesis (see digitext.py), which has
+# no such dependency. A second finding: many simultaneous close-together
+# tones (a solid letter stroke needs several adjacent columns) beat/
+# interfere and can look patchy in a short observation window -- addressed
+# by DIGITEXT_COL_DOWNSAMPLE (fewer, coarser columns) and generous
+# DIGITEXT_HZ_PER_COL/_ROW_DWELL_S (wide separation, long per-row dwell, so
+# a real continuously-scrolling waterfall gets many independent looks per
+# row instead of depending on any single snapshot).
+#
+# All values below are again a first estimate for the NEW encoding,
+# informed by this session's offline diagnosis (not yet a second real
+# on-air confirmation) -- see README's Digitext section for the full
+# writeup and what's still open.
+DIGITEXT_DEFAULT_TEXT = "DA2JH"
+DIGITEXT_MAX_TEXT_LEN = 40  # a sanity cap only (avoid a runaway-long message) -- there is
+# deliberately no bandwidth cap/warning any more (removed by explicit request); the GUI's live
+# estimate label still shows the projected bandwidth, it just no longer blocks or flags anything.
+DIGITEXT_FONT_SIZE_PX = 16
+DIGITEXT_SAMPLE_RATE = AUDIO_RATE  # reused -- goes through the same Hilbert/SSB chain as FreeDV
+DIGITEXT_COL_DOWNSAMPLE = 1  # 1 = no downsampling -- a real-hardware test this session found that
+# max-pooling adjacent columns (a previous value of 2) merges thin strokes/gaps together, destroying
+# letter shapes outright (verified: a binary-thresholded render of the downsampled bitmap was
+# unreadable even though the SAME text at native resolution was clearly "DA2JH") -- bandwidth is
+# instead managed via DIGITEXT_HZ_PER_COL and the operator's own zoom-factor choice (GUI, 1x-8x).
+DIGITEXT_HZ_PER_COL = 45.0  # Hz between adjacent logical columns -- wide enough to resist inter-tone beating
+DIGITEXT_ROW_DWELL_S = 0.15  # seconds each image row is held -- real feedback this session: at the
+# original 0.35s, letters looked horizontally stretched/squashed on a real waterfall (12 rows * 0.35s
+# = 4.2s tall vs. 50 cols * 45Hz = 2250Hz wide for "DA2JH" -- a very flat aspect ratio) and the
+# operator asked for rows to play faster. Still long enough to give a real, continuously-scrolling
+# waterfall multiple independent FFT looks per row (the original anti-beating reason for holding each
+# row at all, see encode_bitmap_to_audio's docstring) -- just less of a margin than before. If beating/
+# patchiness reappears on real hardware, raise this back up rather than reducing DIGITEXT_HZ_PER_COL,
+# which exists for the same reason.
+# Lowest frequency bin used -- a REAL bug found and fixed on real hardware
+# this session: this used to be ~23Hz (2 bins), deep in hilbert_fc(401,
+# WIN_HAMMING)'s poor-response dead zone near DC (same transformer design
+# as digitext_ssb_mod), which visibly collapsed the intended readable text
+# into an unreadable, ultra-narrowband blob on a real receiver's waterfall.
+# Raised from an initially-tried 300Hz to 4000Hz after a SECOND real-hardware
+# finding: real over-the-air Pluto TX captures showed only ~13-18dB image
+# (mirror) sideband suppression, vs. 60-94dB measured for the exact same
+# digital signal at every stage up to the DAC in isolated chain tests. This
+# proves the digital/software path is clean and the residual mirror image is
+# an analog AD9361 TX IQ-imbalance characteristic of this hardware (already
+# documented separately for FreeDV's OFDM signal in this project's history),
+# not a Digitext bug -- so it cannot be fixed in software. 4000Hz instead
+# pushes the real signal and its mirror far enough apart that they no longer
+# visually overlap near the carrier; both real over-the-air tests (horizontal
+# "DA2JH", vertical "DA2") confirmed the mirror is no longer visible even
+# though the underlying ~13-18dB suppression ratio is unchanged.
+DIGITEXT_MIN_FREQ_HZ = 4000.0
+# True silence appended after the message -- belt-and-suspenders alongside
+# the GUI's auto-unkey timer for a second REAL bug found this session: RF
+# continued transmitting (looked like an unmodulated carrier) well past
+# when the message should have ended. Guarantees the modulator's LAST
+# input is genuine silence regardless of exact auto-unkey timing.
+DIGITEXT_TAIL_S = 0.15
+# Unconditional backstop, in addition to the primary GUI auto-unkey timer
+# (digitext_duration_s, itself now includes DIGITEXT_TAIL_S) -- mirrors the
+# already-established M17_EOT_HOLD_WATCHDOG_S pattern above ("a hard
+# ceiling in case something goes wrong"). Forces unkey_ptt() this long
+# AFTER the primary timer was supposed to have already fired, regardless of
+# self.tb.keyed state -- calling unkey_ptt() again when already unkeyed is
+# a harmless no-op.
+DIGITEXT_AUTO_UNKEY_WATCHDOG_S = 2.0
+
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [

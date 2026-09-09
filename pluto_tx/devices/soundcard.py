@@ -1,5 +1,6 @@
 """Soundcard TX backend: lets an externally-connected SSB transceiver
-transmit RADE via a sound card instead of this app's own SDR (Pluto/HackRF).
+transmit RADE, or a local sound card play out Digitext, instead of this
+app's own SDR (Pluto/HackRF).
 
 No RF concept applies here at all -- no frequency, no power stage, no scan.
 build_sink() returns a null_sink: the RF-domain path (mode_selector -> tx_gain
@@ -22,7 +23,14 @@ from .base import PowerStage, TxDevice
 
 class SoundcardDevice(TxDevice):
     device_type = "soundcard"
-    display_name = "Soundcard (RADE only)"
+    # Real bug found on real hardware this session: this used to say
+    # "Soundcard (RADE only)" even after Digitext also got a Soundcard
+    # output path -- misleadingly implied Digitext wasn't available here at
+    # all in the device list itself, even though the mode combo correctly
+    # allowed selecting it. Keep this label in sync with
+    # gui.py's _AUDIO_ONLY_CAPABLE_MODES whenever a future mode adds its own
+    # Soundcard-output branch.
+    display_name = "Soundcard (RADE/Digitext)"
     connection_kind = "audio_device"
     DEFAULT_CONNECTION = ""  # empty device string -- gr-audio picks the system default
 

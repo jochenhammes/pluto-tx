@@ -45,6 +45,8 @@ launcher scripts and the self-test:
     pluto_tx's HackRF One TX backend or pluto_advanced_rx's HackRF RX backend
   - soapysdr-module-rtlsdr and rtl-sdr, if you want to use pluto_advanced_rx's
     RTL-SDR RX backend
+  - Pillow (python3-pil) and a monospace TTF font (e.g. fonts-dejavu-mono), if
+    you want to use pluto_tx's Digitext digimode
 EOF
     exit 1
 fi
@@ -64,6 +66,13 @@ PACKAGES=(
     python3-soapysdr  # raw SoapySDR Python bindings, used only for structured HackRF/RTL-SDR
                        # device enumeration in the GUI Scan buttons -- gnuradio.soapy's own
                        # source/sink blocks don't need this, they link libsoapysdr directly in C++
+    python3-pil        # Pillow, for pluto_tx's Digitext digimode (text-to-image rendering,
+                        # pluto_tx/digitext.py) -- a plain Python dependency, no from-source build
+    fonts-dejavu-mono   # DejaVu Sans Mono specifically (verified via `dpkg -S`: the Mono variant
+                        # is its OWN package, separate from fonts-dejavu-core, which only has the
+                        # proportional Sans/Serif faces) -- digitext.py's preferred font, not
+                        # guaranteed present on a minimal system otherwise; falls back to Pillow's
+                        # own built-in bitmap font if this is somehow still missing
     git               # to clone/update this repo
 )
 
@@ -148,6 +157,7 @@ try:
     from PyQt5 import QtCore, QtWidgets, sip  # noqa: F401
     import pyqtgraph  # noqa: F401  -- pluto_advanced_rx's interactive waterfall
     import SoapySDR  # noqa: F401  -- HackRF/RTL-SDR device scanning in the GUI Scan buttons
+    from PIL import Image, ImageDraw, ImageFont  # noqa: F401  -- pluto_tx's Digitext digimode
 except ImportError as e:
     print(f"FAILED: {e}", file=sys.stderr)
     sys.exit(1)

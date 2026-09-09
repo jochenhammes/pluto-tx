@@ -11,6 +11,7 @@ from PyQt5 import QtCore, QtWidgets, sip
 
 from . import config
 from . import devices
+from . import digitext
 from .devices import pluto as pluto_device
 from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, _default_wav_path
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
@@ -21,7 +22,9 @@ class MainWindow(QtWidgets.QMainWindow):
                  atten_ceiling_db=pluto_device.DEFAULT_ATTEN_CEILING, mode=PlutoTxFlowgraph.MODE_FM,
                  source=PlutoTxFlowgraph.SRC_MIC, wav_path=None, m17_src_callsign="",
                  m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
-                 freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign=""):
+                 freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
+                 digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
+                 digitext_zoom=1):
         """Builds the window in a disconnected/default state using the given
         initial settings (mirrors PlutoTxFlowgraph's own constructor
         defaults), then immediately attempts one real connection via
@@ -35,6 +38,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb = None
         self.setWindowTitle("PlutoSDR TX")
         self._armed = True  # False after emergency stop, until re-armed
+        # The last non-Digitext mode actually selected -- restored when the
+        # operator clicks back to the "Audio" tab (see _on_mode_tab_changed()
+        # below). Defaults to FM if the app was started directly in Digitext.
+        self._last_audio_mode = mode if mode != PlutoTxFlowgraph.MODE_DIGITEXT else PlutoTxFlowgraph.MODE_FM
+        # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
+        # for why this exists (real bug: repeated sends of the same text cut
+        # off early).
+        self._digitext_ptt_epoch = 0
         self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
 
@@ -60,14 +71,14 @@ class MainWindow(QtWidgets.QMainWindow):
         audio_tab = QtWidgets.QWidget()
         audio_tab_layout = QtWidgets.QVBoxLayout(audio_tab)
         self.mode_tab_widget.addTab(audio_tab, "Audio")
-        # Digimodes/File-Transfer are future work (PSK31/RTTY/FT8-style data
-        # modes, file transfer over the air) -- placeholders, disabled with
-        # a tooltip, same "show it exists, explain why it's off" convention
-        # already used for the M17/FreeDV/RADE mode-combo entries below.
+        # Digimodes now hosts real content (Digitext, below) -- the first of
+        # several planned digimodes, per explicit request. File-Transfer
+        # stays a future-work placeholder, disabled with a tooltip, same
+        # "show it exists, explain why it's off" convention already used
+        # for the M17/FreeDV/RADE mode-combo entries below.
         digimodes_tab = QtWidgets.QWidget()
+        digimodes_tab_layout = QtWidgets.QVBoxLayout(digimodes_tab)
         self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
-        self.mode_tab_widget.setTabEnabled(1, False)
-        self.mode_tab_widget.setTabToolTip(1, "Not implemented yet")
         filetransfer_tab = QtWidgets.QWidget()
         self.mode_tab_widget.addTab(filetransfer_tab, "File-Transfer")
         self.mode_tab_widget.setTabEnabled(2, False)
@@ -201,6 +212,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
                 QtCore.Qt.ToolTipRole,
             )
+        # Digitext (waterfall-text digimode): always available, no gating
+        # block like M17/FreeDV/RADE above -- Pillow/NumPy are plain Python
+        # dependencies (see pluto_tx/digitext.py), not an external
+        # from-source C library that might be missing.
+        self.mode_combo.addItem("Digitext (Wasserfall-Text)", PlutoTxFlowgraph.MODE_DIGITEXT)
         # Sync to the flowgraph's ACTUAL mode before wiring the change
         # signal -- otherwise the combo always shows "FM" regardless of
         # what mode tb was actually constructed with (e.g. --mode ssb, or
@@ -321,6 +337,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_row_widget.setLayout(rade_row)
         audio_tab_layout.addWidget(self.rade_row_widget)
         self._update_rade_controls_enabled()
+
+        # --- Digitext row -- lives in the "Digimodes" tab (not audio_tab_layout
+        # like every mode above), per explicit request ("Textfeld im Mode-Tab").
+        # _on_mode_changed() below auto-switches mode_tab_widget to this tab
+        # whenever Digitext is selected -- one-directional (selecting the mode
+        # reveals its home tab; manually clicking the tab is just navigation,
+        # doesn't itself change the active TX mode).
+        digitext_row = QtWidgets.QHBoxLayout()
+        digitext_row.addWidget(QtWidgets.QLabel("Text:"))
+        self.digitext_text_edit = QtWidgets.QLineEdit(digitext_text)
+        self.digitext_text_edit.setMaxLength(config.DIGITEXT_MAX_TEXT_LEN)
+        self.digitext_text_edit.setPlaceholderText(config.DIGITEXT_DEFAULT_TEXT)
+        self.digitext_text_edit.textChanged.connect(self._on_digitext_text_changed)
+        # Enlarged by explicit request -- the default QLineEdit width made a
+        # 40-character message barely fit/scroll within the visible box.
+        self.digitext_text_edit.setMinimumWidth(420)
+        self.digitext_text_edit.setStyleSheet("font-size: 13pt;")
+        digitext_row.addWidget(self.digitext_text_edit)
+        digitext_row.addWidget(QtWidgets.QLabel("Layout:"))
+        self.digitext_layout_combo = QtWidgets.QComboBox()
+        self.digitext_layout_combo.addItem("Horizontal (breiter, schneller)", digitext.LAYOUT_HORIZONTAL)
+        self.digitext_layout_combo.addItem("Vertikal (schmalbandig, langsamer)", digitext.LAYOUT_VERTICAL)
+        initial_layout_idx = self.digitext_layout_combo.findData(digitext_layout)
+        if initial_layout_idx >= 0:
+            self.digitext_layout_combo.setCurrentIndex(initial_layout_idx)
+        self.digitext_layout_combo.currentIndexChanged.connect(self._on_digitext_layout_changed)
+        digitext_row.addWidget(self.digitext_layout_combo)
+        digitext_row.addWidget(QtWidgets.QLabel("Zoom:"))
+        self.digitext_zoom_spin = QtWidgets.QSpinBox()
+        # Variable zoom factor, by explicit request ("Buchstaben auch
+        # doppelt und dreimal so groß") -- scales the rendered bitmap by
+        # this integer factor in BOTH axes (see digitext._apply_zoom), so a
+        # letter's proportions stay correct; costs bandwidth (more columns)
+        # and time (more rows) linearly, same trade-off the operator already
+        # sees in the estimate label below. Capped at 8x, a sanity ceiling
+        # only -- "variabel", not literally unbounded.
+        self.digitext_zoom_spin.setRange(1, 8)
+        self.digitext_zoom_spin.setValue(1)
+        self.digitext_zoom_spin.setSuffix("x")
+        self.digitext_zoom_spin.valueChanged.connect(self._on_digitext_zoom_changed)
+        digitext_row.addWidget(self.digitext_zoom_spin)
+        digitext_row.addStretch(1)
+        digimodes_tab_layout.addLayout(digitext_row)
+        self.digitext_estimate_label = QtWidgets.QLabel()
+        self.digitext_estimate_label.setToolTip(
+            "Geschätzte belegte Bandbreite und Sendedauer -- reine Vorschauberechnung "
+            "aus den Schriftmetriken, kein tatsächliches Rendern/Encodieren (das passiert "
+            "erst beim Senden). Keine feste Obergrenze/Warnung mehr (per Nutzerwunsch "
+            "abgeschaltet) -- die Zahl bleibt als Orientierungshilfe stehen, begrenzt aber "
+            "nichts."
+        )
+        digimodes_tab_layout.addWidget(self.digitext_estimate_label)
+        digimodes_tab_layout.addStretch(1)
+        self._update_digitext_estimate()
+        self._update_digitext_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
         # power_slider is reused across backends (relabelled/reranged by
@@ -506,6 +577,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uri_combo.setEnabled(True)
         self.device_type_combo.setEnabled(True)
         self._sync_device_dependent_widgets()  # sync freq range/power label/amp visibility to "PlutoSDR"
+        # Connected AFTER the initial mode_combo sync above (and after every
+        # widget it touches exists) -- bidirectional counterpart to
+        # _on_mode_changed()'s own setCurrentIndex() on this same tab widget,
+        # fixed after a real regression report: manually clicking the "Audio"
+        # tab used to be pure navigation that left mode_combo (and the actual
+        # flowgraph mode) on Digitext, with no way back to FM/SSB short of
+        # noticing the still-selectable-but-unobvious combo underneath. Now
+        # each tab is a real, two-way choice: "Audio" <-> the last-used
+        # audio mode, "Digimodes" <-> Digitext (see _on_mode_tab_changed()).
+        self.mode_tab_widget.currentChanged.connect(self._on_mode_tab_changed)
         self._rebuild(uri, self._wav_path)
 
     # --- helpers ------------------------------------------------------
@@ -567,6 +648,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_freedv_controls_enabled()
         self._rade_connected = enabled
         self._update_rade_controls_enabled()
+        self._digitext_connected = enabled
+        self._update_digitext_controls_enabled()
 
     def _update_m17_controls_enabled(self):
         # Visibility follows the selected mode (row hidden entirely outside
@@ -599,6 +682,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # disabled at construction (see the comment above its creation):
         # linking FreeDV's reliable_text station-ID sideband crashes this
         # system's libcodec2.
+
+    def _update_digitext_controls_enabled(self):
+        # No visibility toggle -- the row lives in its own "Digimodes" tab
+        # (not audio_tab_layout), which _on_mode_changed() already switches
+        # to/away from; enabled state within it still follows connection
+        # state, same as every other control in the app.
+        connected = getattr(self, "_digitext_connected", True)
+        self.digitext_text_edit.setEnabled(connected)
+        self.digitext_layout_combo.setEnabled(connected)
+        self.digitext_zoom_spin.setEnabled(connected)
 
     def _style_estop_button(self, locked: bool):
         self.estop_button.setText("Re-arm" if locked else "E-STOP")
@@ -694,14 +787,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_correction_spin.setValue(int(getattr(device_cls, "DEFAULT_FREQUENCY_CORRECTION_HZ", 0)))
         self._sync_mode_combo_availability()
 
+    # Modes whose IQ/audio output is directly SSB-injectable, so they make
+    # sense with an audio-only (Soundcard) device -- RADE's raw IQ real part
+    # (see devices/soundcard.py) and Digitext's own audio (already sits in
+    # the normal SSB voice band from DIGITEXT_MIN_FREQ_HZ upward, see
+    # digitext.py -- no extra shifting needed, same reasoning as RADE's).
+    _AUDIO_ONLY_CAPABLE_MODES = (PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT)
+
     def _sync_mode_combo_availability(self):
-        """Greys out every mode except RADE when an audio-only device
-        (Soundcard) is selected -- only RADE's IQ is directly SSB-injectable
-        audio (see devices/soundcard.py). Composes with the module-
-        availability graying already applied once at construction time
-        (M17_AVAILABLE/FREEDV_AVAILABLE/RADE_AVAILABLE) -- an item stays
-        disabled if EITHER reason applies. Forces the selection to RADE when
-        switching to an audio-only device with a different mode active;
+        """Greys out every mode except the audio-only-capable ones (RADE,
+        Digitext) when an audio-only device (Soundcard) is selected.
+        Composes with the module-availability graying already applied once
+        at construction time (M17_AVAILABLE/FREEDV_AVAILABLE/RADE_AVAILABLE)
+        -- an item stays disabled if EITHER reason applies. Forces the
+        selection to whichever audio-only-capable mode is actually
+        available (Digitext first -- always available, unlike RADE) when
+        switching to an audio-only device with a now-invalid mode active;
         never forces a selection back on switching away (the operator picks
         freely again once everything is re-enabled)."""
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -712,13 +813,18 @@ class MainWindow(QtWidgets.QMainWindow):
             PlutoTxFlowgraph.MODE_M17: M17_AVAILABLE,
             PlutoTxFlowgraph.MODE_FREEDV: FREEDV_AVAILABLE,
             PlutoTxFlowgraph.MODE_RADE: RADE_AVAILABLE,
+            PlutoTxFlowgraph.MODE_DIGITEXT: True,
         }
         for mode, available in module_available.items():
             idx = self.mode_combo.findData(mode)
-            enabled = available and (is_rf or mode == PlutoTxFlowgraph.MODE_RADE)
+            enabled = available and (is_rf or mode in self._AUDIO_ONLY_CAPABLE_MODES)
             self.mode_combo.model().item(idx).setEnabled(enabled)
-        if not is_rf and RADE_AVAILABLE and self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_RADE:
-            self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE))
+        current = self.mode_combo.currentData()
+        if not is_rf and current not in self._AUDIO_ONLY_CAPABLE_MODES:
+            for mode in self._AUDIO_ONLY_CAPABLE_MODES:
+                if module_available[mode]:
+                    self.mode_combo.setCurrentIndex(self.mode_combo.findData(mode))
+                    break
 
     def _set_indicator_idle(self):
         self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")
@@ -794,11 +900,94 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_limiter_enabled(checked)
 
     def _on_mode_changed(self, idx):
+        mode = self.mode_combo.currentData()
+        if mode != PlutoTxFlowgraph.MODE_DIGITEXT:
+            self._last_audio_mode = mode  # see _on_mode_tab_changed()
         if self.tb is not None:
-            self.tb.set_mode(self.mode_combo.currentData())
+            self.tb.set_mode(mode)
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
         self._update_rade_controls_enabled()
+        # Bidirectional with _on_mode_tab_changed() below: selecting Digitext
+        # here reveals its home tab; clicking the tab itself also drives mode
+        # selection the other way. setCurrentIndex() is a no-op (no signal)
+        # if already on the target tab, so this never fights that handler.
+        self.mode_tab_widget.setCurrentIndex(1 if mode == PlutoTxFlowgraph.MODE_DIGITEXT else 0)
+
+    def _on_mode_tab_changed(self, tab_idx):
+        """Reverse direction of _on_mode_changed()'s tab auto-switch: the
+        operator clicking the "Audio" or "Digimodes" tab directly is a real
+        mode choice, not just navigation -- a real bug report on real
+        hardware this session ("FM/SSB kaputt") was exactly this being
+        one-directional: after selecting Digitext, mode_combo (the only
+        control that actually changed self.tb.mode) was hidden away in the
+        Audio tab with no visible prompt to look for it there, and the
+        operator had no way back to FM/SSB from the Digimodes tab. Tab index
+        2 (File-Transfer) is a disabled placeholder -- Qt won't let a click
+        select it, so it's never a real target here."""
+        if tab_idx not in (0, 1):
+            return
+        current_mode = self.mode_combo.currentData()
+        if tab_idx == 0 and current_mode == PlutoTxFlowgraph.MODE_DIGITEXT:
+            target_idx = self.mode_combo.findData(self._last_audio_mode)
+            if target_idx < 0 or not self.mode_combo.model().item(target_idx).isEnabled():
+                # Last-used audio mode isn't selectable right now (e.g. an
+                # audio-only Soundcard device is connected, which greys out
+                # everything except RADE/Digitext) -- fall back to the first
+                # other enabled, non-Digitext entry, or give up silently
+                # rather than force an invalid selection.
+                target_idx = -1
+                for i in range(self.mode_combo.count()):
+                    if (self.mode_combo.itemData(i) != PlutoTxFlowgraph.MODE_DIGITEXT
+                            and self.mode_combo.model().item(i).isEnabled()):
+                        target_idx = i
+                        break
+            if target_idx >= 0:
+                self.mode_combo.setCurrentIndex(target_idx)
+        elif tab_idx == 1 and current_mode != PlutoTxFlowgraph.MODE_DIGITEXT:
+            idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT)
+            if idx >= 0 and self.mode_combo.model().item(idx).isEnabled():
+                self.mode_combo.setCurrentIndex(idx)
+
+    def _on_digitext_text_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_digitext_text(text)
+        self._update_digitext_estimate()
+
+    def _on_digitext_layout_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_digitext_layout(self.digitext_layout_combo.currentData())
+        self._update_digitext_estimate()
+
+    def _on_digitext_zoom_changed(self, value):
+        if self.tb is not None:
+            self.tb.set_digitext_zoom(value)
+        self._update_digitext_estimate()
+
+    def _update_digitext_estimate(self):
+        text = self.digitext_text_edit.text()
+        layout = self.digitext_layout_combo.currentData()
+        zoom = self.digitext_zoom_spin.value()
+        bw, duration_s = digitext.estimate_bandwidth_and_duration(
+            text, layout, config.DIGITEXT_FONT_SIZE_PX, config.DIGITEXT_SAMPLE_RATE,
+            config.DIGITEXT_HZ_PER_COL, config.DIGITEXT_ROW_DWELL_S,
+            tail_s=config.DIGITEXT_TAIL_S, col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=zoom,
+        )
+        # Real bug found on real hardware this session: the label used to
+        # show only a bandwidth number, not WHERE the signal actually sits
+        # relative to the dialed-in carrier -- easy to miss on a receiver's
+        # waterfall if its view is zoomed tight around the carrier itself,
+        # especially since DIGITEXT_MIN_FREQ_HZ moved the signal well away
+        # from DC (see its config.py comment) to dodge the AD9361's mirror
+        # image. Spelling out the actual +Hz offset range here lets the
+        # operator point their receiver's span at the right place. No more
+        # bandwidth warning/red styling -- removed by explicit request (the
+        # number itself stays, nothing gates sending on it any more).
+        lo_hz = config.DIGITEXT_MIN_FREQ_HZ
+        hi_hz = lo_hz + bw
+        self.digitext_estimate_label.setText(
+            f"~{bw:.0f} Hz bei Traeger +{lo_hz:.0f} bis +{hi_hz:.0f} Hz, ~{duration_s:.1f}s"
+        )
 
     def _on_rade_eoo_changed(self, checked):
         if self.tb is not None:
@@ -895,6 +1084,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.key_ptt()
             self.ptt_button.setText("PTT (click to stop)")
             self._set_indicator_on_air()
+            self._schedule_digitext_auto_unkey()
         else:
             self.ptt_button.setText("PTT (click to send)")
             self._release_ptt()
@@ -904,6 +1094,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.tb.key_ptt()
         self._set_indicator_on_air()
+        self._schedule_digitext_auto_unkey()
 
     def _on_ptt_released(self):
         if self.tb is None or not self.tb.keyed:
@@ -940,6 +1131,85 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.finish_unkey_rade()
         self._set_indicator_idle()
+
+    def _schedule_digitext_auto_unkey(self):
+        """Digitext is a one-shot mode (send the whole image once, then
+        stop) rather than hold-to-transmit like FM/SSB -- the operator
+        presses PTT once, and this schedules the release for them once the
+        precomputed waveform has fully played out, reusing _release_ptt()
+        (the exact same method a manual click/release already calls) rather
+        than any new flowgraph-level tail machinery, unlike M17/RADE's EOT/
+        EOO tails. Applies in BOTH PTT interaction modes -- even in
+        press-and-hold mode, once the message is done there's nothing left
+        to transmit, so holding the button any longer would just leave RF
+        up with silence; a later manual release then finds tb.keyed already
+        False and no-ops (see _on_ptt_released()).
+
+        Real bug found on real hardware this session: repeated sends of the
+        SAME text cut off early, at a reproducible point partway through.
+        Cause: token used to be just `self.tb` -- but self.tb is the same
+        flowgraph instance across repeated presses (only its internal
+        digitext_source gets rebuilt per key_ptt()), so it can never tell
+        "a timer from an EARLIER press" apart from "a timer for THIS press".
+        With identical repeated text, digitext_duration_s is identical too,
+        so pressing again right as the previous transmission's own auto-
+        unkey fires lines its stale watchdog (DIGITEXT_AUTO_UNKEY_WATCHDOG_S
+        later) up almost exactly WATCHDOG_S into the new transmission --
+        which then gets forcibly unkeyed mid-message, every time, by a timer
+        that belongs to the PREVIOUS press. Fixed by additionally stamping
+        an incrementing per-press epoch and having both callbacks bail out
+        if a newer press has started in the meantime -- the tb-identity
+        check alone stays too (still needed for the torn-down/rebuilt-
+        flowgraph case, which the epoch doesn't cover)."""
+        if self.tb is None or self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_DIGITEXT:
+            return
+        token = self.tb
+        self._digitext_ptt_epoch += 1
+        epoch = self._digitext_ptt_epoch
+        QtCore.QTimer.singleShot(
+            int(self.tb.digitext_duration_s * 1000),
+            lambda: self._finish_digitext_auto_unkey(token, epoch),
+        )
+        # Unconditional backstop, in addition to the primary timer above --
+        # a real bug found on real hardware this session: RF kept
+        # transmitting well past when the message should have ended.
+        # Mirrors the already-established M17_EOT_HOLD_WATCHDOG_S pattern
+        # ("a hard ceiling in case something goes wrong") -- fires later
+        # than the primary timer and forces RF off if tb.keyed AND this is
+        # still the current press (epoch match) -- calling unkey_ptt() again
+        # when already unkeyed is a harmless no-op regardless.
+        QtCore.QTimer.singleShot(
+            int((self.tb.digitext_duration_s + config.DIGITEXT_AUTO_UNKEY_WATCHDOG_S) * 1000),
+            lambda: self._digitext_watchdog_unkey(token, epoch),
+        )
+
+    def _finish_digitext_auto_unkey(self, token, epoch):
+        # Staleness guard: no-op if the flowgraph was torn down/rebuilt
+        # (token is the old tb instance, self.tb now a different one or
+        # None), if a NEWER Digitext press has started since this timer was
+        # scheduled (epoch mismatch -- see _schedule_digitext_auto_unkey()'s
+        # docstring for the real bug this fixes), or if the operator already
+        # released/re-keyed manually in the meantime (tb.keyed already False).
+        if self.tb is not token or epoch != self._digitext_ptt_epoch or not self.tb.keyed:
+            return
+        self._reset_digitext_ptt_visual()
+        self._release_ptt()
+
+    def _digitext_watchdog_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._digitext_ptt_epoch:
+            return
+        if self.tb.keyed:
+            self._reset_digitext_ptt_visual()
+            self._release_ptt()
+
+    def _reset_digitext_ptt_visual(self):
+        if self._ptt_hold_mode:
+            self._reset_ptt_button_visual()
+        else:
+            self.ptt_button.blockSignals(True)
+            self.ptt_button.setChecked(False)
+            self.ptt_button.blockSignals(False)
+            self.ptt_button.setText("PTT (click to send)")
 
     def _on_connect_clicked(self):
         if self.tb is not None:
@@ -1052,6 +1322,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 m17_dst_callsign=self.m17_dst_edit.text(),
                 freedv_variant=self.freedv_variant_combo.currentData(),
                 freedv_callsign=self.freedv_callsign_edit.text(),
+                digitext_text=self.digitext_text_edit.text(),
+                digitext_layout=self.digitext_layout_combo.currentData(),
+                digitext_zoom=self.digitext_zoom_spin.value(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")

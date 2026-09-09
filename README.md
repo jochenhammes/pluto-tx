@@ -195,6 +195,156 @@ Alternative zum SDR-Pfad: RADE über ein per Audio-Interface angeschlossenes, kl
 
 **Verifiziert**: real auf Pluto-Hardware (SDR-Modus unverändert, Audio-Modus lässt das SDR-Gerät bei PTT nachweislich unberührt — Register-Readback identisch vor/während/nach) sowie ein echter Offline-Rundlauf durch die neuen Audio-DSP-Ketten über eine reale 48kHz-Mono-WAV-Datei (RADE-Sync erreicht, SNR 35,7dB). Ein Test mit einem echten externen Funkgerät über ein reales Audio-Interface steht noch aus (siehe ToDo).
 
+## Digimodes (TX in `pluto_tx`)
+
+Erster von mehreren geplanten Digimodes, wählbar in der Mode-Combo, eigener Reiter
+"Digimodes". Weitere Digimodes folgen nach und nach in künftigen Sessions.
+
+### Digitext — lesbarer Text im Wasserfall
+
+Sendet einen eingegebenen Text so, dass er beim Empfänger direkt im
+Wasserfall/Spektrum als lesbares Bild erscheint — dieselbe Grundidee wie die real
+existierende Software ["SonicPhoto"](https://www.kvraudio.com/product/sonicphoto-by-skytopia)
+("Reverse Spectrogram Synth") und wie klassisches Hellschreiber im Amateurfunk
+(Feld-Hell gilt mit ≈245-367Hz als "narrow band digi mode"). Eigene Implementierung
+(`pluto_tx/digitext.py`), reines NumPy + Pillow (Text-Rendering) — direkte additive
+Sinuston-Synthese (ein echter, kontinuierlicher Ton pro aktiver Bildspalte, je
+Zeile gehalten), wie die gefundenen Referenz-Tools `spectrographic`/`spectrology`.
+
+**Kernmechanik**: Bild-Spalte → Frequenz, Bild-Zeile → Zeit, gesendet Zeile für Zeile
+von UNTEN nach oben (nicht oben nach unten) — ein real gefundener Bug: die meisten
+Wasserfälle (SDR++, GQRX, die eigene advanced-rx-App) scrollen mit den neuesten
+Daten oben, ältere Zeilen rutschen nach unten durch. Zeilen in ihrer natürlichen
+Bildreihenfolge (oben zuerst) gesendet erschien der Text deshalb auf dem Kopf; die
+Zeilenreihenfolge wird jetzt vor dem Senden gespiegelt (`encode_bitmap_to_audio`),
+sodass der Text auf einem normal scrollenden Wasserfall richtig herum steht. Zwei
+Layouts, beide mit derselben Grundmechanik, nur unterschiedlich gruppiert:
+
+- **Horizontal**: der ganze Text als eine breite Bitmap. Bandbreite wächst mit der
+  Textlänge, live in der GUI angezeigt (kein festes Limit/keine Warnung mehr — per
+  Nutzerwunsch abgeschaltet, die Zahl bleibt nur als Orientierung stehen). Dauer
+  bleibt fast konstant (~2,0s für ein 5-Zeichen-Wort bei Zoom 1x, `DIGITEXT_ROW_DWELL_S
+  = 0.15s`, gesenkt von ursprünglich 0.35s — Buchstaben wirkten sonst auf einem echten
+  Wasserfall horizontal gestreckt, siehe ToDo).
+- **Vertikal**: jeder Buchstabe einzeln, nacheinander gesendet (gleicher
+  Frequenzbereich wiederverwendet, "untereinander"). Bandbreite bleibt konstant
+  (≈450Hz, `DIGITEXT_HZ_PER_COL` × Buchstabenbreite) unabhängig von der Textlänge,
+  Dauer wächst mit der Zeichenzahl (~1,8s/Zeichen bei Zoom 1x).
+
+**Zoom-Faktor** (GUI, 1x-8x, per Nutzerwunsch): skaliert die gerenderte Bitmap in
+beiden Achsen gleichzeitig (nearest-neighbor, `digitext._apply_zoom`) — Buchstaben
+werden dadurch größer UND langsamer/breiter gesendet, im gleichen Seitenverhältnis.
+Kostet proportional mehr Bandbreite (mehr Spalten) und Sendedauer (mehr Zeilen),
+beides weiterhin live in der Schätzung sichtbar.
+
+PTT-Verhalten bewusst anders als bei jedem anderen Modus: einmaliges Senden statt
+Halten — PTT-Druck sendet das komplette Bild einmal, die App unkeyt automatisch am
+Ende (GUI-Timer, `digitext_duration_s`), kein neuer Sonderfall im Flowgraph nötig
+(reines GUI-seitiges Nachlauf-Timing, wiederverwendet dieselbe `_release_ptt()`, die
+auch ein manuelles Loslassen/Klicken schon aufruft). Vorzeitiges Loslassen/Klicken
+bricht wie gewohnt sofort ab.
+
+Auch über die Soundcard sendbar (externes SSB-Funkgerät, `devices/soundcard.py`) —
+neben RADE jetzt der zweite audio-only-taugliche Modus, eigener
+`digitext_audio_gain`/`digitext_audio_sink`-Zweig, exakt nach dem RADE-Vorbild
+(SDR-Gerät bleibt komplett unberührt, TX-Wasserfall zeigt trotzdem live mit).
+
+**Real verifiziert** (Pluto→RTL-SDR, 432,15MHz, eigenständiges Sende-/Empfangsskript
+außerhalb der GUI, echte Aufnahme per RTL-SDR dezimiert und als Spektrogramm
+gerendert, visuell gegen den Eingabetext geprüft): sowohl Horizontal ("DA2JH", ganzes
+Wort klar lesbar, belegt bei `DIGITEXT_MIN_FREQ_HZ=4000` den Bereich ~4,0-6,16kHz)
+als auch Vertikal ("DA2", jeder Buchstabe einzeln klar lesbar, untereinander, ~4,0-
+4,9kHz) zeigen den Text tatsächlich korrekt im Wasserfall, mit deutlich sichtbarem
+Restrauschen/Körnigkeit im Buchstabenbild (RTL-SDR-Empfangsqualität, siehe ToDo) —
+nach insgesamt acht echten Bug-Funden in dieser und der vorherigen Session:
+
+1. **Unlesbarer Text, nur ultraschmalbandiges Signal sichtbar (1. Ursache).** Die
+   ursprüngliche ISTFT-Kodierung platzierte den Bildinhalt nur ~23Hz oberhalb von DC
+   — mitten in der bekannten Nahbereichs-"Totzone" von `hilbert_fc(401,
+   WIN_HAMMING)`. Fix: `DIGITEXT_MIN_FREQ_HZ` weg von DC verschoben (zunächst 300Hz,
+   siehe Punkt 5 unten für den finalen Wert).
+2. **Unlesbarer Text (2., tiefere Ursache, überlebte Fix 1).** Die ISTFT-Kodierung
+   rekonstruiert nur sauber, wenn ein Empfänger zufällig dieselbe interne
+   FFT-Größe/Fensterung verwendet wie die Kodierung selbst — was kein echter,
+   unabhängiger Empfänger (SDR++, GQRX, ein RTL-SDR-Wasserfall) tut. Offline
+   verifiziert: dasselbe Signal sah bei passender Analyse-Auflösung brauchbar aus,
+   wurde aber bei unabhängiger/abweichender FFT-Größe zu unlesbarem Rauschen. Fix:
+   komplette Umstellung auf direkte additive Sinuston-Synthese (siehe oben) — ein
+   echter, kontinuierlicher Ton bei einer Frequenz für eine Dauer ist auf JEDEM
+   Spektrum-Display eindeutig sichtbar, unabhängig von dessen FFT-Einstellungen.
+3. **Unlesbarer Text (3., subtilste Ursache, im ersten additiven Versuch selbst).**
+   Ein Downsampling-Schritt (`DIGITEXT_COL_DOWNSAMPLE=2`, benachbarte Spalten per
+   Max-Pooling zusammengefasst, gedacht zur Bandbreiten-Reduktion) verschmolz die
+   schmalen Zwischenräume der Buchstaben und machte sie dadurch unkenntlich —
+   verifiziert durch einen Vorher-/Nachher-Vergleich rein binärer Schwellenwert-Bilder
+   (mit Downsampling: unleserlicher Klecks; ohne: klar "DA2JH"). Fix:
+   `DIGITEXT_COL_DOWNSAMPLE = 1` (kein Downsampling mehr) — Bandbreite wird
+   stattdessen allein über `DIGITEXT_HZ_PER_COL` und die Horizontal-Längenwarnung
+   gesteuert.
+4. **Träger lief nach Sendeende unkontrolliert weiter (Vorsichtsmaßnahmen, konnte
+   real nicht mehr reproduziert werden nach den obigen Fixes).** `DIGITEXT_TAIL_S`
+   (echte Stille ans Wellenform-Ende angehängt) plus ein unbedingter
+   Watchdog-Timer (`DIGITEXT_AUTO_UNKEY_WATCHDOG_S`, `_digitext_watchdog_unkey()`,
+   nach dem `M17_EOT_HOLD_WATCHDOG_S`-Vorbild) bleiben als Sicherheitsnetz bestehen.
+5. **Symmetrisches Spiegelsignal um den Träger, keine lesbaren Buchstaben (5.
+   Ursache, nach Fix 1-3 real weiter beobachtet).** Eine erneute reale Aufnahme
+   zeigte nur ~13dB Unterdrückung des Spiegelsignals (Ober-/Unterband um den
+   Träger) statt der für `hilbert_fc(401, WIN_HAMMING, 6.76)` erwarteten 60-90dB.
+   Isolierte Digitalketten-Tests (einzelne Töne, viele gleichzeitige Töne, das
+   volle echte Digitext-Audio, mit und ohne Resampler) zeigten dagegen durchweg
+   60-94dB Unterdrückung — die Software-Kette ist also nachweislich sauber, und
+   die Verschlechterung passiert analog im AD9361-Sendepfad des Pluto selbst
+   (IQ-Imbalance), dieselbe bereits für FreeDV/OFDM in diesem Projekt dokumentierte
+   Hardware-Eigenschaft. Kein Software-Bug, daher nicht im Code behebbar. Mitigation:
+   `DIGITEXT_MIN_FREQ_HZ` von 300Hz auf **4000Hz** angehoben, um das echte Signal und
+   sein Spiegelbild auf dem Wasserfall weit genug auseinanderzuschieben, dass sie
+   sich nicht mehr optisch überlappen — real erneut getestet (Horizontal "DA2JH",
+   Vertikal "DA2"), Spiegelbild in beiden Aufnahmen nicht mehr sichtbar, obwohl das
+   zugrundeliegende Unterdrückungsverhältnis unverändert bei ~13-18dB liegt.
+6. **FM/SSB nach Digitext-Nutzung aus der GUI nicht mehr erreichbar.** Der
+   Mode-Tab-Wechsel (Reiter "Audio"/"Digimodes") war einseitig: das Auswählen von
+   Digitext im `mode_combo` (das selbst nur im "Audio"-Reiter sichtbar ist) wechselte
+   automatisch auf den "Digimodes"-Reiter, aber ein manueller Klick zurück auf
+   "Audio" änderte den aktiven Modus nicht mit -- ohne das versteckte `mode_combo`
+   erneut zu finden, gab es keinen offensichtlichen Weg zurück zu FM/SSB. Fix:
+   `_on_mode_tab_changed()` macht den Wechsel jetzt bidirektional -- "Audio"
+   stellt den zuletzt genutzten Audio-Modus wieder her, "Digimodes" wechselt zu
+   Digitext, beide Richtungen real auf Hardware geprüft.
+7. **Text erschien auf dem Kopf.** Zeilen wurden in natürlicher Bild-Reihenfolge
+   (oben zuerst) gesendet, aber gängige Wasserfälle (SDR++, GQRX, die eigene
+   advanced-rx-App) scrollen mit den neuesten Daten oben -- die zuerst gesendete
+   (oberste) Bildzeile landet dadurch am Ende ganz unten. Fix: Zeilenreihenfolge
+   vor dem Senden gespiegelt (`bitmap[::-1]` in `encode_bitmap_to_audio`) --
+   verifiziert mit einem synthetischen Test-Bitmap (unterstes Pixel wird
+   nachweislich zuerst gesendet, oberstes zuletzt).
+8. **Wiederholtes Senden desselben Texts brach die Übertragung vorzeitig ab.**
+   Ursache: der Auto-Unkey-Watchdog identifizierte eine Übertragung nur über die
+   (über die ganze Sitzung hinweg gleichbleibende) Flowgraph-Instanz, nicht über
+   den einzelnen PTT-Druck. Bei identischem Text (identischer `digitext_duration_s`)
+   landete der Watchdog-Timer des VORHERIGEN Drucks reproduzierbar mitten in der
+   NÄCHSTEN Übertragung und beendete sie vorzeitig -- sichtbar am Screenshot mit
+   mehreren übereinander gestapelten, teils abgeschnittenen Sendungen. Fix: ein
+   pro Tastendruck hochgezählter Epochen-Zähler, den beide Timer (Haupttimer und
+   Watchdog) gegenprüfen -- ein Timer aus einem älteren Druck ist jetzt zuverlässig
+   als veraltet erkennbar und greift nicht mehr in eine neuere, noch laufende
+   Übertragung ein. Verifiziert durch gezielte Nachbildung der exakten
+   Race-Condition (nicht auf echter Hardware -- reine GUI-Timer-Logik, unabhängig
+   von HF/Empfang).
+
+**`errno 113` beim Pluto-Connect geklärt** (kein Code-Bug): `plutoplus.local` löst
+per mDNS auf eine Heimnetz-Adresse auf, die vom Rechner aus zeitweise nicht
+erreichbar ist, während der Pluto parallel über eine direkte USB-Ethernet-Verbindung
+(eine andere IP) einwandfrei erreichbar bleibt — `ping plutoplus.local` schlägt fehl
+("Destination Host Unreachable"), `ping` auf die direkte USB-Gadget-IP funktioniert
+sofort. Workaround: bei diesem Fehler die direkte IP/USB-Verbindung statt des
+Hostnamens verwenden.
+
+**Weiterhin nur ein erster Datenpunkt** (ein Wort, zwei Layouts, eine
+Antennenaufstellung) — Bandbreiten-/Timing-Konstanten könnten mit mehr realen Tests
+noch feinjustiert werden (leichtes "Streifen"-Rauschen innerhalb der Buchstaben durch
+Schwebung zwischen vielen gleichzeitigen Tönen ist sichtbar, stört die Lesbarkeit
+aber nicht).
+
 ## Bekannte Einschränkungen
 
 - **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere Unterbrechung.
@@ -215,6 +365,8 @@ Editierbares Dropdown ("Device") plus Scan- und Connect/Disconnect-Buttons; Star
 
 ## ToDo für nächstes Mal
 
+- **Digitext (`pluto_tx`) real verifiziert, aber nur ein Datenpunkt** — Pluto→RTL-SDR, 432,15MHz, echte Aufnahme als Spektrogramm gerendert: "DA2JH" (Horizontal) und "DA2" (Vertikal) beide klar lesbar. Fünf echte Bugs unterwegs gefunden und behoben (siehe README-Abschnitt oben), u.a. eine komplette Umstellung von ISTFT- auf additive Sinuston-Kodierung sowie das Verschieben von `DIGITEXT_MIN_FREQ_HZ` auf 4000Hz gegen das analoge AD9361-Spiegelsignal. Noch offen: mehr Testwörter, andere Antennenaufstellungen/Abstände, ob die AD9361-IQ-Imbalance selbst (~13-18dB Unterdrückung) durch eine Kalibrierung statt nur durch Frequenzverschiebung reduzierbar wäre, ob das sichtbare Rauschen/Körnigkeit innerhalb der Buchstaben (vermutlich RTL-SDR-Empfangsqualität) mit weiteren Parameteranpassungen reduzierbar ist. Weitere Digimodes sind für künftige Sessions geplant.
+- **`plutoplus.local` teils nicht erreichbar (`errno 113`)** — mDNS löst auf eine Heimnetz-Adresse auf, die nicht immer erreichbar ist, während die direkte USB-Ethernet-IP des Pluto zuverlässig funktioniert (siehe Digitext-Abschnitt oben für die Diagnose). Kein Code-Bug in `pluto_tx`; ggf. Netzwerk-/Routing-Konfiguration prüfen oder die direkte IP statt des Hostnamens verwenden.
 - **HackRF-„Spike"-Beobachtung nicht abschließend geklärt**: ein kurzer Ausschlag beim ersten realen PTT-Test konnte mangels präziser Zeitkorrelation nicht sicher als "während der Sendung" (erwartet) oder "im Ruhezustand" (der interessante Fall) eingeordnet werden. Für eine echte Klärung: Aufnahme mit geloggten Zeitstempeln statt Live-Beobachtung.
 - **HackRFDevice hat keine von GNU Radio unabhängige Sicherheitsschicht** wie `PlutoSafety` — bewusste Entscheidung, da die aktuellen `gnuradio.soapy`-Bindings dafür keine Grundlage bieten. Falls nötig: roher SoapySDR-Zugriff über `python3-soapysdr`, unabhängig vom laufenden GNU-Radio-Block.
 - **RADE-EOO-Tail braucht eigene, isolierte Hardware-Verifikation** — Mechanismus existiert (`rade_eoo_enabled`), ist aber standardmäßig aus und wurde diese Session nicht real getestet (nur der Standardpfad ohne Tail).

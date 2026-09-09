@@ -25,6 +25,7 @@ from gnuradio.fft import window
 
 from . import config
 from . import devices
+from . import digitext
 from . import dynamics
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
@@ -86,12 +87,15 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_M17 = 2
     MODE_FREEDV = 3
     MODE_RADE = 4
+    MODE_DIGITEXT = 5
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
                  wav_path=None, mode=MODE_FM, source=SRC_MIC, enable_waterfall=False,
                  m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
-                 freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign=""):
+                 freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
+                 digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
+                 digitext_zoom=1):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -375,6 +379,56 @@ class PlutoTxFlowgraph(gr.top_block):
             self.rade_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
             self.connect(self.rade_audio_gain, self.rade_audio_sink)
 
+        # --- Digitext branch (waterfall-text digimode, pluto_tx/digitext.py):
+        # ALWAYS available, unlike M17/FreeDV/RADE above -- Pillow/NumPy are
+        # plain Python dependencies (python3-pil, added to install.sh this
+        # session), not an external from-source C library that might be
+        # missing, so no _AVAILABLE gate is needed here. Outputs a plain real
+        # AUDIO waveform (like FreeDV, not raw IQ like M17/RADE), so it reuses
+        # this app's existing Hilbert-based USB modulation technique with its
+        # own dedicated instances -- see digitext.py's module docstring for
+        # the actual encoding (row-by-row inverse-STFT). Does NOT tap
+        # ptt_mute like every other mode -- the "source" is the typed text,
+        # not mic/file audio, so there's no upstream audio to mute; only
+        # tx_gain (downstream, common to every mode) needs to gate it.
+        # digitext_source starts as a 1-sample silent placeholder -- the
+        # real per-transmission waveform is built lazily (see
+        # _ensure_digitext_audio()) and swapped in fresh on every key_ptt()
+        # (same "rebuild a fresh one-shot vector_source_c" idiom already
+        # proven for RADE's EOO tail, just one stage earlier in the chain --
+        # here it feeds the Hilbert modulator instead of tx_gain directly,
+        # since this source is real-valued audio, not already-modulated IQ).
+        self.digitext_text = digitext_text
+        self.digitext_layout = digitext_layout
+        self.digitext_zoom = digitext_zoom
+        self._digitext_audio = None
+        self._digitext_audio_dirty = True
+        self.digitext_duration_s = 0.0
+        self.digitext_source = blocks.vector_source_f([0.0], repeat=False)
+        self.digitext_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+        self.digitext_ssb_resampler = filter.rational_resampler_ccf(
+            interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
+            taps=[], fractional_bw=0.4,
+        )
+        self.connect(self.digitext_source, self.digitext_ssb_mod)
+        self.connect(self.digitext_ssb_mod, self.digitext_ssb_resampler)
+
+        # --- Digitext Soundcard output alternative: mirrors RADE's own
+        # Soundcard branch above (same device_type="soundcard"/
+        # is_audio_only() selection, not a separate mode-internal flag).
+        # Simpler than RADE's version: digitext_source is ALREADY plain
+        # real audio (no complex_to_real() step needed) and already sits in
+        # the normal SSB voice band (DIGITEXT_MIN_FREQ_HZ=300Hz upward, see
+        # digitext.py) -- exactly what a real SSB transceiver's mic input
+        # expects, no extra shifting needed. Fans out from the SAME
+        # digitext_source that also feeds digitext_ssb_mod for the SDR
+        # path -- key_ptt() reconnects BOTH downstream branches whenever it
+        # rebuilds digitext_source fresh for a new transmission.
+        self.digitext_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/rade_audio_gain
+        self.connect(self.digitext_source, self.digitext_audio_gain)
+        self.digitext_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
+        self.connect(self.digitext_audio_gain, self.digitext_audio_sink)
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -430,6 +484,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self._null_sink_freedv = blocks.null_sink(gr.sizeof_gr_complex)
         if RADE_AVAILABLE:
             self._null_sink_rade = blocks.null_sink(gr.sizeof_gr_complex)
+        self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -589,6 +644,7 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_FREEDV] = self.freedv_ssb_resampler
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_tx_resampler
+        producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
         return producers
 
     def _null_sink_for(self, producer):
@@ -600,6 +656,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_freedv
         if RADE_AVAILABLE and producer is self.rade_tx_resampler:
             return self._null_sink_rade
+        if producer is self.digitext_ssb_resampler:
+            return self._null_sink_digitext
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def set_mode(self, mode: int):
@@ -625,8 +683,8 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
 
-        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE):
-            return  # all three bypass the NF filter/dynamics chain entirely, nothing to retap
+        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT):
+            return  # all four bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
@@ -670,6 +728,38 @@ class PlutoTxFlowgraph(gr.top_block):
         self.freedv_callsign = callsign
         if FREEDV_AVAILABLE:
             self.freedv_encoder.set_text(callsign)
+
+    def set_digitext_text(self, text: str):
+        """Only caches the value and marks the cached audio stale -- the
+        actual (comparatively expensive) render+ISTFT-encode happens lazily
+        in _ensure_digitext_audio(), called from key_ptt(), not on every
+        keystroke."""
+        self.digitext_text = text
+        self._digitext_audio_dirty = True
+
+    def set_digitext_layout(self, layout: str):
+        assert layout in (digitext.LAYOUT_HORIZONTAL, digitext.LAYOUT_VERTICAL), f"unknown digitext layout {layout!r}"
+        self.digitext_layout = layout
+        self._digitext_audio_dirty = True
+
+    def set_digitext_zoom(self, zoom: int):
+        self.digitext_zoom = max(1, int(zoom))
+        self._digitext_audio_dirty = True
+
+    def _ensure_digitext_audio(self):
+        """Renders/encodes the current digitext_text/digitext_layout into
+        self._digitext_audio if it isn't already cached and up to date --
+        called right before a Digitext transmission starts (key_ptt()), not
+        eagerly on every text/layout change, so fast typing doesn't trigger
+        repeated PIL renders + audio synthesis for no reason."""
+        if self._digitext_audio_dirty or self._digitext_audio is None:
+            self._digitext_audio, self.digitext_duration_s = digitext.encode_text(
+                self.digitext_text, self.digitext_layout, config.DIGITEXT_FONT_SIZE_PX,
+                config.DIGITEXT_SAMPLE_RATE, config.DIGITEXT_HZ_PER_COL, config.DIGITEXT_ROW_DWELL_S,
+                min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ, tail_s=config.DIGITEXT_TAIL_S,
+                col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
+            )
+            self._digitext_audio_dirty = False
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
@@ -789,6 +879,38 @@ class PlutoTxFlowgraph(gr.top_block):
             self.rade_audio_gain.set_k(1.0)
             self._keyed = True
             return
+        if self.mode == self.MODE_DIGITEXT:
+            # Rebuild digitext_source fresh (reset to the start) right
+            # before every transmission -- vector_source_f has no seek/
+            # reset API, so a new instance is the same "fresh one-shot
+            # source per transmission" idiom already proven for RADE's EOO
+            # tail (unkey_ptt()'s rade_eoo_enabled branch below). Reconnects
+            # BOTH downstream fan-out branches (the SDR path's Hilbert
+            # modulator AND the Soundcard path's audio_gain, see the
+            # Digitext Soundcard branch construction comment) -- happens
+            # regardless of which device is actually selected, same as the
+            # rest of this app's "every branch always connected" pattern.
+            self._ensure_digitext_audio()
+            self.lock()
+            try:
+                self.disconnect(self.digitext_source, self.digitext_ssb_mod)
+                self.disconnect(self.digitext_source, self.digitext_audio_gain)
+                self.digitext_source = blocks.vector_source_f(self._digitext_audio.tolist(), repeat=False)
+                self.connect(self.digitext_source, self.digitext_ssb_mod)
+                self.connect(self.digitext_source, self.digitext_audio_gain)
+            finally:
+                self.unlock()
+            if self.device.is_audio_only():
+                # Mirrors RADE's Soundcard early return above: SDR device
+                # stays completely untouched, tx_gain stays unmuted purely
+                # so the TX waterfall (which taps it) keeps showing the
+                # live signal (SoundcardDevice.build_sink() is a null_sink,
+                # nothing downstream to protect) -- see that branch's
+                # docstring for the full reasoning, identical here.
+                self.tx_gain.set_k(1.0 + 0j)
+                self.digitext_audio_gain.set_k(1.0)
+                self._keyed = True
+                return
         self.device.pre_key()
         if self.mode == self.MODE_M17:
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
@@ -854,6 +976,12 @@ class PlutoTxFlowgraph(gr.top_block):
             self.ptt_mute.set_k(0.0)
             self.tx_gain.set_k(0.0 + 0j)
             self.rade_audio_gain.set_k(0.0)
+            self._keyed = False
+            return
+        if self.mode == self.MODE_DIGITEXT and self.device.is_audio_only():
+            # Mirrors RADE's Soundcard early return immediately above.
+            self.tx_gain.set_k(0.0 + 0j)
+            self.digitext_audio_gain.set_k(0.0)
             self._keyed = False
             return
         if self.mode == self.MODE_M17:
