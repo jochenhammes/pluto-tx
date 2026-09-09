@@ -24,7 +24,7 @@ class MainWindow(QtWidgets.QMainWindow):
                  m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
                  digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
-                 digitext_zoom=1):
+                 digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ):
         """Builds the window in a disconnected/default state using the given
         initial settings (mirrors PlutoTxFlowgraph's own constructor
         defaults), then immediately attempts one real connection via
@@ -380,6 +380,40 @@ class MainWindow(QtWidgets.QMainWindow):
         digitext_row.addWidget(self.digitext_zoom_spin)
         digitext_row.addStretch(1)
         digimodes_tab_layout.addLayout(digitext_row)
+
+        # --- Offset slider -- by explicit request ("Slider... 4000Hz soll das
+        # Maximum sein, ich würde gerne kleinere Werte probieren"): lets the
+        # operator trade off against the AD9361 mirror-image finding
+        # themselves on their own receiver (see config.py's
+        # DIGITEXT_MIN_FREQ_HZ comment and README's Digitext bug 5) instead of
+        # only the one fixed 4000Hz default this app ships with. Floor is
+        # DIGITEXT_MIN_FREQ_HZ_FLOOR (300Hz, the lowest value already found
+        # safe from the OTHER real bug this session -- the Hilbert DC dead
+        # zone, README's bug 1); ceiling is DIGITEXT_MIN_FREQ_HZ (4000Hz, the
+        # current default and the most-tested/verified value).
+        digitext_offset_row = QtWidgets.QHBoxLayout()
+        digitext_offset_row.addWidget(QtWidgets.QLabel("Offset zum Traeger:"))
+        self.digitext_offset_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.digitext_offset_slider.setRange(
+            int(config.DIGITEXT_MIN_FREQ_HZ_FLOOR), int(config.DIGITEXT_MIN_FREQ_HZ)
+        )
+        self.digitext_offset_slider.setSingleStep(50)
+        self.digitext_offset_slider.setPageStep(250)
+        self.digitext_offset_slider.setValue(int(digitext_min_freq_hz))
+        self.digitext_offset_slider.setToolTip(
+            "Frequenzabstand zwischen Traeger und Signalanfang. Weiter unten (naeher "
+            "an 300Hz) bedeutet: das reale Spiegelsignal (AD9361-IQ-Imbalance, siehe "
+            "README) liegt naeher am eigentlichen Signal und kann auf manchen "
+            "Empfaengern wieder sichtbar/stoerend werden -- 4000Hz ist der bisher real "
+            "verifizierte Wert, alles darunter ist bewusst zum Ausprobieren."
+        )
+        self.digitext_offset_slider.valueChanged.connect(self._on_digitext_offset_changed)
+        digitext_offset_row.addWidget(self.digitext_offset_slider)
+        self.digitext_offset_label = QtWidgets.QLabel(f"{int(digitext_min_freq_hz)} Hz")
+        self.digitext_offset_label.setMinimumWidth(60)
+        digitext_offset_row.addWidget(self.digitext_offset_label)
+        digimodes_tab_layout.addLayout(digitext_offset_row)
+
         self.digitext_estimate_label = QtWidgets.QLabel()
         self.digitext_estimate_label.setToolTip(
             "Geschätzte belegte Bandbreite und Sendedauer -- reine Vorschauberechnung "
@@ -692,6 +726,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digitext_text_edit.setEnabled(connected)
         self.digitext_layout_combo.setEnabled(connected)
         self.digitext_zoom_spin.setEnabled(connected)
+        self.digitext_offset_slider.setEnabled(connected)
 
     def _style_estop_button(self, locked: bool):
         self.estop_button.setText("Re-arm" if locked else "E-STOP")
@@ -964,6 +999,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_digitext_zoom(value)
         self._update_digitext_estimate()
 
+    def _on_digitext_offset_changed(self, value):
+        self.digitext_offset_label.setText(f"{value} Hz")
+        if self.tb is not None:
+            self.tb.set_digitext_min_freq_hz(float(value))
+        self._update_digitext_estimate()
+
     def _update_digitext_estimate(self):
         text = self.digitext_text_edit.text()
         layout = self.digitext_layout_combo.currentData()
@@ -977,13 +1018,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # show only a bandwidth number, not WHERE the signal actually sits
         # relative to the dialed-in carrier -- easy to miss on a receiver's
         # waterfall if its view is zoomed tight around the carrier itself,
-        # especially since DIGITEXT_MIN_FREQ_HZ moved the signal well away
-        # from DC (see its config.py comment) to dodge the AD9361's mirror
-        # image. Spelling out the actual +Hz offset range here lets the
-        # operator point their receiver's span at the right place. No more
-        # bandwidth warning/red styling -- removed by explicit request (the
-        # number itself stays, nothing gates sending on it any more).
-        lo_hz = config.DIGITEXT_MIN_FREQ_HZ
+        # especially since the offset (now operator-adjustable, see the
+        # offset slider above) moves the signal away from DC to dodge the
+        # AD9361's mirror image. Spelling out the actual +Hz offset range
+        # here lets the operator point their receiver's span at the right
+        # place. No more bandwidth warning/red styling -- removed by
+        # explicit request (the number itself stays, nothing gates sending
+        # on it any more).
+        lo_hz = self.digitext_offset_slider.value()
         hi_hz = lo_hz + bw
         self.digitext_estimate_label.setText(
             f"~{bw:.0f} Hz bei Traeger +{lo_hz:.0f} bis +{hi_hz:.0f} Hz, ~{duration_s:.1f}s"
@@ -1325,6 +1367,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 digitext_text=self.digitext_text_edit.text(),
                 digitext_layout=self.digitext_layout_combo.currentData(),
                 digitext_zoom=self.digitext_zoom_spin.value(),
+                digitext_min_freq_hz=float(self.digitext_offset_slider.value()),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")

@@ -194,7 +194,16 @@ DIGITEXT_ROW_DWELL_S = 0.15  # seconds each image row is held -- real feedback t
 # visually overlap near the carrier; both real over-the-air tests (horizontal
 # "DA2JH", vertical "DA2") confirmed the mirror is no longer visible even
 # though the underlying ~13-18dB suppression ratio is unchanged.
-DIGITEXT_MIN_FREQ_HZ = 4000.0
+DIGITEXT_MIN_FREQ_HZ = 4000.0  # default value AND the GUI offset slider's maximum (see below)
+# Slider floor, by explicit request ("Slider... 4000Hz soll das Maximum sein, ich
+# würde gerne kleinere Werte probieren") -- 300Hz is the lowest value this session
+# already found safe from the DC dead zone above (bug 1), so it's a sensible floor
+# for hands-on experimentation; going lower risks reintroducing that exact issue.
+# The mirror-image trade-off (bug 5 above) is a spectrum of "how separated do the
+# real signal and its mirror look", not a hard pass/fail line -- letting the
+# operator slide down from the known-good 4000Hz and directly see the real result
+# on their own receiver is more useful than a second guessed "safe" constant.
+DIGITEXT_MIN_FREQ_HZ_FLOOR = 300.0
 # True silence appended after the message -- belt-and-suspenders alongside
 # the GUI's auto-unkey timer for a second REAL bug found this session: RF
 # continued transmitting (looked like an unmodulated carrier) well past

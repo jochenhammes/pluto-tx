@@ -237,6 +237,14 @@ werden dadurch größer UND langsamer/breiter gesendet, im gleichen Seitenverhä
 Kostet proportional mehr Bandbreite (mehr Spalten) und Sendedauer (mehr Zeilen),
 beides weiterhin live in der Schätzung sichtbar.
 
+**Offset-Slider** (GUI, `DIGITEXT_MIN_FREQ_HZ_FLOOR`=300Hz bis `DIGITEXT_MIN_FREQ_HZ`
+=4000Hz, per Nutzerwunsch): der Frequenzabstand zwischen Träger und Signalanfang ist
+jetzt selbst einstellbar statt nur der eine feste 4000Hz-Default. 4000Hz bleibt das
+Maximum (der bisher real verifizierte Wert, siehe Bug 5 unten); 300Hz ist die Untergrenze
+(der niedrigste Wert, der schon von der Hilbert-Totzone bei DC wegkommt, siehe Bug 1) —
+alles dazwischen ist zum eigenen Ausprobieren gegen den AD9361-Spiegelsignal-Kompromiss
+auf der eigenen Empfangskette gedacht, keine dieser Zwischenstufen wurde real verifiziert.
+
 PTT-Verhalten bewusst anders als bei jedem anderen Modus: einmaliges Senden statt
 Halten — PTT-Druck sendet das komplette Bild einmal, die App unkeyt automatisch am
 Ende (GUI-Timer, `digitext_duration_s`), kein neuer Sonderfall im Flowgraph nötig

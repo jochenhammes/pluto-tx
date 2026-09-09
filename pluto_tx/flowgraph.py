@@ -95,7 +95,7 @@ class PlutoTxFlowgraph(gr.top_block):
                  m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
                  digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
-                 digitext_zoom=1):
+                 digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -401,6 +401,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_text = digitext_text
         self.digitext_layout = digitext_layout
         self.digitext_zoom = digitext_zoom
+        self.digitext_min_freq_hz = digitext_min_freq_hz
         self._digitext_audio = None
         self._digitext_audio_dirty = True
         self.digitext_duration_s = 0.0
@@ -766,6 +767,15 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_zoom = max(1, int(zoom))
         self._digitext_audio_dirty = True
 
+    def set_digitext_min_freq_hz(self, min_freq_hz: float):
+        """Operator-adjustable via a GUI slider, by explicit request -- lets
+        the operator trade off against the AD9361 mirror-image finding
+        (config.py's DIGITEXT_MIN_FREQ_HZ comment) themselves, on their own
+        receiver, instead of only the one fixed default this app ships
+        with."""
+        self.digitext_min_freq_hz = float(min_freq_hz)
+        self._digitext_audio_dirty = True
+
     def _ensure_digitext_audio(self):
         """Renders/encodes the current digitext_text/digitext_layout into
         self._digitext_audio if it isn't already cached and up to date --
@@ -776,7 +786,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self._digitext_audio, self.digitext_duration_s = digitext.encode_text(
                 self.digitext_text, self.digitext_layout, config.DIGITEXT_FONT_SIZE_PX,
                 config.DIGITEXT_SAMPLE_RATE, config.DIGITEXT_HZ_PER_COL, config.DIGITEXT_ROW_DWELL_S,
-                min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ, tail_s=config.DIGITEXT_TAIL_S,
+                min_freq_hz=self.digitext_min_freq_hz, tail_s=config.DIGITEXT_TAIL_S,
                 col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
             )
             self._digitext_audio_dirty = False
