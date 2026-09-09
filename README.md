@@ -23,7 +23,10 @@ Für Debian/Ubuntu (`apt-get`). Installiert:
 
 Prüft danach per echtem Python-Import, ob alles verfügbar ist, und legt `~/.local/bin/pluto-tx`, `pluto-rx`, `pluto-advanced-rx` an. Beliebig oft wiederholbar.
 
-Nicht Teil des Skripts: der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:...`) erreichbar sein; bei USB ggf. eigene udev-Regeln für Nicht-root-Zugriff (ungetestet).
+Der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:...`) erreichbar sein — für USB ist nichts weiter nötig (`libiio0`s eigene udev-Regel ist `MODE=666`, weltweit lesbar/schreibbar, verifiziert). Für HackRF/RTL-SDR richtet das Skript zusätzlich zwei Dinge ein, die es nicht ohne Weiteres automatisch abschließen kann:
+
+- Fügt den aktuellen User der Gruppe `plugdev` hinzu (HackRF-/RTL-SDR-udev-Regeln verlangen das, `GROUP=plugdev, MODE=0660`, verifiziert) — **wirkt erst nach Neu-Login**, das Skript kann das selbst nicht auslösen. Bis dahin geht Pluto-Zugriff weiterhin normal.
+- Blacklisted den Kernel-DVB-T-Treiber `dvb_usb_rtl28xxu` (`/etc/modprobe.d/blacklist-rtl-sdr.conf`) — RTL-SDR-Sticks werden sonst automatisch vom Kernel als TV-Tuner beansprucht, bevor `librtlsdr`/gr-soapy zugreifen können (der klassische "usb_claim_interface error"-Stolperstein). Ein bereits gestecktes Gerät braucht dafür ein Aus-/Einstecken oder `sudo rmmod dvb_usb_rtl28xxu`, sonst reicht die Blacklist-Datei allein nicht sofort.
 
 ### Optional: M17
 
@@ -33,7 +36,7 @@ Nicht Teil des Skripts: der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:..
 ./install-m17.sh
 ```
 
-Baut `gr-m17` (gepinnter Commit) nach `$HOME/.local`, regeneriert den `pluto-tx`-Starter mit passendem `LD_LIBRARY_PATH`.
+Baut `gr-m17` (gepinnter Commit) nach `$HOME/.local`, regeneriert den `pluto-tx`-Starter mit passendem `LD_LIBRARY_PATH`. Installiert dafür zusätzlich `gnuradio-dev` (echter Bug, diese Session gefunden und behoben: `gr-m17` braucht `find_package(Gnuradio REQUIRED)` — das reine Laufzeitpaket `gnuradio` von `install.sh` reicht nicht, `gnuradio-dev` ist nur ein apt-"Recommends", auf schlanken Server-/Container-Installationen oft nicht automatisch dabei).
 
 ### FreeDV braucht kein separates Skript
 
@@ -48,6 +51,8 @@ Ohne separaten Build ist der RADE-Moduseintrag (in `pluto_tx` **und** `pluto_adv
 ```
 
 Baut [`freedv/rade_c`](https://github.com/freedv/rade_c) (gepinnter Commit, inkl. eigenem gepatchtem Opus/FARGAN-Fork) nach `rade_c/` im Projektverzeichnis (kein `make install` — das Projekt hat kein Install-Target) und regeneriert **beide** Starter (`pluto-tx`, `pluto-advanced-rx`) mit passendem `LD_LIBRARY_PATH` (`librade.so`) und `PATH` (`lpcnet_demo`). Merge-sicher: ein bereits von `install-m17.sh` gesetzter `LD_LIBRARY_PATH`-Eintrag bleibt erhalten.
+
+Braucht während des Builds Internetzugriff an **zwei** getrennten Stellen, nicht nur beim offensichtlichen `git clone` (echter Bug, diese Session gefunden und behoben): Opus selbst wird als GitHub-Zip nachgeladen (über CMakes eigenen, eingebauten Downloader, braucht kein extra Tool), aber Opus' `autogen.sh` lädt zusätzlich ein FARGAN/LPCNet-Modell von `media.xiph.org` nach — dafür installiert das Skript jetzt `wget`, das dafür zwingend gebraucht wird und vorher nicht sichergestellt war.
 
 ## Struktur
 
@@ -219,7 +224,7 @@ Editierbares Dropdown ("Device") plus Scan- und Connect/Disconnect-Buttons; Star
 - **FreeDV `reliable_text` beim gepackten libcodec2 (1.2.0-4) melden/reparieren** — echter, per `gdb` bestätigter SIGFPE-Absturz (siehe oben). Nächste Schritte: Bug bei drowe67/codec2 melden, oder neuere libcodec2-Version testen.
 - **Vermutete AD9361-IQ-Imbalance untersuchen/kalibrieren** (siehe FreeDV-Abschnitt oben) — braucht einen realen Hardware-Loopback-Test zur Quantifizierung, bevor über eine Korrektur entschieden wird.
 - **Geteilter AD9361-Takt zwischen `pluto_rx`/`pluto_tx` beheben** — ein erster Versuch (Takt vor jedem Senden zurückholen) hat das Problem nicht gelöst und wurde wieder entfernt. Nötig: Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+.
-- **Nativer USB-Backend ungetestet** — könnte den RX-Durchsatz über die aktuellen ~4,7-4,9 MSa/s hinaus verbessern; ggf. eigene udev-Regeln nötig.
+- **Nativer USB-Backend ungetestet** — könnte den RX-Durchsatz über die aktuellen ~4,7-4,9 MSa/s hinaus verbessern. Die udev-Berechtigungsfrage ist inzwischen geklärt (diese Session verifiziert): `libiio0`s eigene Regel ist `MODE=666`, kein Gruppenzwang nötig — der Vorbehalt hier betraf nur die Durchsatzmessung selbst, nicht mehr die Zugriffsrechte.
 - **GUI besser/cooler aussehen lassen** — aktuell rein funktional (Standard-Qt-Widgets).
 - **`pluto_advanced_rx`: mehrstufige IF-Dezimation für 15/20-MHz-Presets** — aktuell ein einzelner `rational_resampler_ccf`-Schritt, der bei diesem Verhältnis einen zu langen Filter für den Scheduler erzeugt. Lösung: kaskadierte Dezimation statt einer Stufe.
 - **M17-Demodulation in `pluto_advanced_rx`** — TX ist fertig, RX noch offen. `m17.symbol_sync` ist im gr-m17-Quellcode vorhanden aber nicht gebaut; RX müsste `digital.symbol_sync_ff` nutzen. `m17.m17_decoder` braucht einen eigenen `gr.basic_block` als Message-Port-Empfänger für Rufzeichen/Payload.

@@ -44,12 +44,29 @@ if ! command -v apt-get >/dev/null 2>&1; then
     exit 1
 fi
 
-BUILD_PACKAGES=(cmake make doxygen git build-essential)
+BUILD_PACKAGES=(cmake make doxygen git build-essential gnuradio-dev)
+# gnuradio-dev is REQUIRED, not optional: gr-m17's CMakeLists.txt calls
+# find_package(Gnuradio "3.10" REQUIRED), which needs gnuradio-dev's CMake
+# config modules/headers -- the plain "gnuradio" runtime package
+# install.sh installs is NOT enough on its own. On Debian/Ubuntu,
+# gnuradio-dev is only an apt "Recommends" of "gnuradio" (not a hard
+# "Depends"), so it's normally pulled in automatically -- but NOT on a
+# system where APT::Install-Recommends is disabled (a common minimal/
+# server/container-image setting), where the cmake step below would
+# otherwise fail with a cryptic "Gnuradio config not found". Explicitly
+# listed here rather than assumed, real bug found this session: this was
+# already correctly called out in the non-Debian fallback message below,
+# just never added to this actual apt-installed list.
 MISSING=()
 for pkg_cmd in cmake:cmake make:make doxygen:doxygen git:git; do
     cmd="${pkg_cmd%%:*}"
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${pkg_cmd##*:}")
 done
+# gnuradio-dev has no standalone CLI command to probe for -- check dpkg's
+# own record instead so a re-run doesn't reinstall it every time.
+if ! dpkg -s gnuradio-dev >/dev/null 2>&1; then
+    MISSING+=("gnuradio-dev")
+fi
 if [ ${#MISSING[@]} -gt 0 ]; then
     echo "Installing missing build tools: ${MISSING[*]}"
     echo "(you may be asked for your sudo password)"
@@ -57,7 +74,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
     sudo apt-get update
     sudo apt-get install -y "${BUILD_PACKAGES[@]}"
 else
-    echo "Build tools already present (cmake, make, doxygen, git)."
+    echo "Build tools already present (cmake, make, doxygen, git, gnuradio-dev)."
 fi
 
 if [ ! -d "$GR_M17_DIR/.git" ]; then

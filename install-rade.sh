@@ -50,16 +50,25 @@ echo
 
 if ! command -v apt-get >/dev/null 2>&1; then
     echo "This installer only supports Debian/Ubuntu-family systems (apt-get not found)." >&2
-    echo "Install cmake, make, git, build-essential, autoconf, automake, and libtool" >&2
+    echo "Install cmake, make, git, build-essential, autoconf, automake, libtool, and wget" >&2
     echo "manually, then build rade_c (https://github.com/freedv/rade_c) yourself." >&2
     exit 1
 fi
 
 # autoconf/automake/libtool are needed by the bundled Opus fork's own
 # autogen.sh step (part of CMake's ExternalProject_Add for Opus/FARGAN).
-BUILD_PACKAGES=(cmake make git build-essential autoconf automake libtool)
+# wget is needed by a SECOND, separate download that autogen.sh triggers,
+# not just obvious from the top-level "fetch Opus" step: it runs
+# dnn/download_model.sh, which fetches a FARGAN/LPCNet model archive from
+# media.xiph.org (a completely different host than the GitHub Opus zip
+# above) via wget, falling back to curl only if wget is missing. Neither is
+# guaranteed present on a minimal system (found and fixed this session --
+# the CMake-driven Opus zip download itself needs neither, since that uses
+# cmake's own bundled libcurl, which is why this gap wasn't obvious from
+# the top-level build failing early).
+BUILD_PACKAGES=(cmake make git build-essential autoconf automake libtool wget)
 MISSING=()
-for pkg_cmd in cmake:cmake make:make git:git autoconf:autoconf automake:automake libtoolize:libtool; do
+for pkg_cmd in cmake:cmake make:make git:git autoconf:autoconf automake:automake libtoolize:libtool wget:wget; do
     cmd="${pkg_cmd%%:*}"
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${pkg_cmd##*:}")
 done
@@ -70,7 +79,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
     sudo apt-get update
     sudo apt-get install -y "${BUILD_PACKAGES[@]}"
 else
-    echo "Build tools already present (cmake, make, git, autoconf, automake, libtool)."
+    echo "Build tools already present (cmake, make, git, autoconf, automake, libtool, wget)."
 fi
 
 if [ ! -d "$RADE_C_DIR/.git" ]; then

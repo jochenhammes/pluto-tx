@@ -84,6 +84,59 @@ else
 fi
 
 echo
+echo "Setting up non-root USB access for HackRF/RTL-SDR..."
+# PlutoSDR's own udev rule (shipped by libiio0, a python3-libiio dependency)
+# is world-accessible (MODE="666") -- nothing further needed for it. HackRF/
+# RTL-SDR are different: their udev rules (shipped by libhackrf0/librtlsdr0,
+# pulled in transitively by the hackrf/rtl-sdr packages above) grant access
+# only to the "plugdev" group (MODE="0660", GROUP="plugdev") -- verified by
+# reading the installed rule files this session, not assumed. plugdev is a
+# base-passwd system group (Priority: required), so it always exists on
+# Debian/Ubuntu; adding the user to it is something this script CAN do, but
+# a NEW group membership only takes effect in a FRESH login session (a new
+# shell in the current session is not enough) -- that final step is
+# unavoidably manual, so it's called out explicitly below.
+if id -nG "$USER" | tr ' ' '\n' | grep -qx plugdev; then
+    echo "$USER is already in the plugdev group."
+else
+    echo "Adding $USER to the plugdev group (needed for non-root HackRF/RTL-SDR USB access)..."
+    sudo usermod -aG plugdev "$USER"
+    PLUGDEV_JUST_ADDED=1
+fi
+
+# RTL-SDR dongles are auto-claimed by the Linux kernel's own DVB-T driver
+# (dvb_usb_rtl28xxu) the moment they're plugged in -- the single most common
+# real-world "RTL-SDR on Linux" gotcha, and unrelated to the plugdev
+# permission above (this is the KERNEL grabbing the device before librtlsdr/
+# gr-soapy ever get a chance to, not a file-permission problem -- typically
+# surfaces as "usb_claim_interface error -6"). Verified on this system this
+# session: the module is present/loadable and not blacklisted anywhere.
+# Only relevant if you actually use an RTL-SDR dongle as an SDR receiver,
+# not as a DVB-T TV tuner -- if you need both uses on the same machine,
+# remove the blacklist file below instead of running this script.
+RTL_BLACKLIST_FILE="/etc/modprobe.d/blacklist-rtl-sdr.conf"
+if [ -f "$RTL_BLACKLIST_FILE" ]; then
+    echo "RTL-SDR's DVB-T kernel driver is already blacklisted ($RTL_BLACKLIST_FILE)."
+else
+    echo "Blacklisting the RTL-SDR DVB-T kernel driver (dvb_usb_rtl28xxu)..."
+    sudo tee "$RTL_BLACKLIST_FILE" >/dev/null <<'BLACKLIST_EOF'
+# Written by pluto-tx's install.sh: dvb_usb_rtl28xxu is the Linux kernel's
+# own DVB-T driver for RTL2832U-based USB dongles. It auto-claims the
+# device as soon as it's plugged in, which blocks librtlsdr/gr-soapy (used
+# by pluto_advanced_rx's RTL-SDR RX backend) from ever opening it. Remove
+# this file if you also want to use the same dongle as a normal DVB-T TV
+# tuner.
+blacklist dvb_usb_rtl28xxu
+BLACKLIST_EOF
+fi
+if lsmod | grep -q '^dvb_usb_rtl28xxu'; then
+    echo "NOTE: dvb_usb_rtl28xxu is currently loaded. The blacklist above only"
+    echo "stops it from being loaded again -- unplug and replug your RTL-SDR (or"
+    echo "run 'sudo rmmod dvb_usb_rtl28xxu' now) to actually unload it, instead"
+    echo "of rebooting."
+fi
+
+echo
 echo "Verifying the Python side..."
 python3 - <<'EOF'
 import sys
@@ -134,6 +187,14 @@ case ":$PATH:" in
         echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
         ;;
 esac
+
+if [ "${PLUGDEV_JUST_ADDED:-}" = "1" ]; then
+    echo
+    echo "IMPORTANT: you were just added to the 'plugdev' group (needed for"
+    echo "non-root HackRF/RTL-SDR USB access). This only takes effect in a NEW"
+    echo "login session -- log out and back in (or reboot) before using a"
+    echo "HackRF or RTL-SDR device. PlutoSDR access is unaffected, works now."
+fi
 
 echo
 echo "== Done =="
