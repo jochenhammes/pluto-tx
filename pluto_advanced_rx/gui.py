@@ -56,7 +56,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # pluto_tx/gui.py's identical device_type_combo + uri_combo pattern.
         # Relabelled/retooltipped by _on_device_type_changed() below.
         device_group = QtWidgets.QGroupBox("Device")
-        device_row = QtWidgets.QHBoxLayout(device_group)
+        device_group_layout = QtWidgets.QVBoxLayout(device_group)
+        device_row = QtWidgets.QHBoxLayout()
+        device_group_layout.addLayout(device_row)
         device_row.addWidget(QtWidgets.QLabel("Device Type:"))
         self.device_type_combo = QtWidgets.QComboBox()
         for dtype, device_cls in devices.DEVICE_REGISTRY.items():
@@ -80,9 +82,32 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(device_group)
         self._update_device_connection_labels()
 
-        # --- Receiver group: frequency, demodulator, gain, bandwidth ------
-        receiver_group = QtWidgets.QGroupBox("Receiver")
-        receiver_layout = QtWidgets.QVBoxLayout(receiver_group)
+        # --- Mode group: a QTabWidget ("Audio" holds today's full FM/SSB/
+        # RADE demod+gain+volume controls; "Digimodes"/"File-Transfer" are
+        # disabled placeholders for future work) -- constructed here, early,
+        # so audio_tab_layout already exists by the time mute_row/demod_row/
+        # etc. below are built further down; Qt layouts are "live", so a
+        # widget added to audio_tab_layout later in this method still ends
+        # up in the right place regardless of source-code order (same
+        # technique pluto_tx/gui.py's 4-section restructure used last
+        # session). device_group_layout above gets freq_row/the gain
+        # widgets/bandwidth_row the same way -- device-specific settings,
+        # not mode-specific ones, per the explicit request.
+        mode_group = QtWidgets.QGroupBox("Mode")
+        mode_group_layout = QtWidgets.QVBoxLayout(mode_group)
+        self.mode_tab_widget = QtWidgets.QTabWidget()
+        audio_tab = QtWidgets.QWidget()
+        audio_tab_layout = QtWidgets.QVBoxLayout(audio_tab)
+        self.mode_tab_widget.addTab(audio_tab, "Audio")
+        digimodes_tab = QtWidgets.QWidget()
+        self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
+        self.mode_tab_widget.setTabEnabled(1, False)
+        self.mode_tab_widget.setTabToolTip(1, "Not implemented yet")
+        filetransfer_tab = QtWidgets.QWidget()
+        self.mode_tab_widget.addTab(filetransfer_tab, "File-Transfer")
+        self.mode_tab_widget.setTabEnabled(2, False)
+        self.mode_tab_widget.setTabToolTip(2, "Not implemented yet")
+        mode_group_layout.addWidget(self.mode_tab_widget)
 
         # Persistent mute gate (not a momentary control like pluto_tx's PTT) --
         # starts muted so a fresh connect never immediately blasts audio, see
@@ -97,7 +122,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.receive_button.toggled.connect(self._on_receive_toggled)
         self._style_receive_button(receiving=False)
         mute_row.addWidget(self.receive_button)
-        receiver_layout.addLayout(mute_row)
+        audio_tab_layout.addLayout(mute_row)
 
         freq_row = QtWidgets.QHBoxLayout()
         freq_row.addWidget(QtWidgets.QLabel("Frequency (MHz):"))
@@ -121,7 +146,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fine_label = QtWidgets.QLabel("0 Hz")
         self.fine_label.setMinimumWidth(70)
         freq_row.addWidget(self.fine_label)
-        receiver_layout.addLayout(freq_row)
+        device_group_layout.addLayout(freq_row)
 
         demod_row = QtWidgets.QHBoxLayout()
         demod_row.addWidget(QtWidgets.QLabel("Mode:"))
@@ -156,7 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.width_label = QtWidgets.QLabel(f"{int(config.FM_DEMOD_WIDTH_DEFAULT_HZ)} Hz")
         self.width_label.setMinimumWidth(60)
         demod_row.addWidget(self.width_label)
-        receiver_layout.addLayout(demod_row)
+        audio_tab_layout.addLayout(demod_row)
 
         # RADE status row -- only VISIBLE in RADE mode, same "hide the whole
         # row" reasoning as pluto_tx's M17/FreeDV/RADE rows. Updated by the
@@ -179,7 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_row_widget = QtWidgets.QWidget()
         self.rade_row_widget.setLayout(rade_row)
         self.rade_row_widget.setVisible(False)
-        receiver_layout.addWidget(self.rade_row_widget)
+        audio_tab_layout.addWidget(self.rade_row_widget)
 
         # Two mutually-exclusive gain panels, switched by device type (only
         # one is ever visible at a time) -- agc_gain_widget for AGC-capable
@@ -210,7 +235,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gain_label = QtWidgets.QLabel(f"{int(manual_gain_db)} dB")
         self.gain_label.setMinimumWidth(50)
         agc_gain_row.addWidget(self.gain_label)
-        receiver_layout.addWidget(self.agc_gain_widget)
+        device_group_layout.addWidget(self.agc_gain_widget)
 
         # Rebuilt per-device by _rebuild_manual_gain_panel() (called from
         # _sync_device_dependent_widgets() on a device-type switch) --
@@ -221,7 +246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.manual_gain_layout.setContentsMargins(0, 0, 0, 0)
         self.manual_gain_widget.setVisible(False)
         self._manual_gain_controls = {}  # stage_name -> (widget, value_label_or_None, GainStage)
-        receiver_layout.addWidget(self.manual_gain_widget)
+        device_group_layout.addWidget(self.manual_gain_widget)
 
         nf_row = QtWidgets.QHBoxLayout()
         nf_row.addWidget(QtWidgets.QLabel("Audio Gain:"))
@@ -233,7 +258,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nf_gain_label = QtWidgets.QLabel(f"{int(config.DEFAULT_NF_GAIN * 100)} %")
         self.nf_gain_label.setMinimumWidth(50)
         nf_row.addWidget(self.nf_gain_label)
-        receiver_layout.addLayout(nf_row)
+        audio_tab_layout.addLayout(nf_row)
+        audio_tab_layout.addStretch(1)
 
         bandwidth_row = QtWidgets.QHBoxLayout()
         bandwidth_row.addWidget(QtWidgets.QLabel("RX Bandwidth:"))
@@ -244,9 +270,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bandwidth_combo.currentIndexChanged.connect(self._on_bandwidth_changed)
         bandwidth_row.addWidget(self.bandwidth_combo)
         bandwidth_row.addStretch(1)
-        receiver_layout.addLayout(bandwidth_row)
+        device_group_layout.addLayout(bandwidth_row)
 
-        layout.addWidget(receiver_group)
+        layout.addWidget(mode_group)
 
         # --- Waterfall / spectrum group -------------------------------------
         waterfall_group = QtWidgets.QGroupBox("Waterfall / Spectrum")
@@ -301,6 +327,7 @@ class MainWindow(QtWidgets.QMainWindow):
             colormap_name=config.WATERFALL_COLORMAP, db_range=config.WATERFALL_DB_RANGE,
         )
         self.waterfall.frequency_clicked.connect(self._on_waterfall_clicked)
+        self.waterfall.zoom_step_requested.connect(self._on_waterfall_zoom_step)
 
         # Floor/Ceiling: vertical sliders stacked to the right of the
         # spectrum+waterfall, since the noise floor varies a lot with
@@ -585,8 +612,14 @@ class MainWindow(QtWidgets.QMainWindow):
         elif mode == AdvancedRxFlowgraph.MODE_SSB:
             f_lo = config.SSB_AUDIO_BAND_HZ[0]
             self.waterfall.set_demod_band(freq + f_lo, freq + f_lo + self.tb.ssb_demod_width_hz)
-        # RADE: no operator-adjustable demod width/filter to shade -- leave
-        # the band overlay as it was.
+        elif mode == AdvancedRxFlowgraph.MODE_RADE:
+            # Not operator-adjustable (RADE's OFDM occupied bandwidth is a
+            # fixed protocol constant, unlike FM/SSB's width sliders) -- but
+            # a real bug before this fix: this branch didn't exist at all,
+            # so the overlay just kept showing whatever FM/SSB band was last
+            # drawn, making visual tuning against it meaningless. See
+            # config.RADE_OFDM_LOW_HZ/HIGH_HZ's docstring for the derivation.
+            self.waterfall.set_demod_band(freq + config.RADE_OFDM_LOW_HZ, freq + config.RADE_OFDM_HIGH_HZ)
 
     def _poll_fft(self):
         if self.tb is None:
@@ -711,6 +744,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_label.setText(f"{value}x (full span)" if value == 1 else f"{value}x ({self._format_hz(span)})")
         self._sync_waterfall()
         self.waterfall.clear()  # old rows are the WRONG span now -- avoid a stretched/misleading transition
+
+    def _on_waterfall_zoom_step(self, direction):
+        """Mouse wheel over the spectrum/waterfall (TuneViewBox.wheelEvent)
+        -- reuses the exact same _on_zoom_changed() codepath as dragging the
+        Zoom slider (QSlider.setValue() clamps to the slider's own range
+        automatically), rather than a second, parallel zoom mechanism."""
+        self.zoom_slider.setValue(self.zoom_slider.value() + direction)
 
     def _on_avg_changed(self, value):
         if self.tb is None:
@@ -843,11 +883,20 @@ class MainWindow(QtWidgets.QMainWindow):
             span_hz = self.tb.sample_rate / self.tb.fft_probe.zoom
             est = rade_autotune.estimate_signal_center(
                 row, center_hz, span_hz, center_hz, config.FINE_TUNE_RANGE_HZ,
+                exclude_radius_hz=config.RADE_AUTOTUNE_NOISE_EXCLUDE_HZ,
             )
             if est is not None:
                 new_fine = self.tb.fine_offset_hz + (est - center_hz)
                 new_fine = max(-config.FINE_TUNE_RANGE_HZ, min(config.FINE_TUNE_RANGE_HZ, new_fine))
                 self.fine_slider.setValue(int(round(new_fine)))
+            else:
+                # Previously a silent no-op -- the operator couldn't tell
+                # Stage 1a had found nothing to center on vs. simply having
+                # nothing to do. Now visible, briefly, before the next
+                # step's own status text overwrites it.
+                self.rade_status_label.setText(
+                    "Auto fine-tune: no clear signal found, skipping centering..."
+                )
         QtCore.QTimer.singleShot(int(config.RADE_AUTOTUNE_SETTLE_S * 1000),
                                   lambda: self._autotune_step_gain(token))
 
@@ -880,7 +929,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if row is not None:
             center_hz = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
             span_hz = self.tb.sample_rate / self.tb.fft_probe.zoom
-            snr_db = rade_autotune.measure_peak_snr_db(row, center_hz, span_hz, center_hz, config.FINE_TUNE_RANGE_HZ)
+            snr_db = rade_autotune.measure_peak_snr_db(
+                row, center_hz, span_hz, center_hz, config.FINE_TUNE_RANGE_HZ,
+                exclude_radius_hz=config.RADE_AUTOTUNE_NOISE_EXCLUDE_HZ,
+            )
             delta = config.RADE_AUTOTUNE_TARGET_SNR_DB - snr_db
             delta = max(-config.RADE_AUTOTUNE_MAX_GAIN_STEP_DB, min(config.RADE_AUTOTUNE_MAX_GAIN_STEP_DB, delta))
             self._autotune_apply_gain_db(stage, self._autotune_read_gain_db(stage) + delta)

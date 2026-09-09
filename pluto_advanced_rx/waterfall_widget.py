@@ -6,17 +6,24 @@ Deliberately pure PyQt5 + pyqtgraph -- no gnuradio imports at all, so this
 can be built and tested standalone with synthetic data (see the offline
 widget test), independent of GNU Radio/libiio/real hardware.
 
-Pan/zoom is pyqtgraph's own default mouse behavior (drag to pan, scroll to
-zoom), restricted to the X (frequency) axis -- the user explicitly chose
-this standard interaction over bespoke draggable min/max handles. This is
-why TuneViewBox below does NOT set RectMode the way GNU Radio's own
-gr-filter GUI does in its near-identical CustomViewBox (see
+Pan/zoom: drag-to-pan is still pyqtgraph's own default mouse behavior,
+restricted to the X (frequency) axis -- the user explicitly chose this
+standard interaction over bespoke draggable min/max handles. This is why
+TuneViewBox below does NOT set RectMode the way GNU Radio's own gr-filter
+GUI does in its near-identical CustomViewBox (see
 /usr/lib/python3/dist-packages/gnuradio/filter/CustomViewBox.py, which this
 click-to-tune idiom is modeled on): RectMode turns a left-drag into a
 rubber-band zoom box, which would conflict with plain left-click-to-tune and
 with drag-to-pan. Left-click (no drag) still reaches mouseClickEvent();
 pyqtgraph itself routes an actual drag to mouseDragEvent instead, so
 click-to-tune and drag-to-pan coexist without any extra bookkeeping here.
+
+Scroll-to-zoom is deliberately NOT pyqtgraph's own default anymore (it was,
+until this session): TuneViewBox.wheelEvent() below intercepts it entirely
+and emits zoom_step_requested instead, so the mouse wheel drives the exact
+same FftProbe zoom-FFT crop the Zoom slider does (gui.py's
+_on_zoom_changed()) -- previously the two were two independent,
+unsynchronized zoom mechanisms fighting over the same X axis.
 """
 import numpy as np
 import pyqtgraph as pg
@@ -25,6 +32,7 @@ from PyQt5 import QtCore, QtWidgets
 
 class TuneViewBox(pg.ViewBox):
     frequency_clicked = QtCore.pyqtSignal(float)
+    zoom_step_requested = QtCore.pyqtSignal(int)
 
     def __init__(self, *args, **kwargs):
         kwargs["enableMenu"] = False
@@ -42,9 +50,24 @@ class TuneViewBox(pg.ViewBox):
         else:
             super().mouseClickEvent(ev)
 
+    def wheelEvent(self, ev, axis=None):
+        # Deliberately does NOT call super().wheelEvent() -- replaces
+        # pyqtgraph's own independent scroll-to-zoom rescale entirely with a
+        # step request the owning AdvancedWaterfallWidget forwards up to
+        # gui.py's zoom_slider, so scroll and the slider drive the exact
+        # same FftProbe zoom-FFT crop instead of two unsynchronized zoom
+        # mechanisms on the same axis. Scroll up/forward (positive delta) ==
+        # zoom in (narrower span), matching the common map/image-viewer
+        # convention -- independent of whichever direction pyqtgraph's own
+        # scaleBy() would have gone.
+        direction = 1 if ev.delta() > 0 else -1
+        self.zoom_step_requested.emit(direction)
+        ev.accept()
+
 
 class AdvancedWaterfallWidget(QtWidgets.QWidget):
     frequency_clicked = QtCore.pyqtSignal(float)
+    zoom_step_requested = QtCore.pyqtSignal(int)
 
     def __init__(self, fft_size, history_rows, colormap_name, db_range, parent=None):
         super().__init__(parent)
@@ -108,6 +131,7 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
 
         for vb in (self.spectrum_plot.getPlotItem().getViewBox(), self.waterfall_plot.getPlotItem().getViewBox()):
             vb.frequency_clicked.connect(self.frequency_clicked.emit)
+            vb.zoom_step_requested.connect(self.zoom_step_requested.emit)
 
         self._marker_lines = []
         self._band_regions = []
