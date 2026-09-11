@@ -25,6 +25,7 @@ from . import config
 from . import devices
 from . import rade_autotune
 from .fft_probe import FftProbe
+from .filebroadcast_state import FileBroadcastState
 from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE
 from .waterfall_widget import AdvancedWaterfallWidget
 
@@ -45,6 +46,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fft_gen = -1
         self._rx_muted = True  # reset True only on fresh connect/disconnect, see _disconnect()/_connect()
         self.setWindowTitle("PlutoSDR Advanced RX")
+
+        # File Broadcast RX state -- constructed ONCE here, survives every
+        # flowgraph rebuild (bandwidth change, reconnect) by construction,
+        # per the plan's RX-side persistent state design (mirrors why
+        # _last_audio_mode/_wav_path live on MainWindow in pluto_tx, not on
+        # the flowgraph). AdvancedRxFlowgraph's File Broadcast branch is
+        # always wired regardless of connection state, so frames can start
+        # arriving from the moment _connect()/`_on_bandwidth_changed()
+        # construct a new tb -- this must already exist by then.
+        self._filebroadcast_state = FileBroadcastState()
+        self._filebroadcast_snapshot = []
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -103,10 +115,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
         self.mode_tab_widget.setTabEnabled(1, False)
         self.mode_tab_widget.setTabToolTip(1, "Not implemented yet")
+        # File-Transfer: Phase 1 minimal UI (a per-file list with byte/%
+        # progress + a Save button for completed files) -- the full
+        # directory-table-with-record-toggles is Phase 4 scope (see the
+        # plan). Always live, independent of demod_mode/connection state,
+        # since the underlying GNU Radio branch is always wired too.
         filetransfer_tab = QtWidgets.QWidget()
+        filetransfer_tab_layout = QtWidgets.QVBoxLayout(filetransfer_tab)
+        self.filebroadcast_list = QtWidgets.QListWidget()
+        self.filebroadcast_list.currentRowChanged.connect(self._on_filebroadcast_selection_changed)
+        filetransfer_tab_layout.addWidget(self.filebroadcast_list)
+        self.filebroadcast_save_button = QtWidgets.QPushButton("Save Selected File...")
+        self.filebroadcast_save_button.setEnabled(False)
+        self.filebroadcast_save_button.clicked.connect(self._on_filebroadcast_save_clicked)
+        filetransfer_tab_layout.addWidget(self.filebroadcast_save_button)
         self.mode_tab_widget.addTab(filetransfer_tab, "File-Transfer")
-        self.mode_tab_widget.setTabEnabled(2, False)
-        self.mode_tab_widget.setTabToolTip(2, "Not implemented yet")
         mode_group_layout.addWidget(self.mode_tab_widget)
 
         # Persistent mute gate (not a momentary control like pluto_tx's PTT) --
@@ -383,6 +406,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # as every other GUI in this repo.
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(self._poll_fft)
+        self._timer.timeout.connect(self._poll_filebroadcast)
         self._timer.start(config.WATERFALL_POLL_INTERVAL_MS)
 
         # Everything above builds the window with widgets in their normal
@@ -636,6 +660,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self.rade_status_label.setText("Not synced")
+
+    def _on_filebroadcast_frame(self, frame):
+        """Passed to AdvancedRxFlowgraph as on_filebroadcast_frame -- called
+        from FileBroadcastDeframer.work() on the GNU Radio SCHEDULER thread,
+        not the Qt thread. FileBroadcastState's own methods are lock-
+        guarded (safe to call directly from here); nothing here touches any
+        Qt widget -- _poll_filebroadcast() (Qt-thread, timer-driven) is what
+        actually updates the list, via get_snapshot()."""
+        if frame["type"] == "directory":
+            self._filebroadcast_state.on_directory_frame(
+                frame["file_id"], frame["filename"], frame["total_size"], frame["checksum"],
+            )
+        elif frame["type"] == "data":
+            self._filebroadcast_state.on_data_frame(frame["file_id"], frame["offset"], frame["payload"])
+
+    def _poll_filebroadcast(self):
+        # Independent of self.tb's connection state (unlike _poll_fft) --
+        # the state itself lives on MainWindow and should keep showing
+        # whatever was already received even across a brief reconnect.
+        snapshot = self._filebroadcast_state.get_snapshot()
+        self._filebroadcast_snapshot = snapshot
+        current_row = self.filebroadcast_list.currentRow()
+        self.filebroadcast_list.blockSignals(True)
+        self.filebroadcast_list.clear()
+        for entry in snapshot:
+            pct = 100.0 * entry["bytes_received"] / entry["total_size"] if entry["total_size"] else 0.0
+            status = "COMPLETE" if entry["is_complete"] else f"{pct:.0f}%"
+            self.filebroadcast_list.addItem(
+                f"[{entry['file_id']}] {entry['filename']} "
+                f"({entry['bytes_received']}/{entry['total_size']} bytes, {status})"
+            )
+        if 0 <= current_row < self.filebroadcast_list.count():
+            self.filebroadcast_list.setCurrentRow(current_row)
+        self.filebroadcast_list.blockSignals(False)
+        self._on_filebroadcast_selection_changed(self.filebroadcast_list.currentRow())
+
+    def _on_filebroadcast_selection_changed(self, row):
+        complete = 0 <= row < len(self._filebroadcast_snapshot) and self._filebroadcast_snapshot[row]["is_complete"]
+        self.filebroadcast_save_button.setEnabled(complete)
+
+    def _on_filebroadcast_save_clicked(self):
+        row = self.filebroadcast_list.currentRow()
+        if not (0 <= row < len(self._filebroadcast_snapshot)):
+            return
+        entry = self._filebroadcast_snapshot[row]
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Received File", entry["filename"])
+        if not path:
+            return
+        self._filebroadcast_state.save_to_disk(entry["file_id"], path)
 
     # --- slots ------------------------------------------------------
     def _on_freq_changed(self, mhz):
@@ -1043,7 +1116,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 uri=self.tb.uri, frequency=freq, sample_rate=new_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
-                device_type=device_cls.device_type, **self._current_gain_kwargs(device_cls),
+                device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
             self.status_label.setText(f"Could not switch to {self._format_hz(new_rate)}: {e}")
@@ -1153,7 +1227,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 nf_gain=self.nf_gain_slider.value() / 100.0,
                 fft_size=self.fft_size_combo.currentData(),
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
-                device_type=device_cls.device_type, **self._current_gain_kwargs(device_cls),
+                device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name}: {e}")

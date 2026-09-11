@@ -19,7 +19,7 @@ import os
 import sys
 import wave
 
-from gnuradio import gr, blocks, filter, analog, audio, qtgui
+from gnuradio import gr, blocks, filter, analog, audio, qtgui, digital
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
@@ -27,6 +27,8 @@ from . import config
 from . import devices
 from . import digitext
 from . import dynamics
+from . import filebroadcast
+from .filebroadcast_source import FileBroadcastSource
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
 # install-m17.sh), not something every pluto_tx user necessarily has. The
@@ -88,6 +90,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_FREEDV = 3
     MODE_RADE = 4
     MODE_DIGITEXT = 5
+    MODE_FILEBROADCAST = 6
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -450,6 +453,61 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
         self.connect(self.digitext_audio_gain, self.digitext_audio_sink)
 
+        # --- File Broadcast branch (repetitive file-broadcast mode, 23cm
+        # broadband GFSK -- see pluto_tx/filebroadcast.py and the plan).
+        # IQ-native like M17/RADE (gfsk_mod produces complex baseband
+        # directly, no Hilbert/SSB step) -- unlike Digitext/RADE-soundcard,
+        # there is no Soundcard-output alternative: this mode's whole
+        # purpose is a broadband SDR-native link, not something a
+        # voice-bandwidth external transceiver could carry anyway.
+        #
+        # PTT model is deliberately the SAME plain Start/Stop hold-to-
+        # transmit path as FM/SSB (see key_ptt()/unkey_ptt() -- this mode
+        # gets NO special-case branch there at all, just the existing GUI
+        # PTT toggle button already used for FM/SSB, per the plan's
+        # locked-in "Start/Stop toggle PTT model" scope decision -- Start
+        # calls key_ptt() once, Stop calls unkey_ptt() once, continuous
+        # rotation in between).
+        #
+        # filebroadcast_source (Phase 2's queue-fed custom GNU Radio source
+        # block, see filebroadcast_source.py) stays PERMANENTLY connected
+        # and running, exactly like mic_source/file_source in FM/SSB mode
+        # (always producing samples regardless of PTT -- tx_gain downstream
+        # is what actually gates whether any of this reaches the device) --
+        # NOT rebuilt per key_ptt() press the way Phase 1's fixed
+        # vector_source_b(repeat=True) was. This is what lets files be
+        # added/removed live (add_filebroadcast_file()/
+        # clear_filebroadcast_files() below just call
+        # filebroadcast_source.request_rebuild(), no lock()/disconnect()/
+        # connect() flowgraph surgery needed at all, unlike Digitext's
+        # still-necessary per-press source rebuild for its one-shot
+        # waveform).
+        self.filebroadcast_planner = filebroadcast.FileBroadcastPlanner()
+        self.filebroadcast_source = FileBroadcastSource(self.filebroadcast_planner, config.FILEBROADCAST_CHUNK_SIZE)
+        fb_sensitivity = 2 * math.pi * config.FILEBROADCAST_DEVIATION_HZ / config.FILEBROADCAST_WORKING_RATE_HZ
+        self.filebroadcast_mod = digital.gfsk_mod(
+            samples_per_symbol=config.FILEBROADCAST_SPS, sensitivity=fb_sensitivity,
+            bt=config.FILEBROADCAST_BT, do_unpack=True,
+        )
+        # EXPLICIT taps, never taps=[] (auto-design) -- a real, confirmed
+        # Phase 0 finding: rational_resampler_ccf's auto-designed taps
+        # corrupt phase-continuous GFSK badly enough to break the
+        # receiver's symbol clock recovery, even in a lossless software
+        # round-trip. Cutoff/transition formula matches Phase 0's own
+        # verified _gfsk_resampler() exactly (cutoff at working_rate/2*0.9,
+        # transition at working_rate*0.3).
+        g_fb = math.gcd(quad_rate, int(config.FILEBROADCAST_WORKING_RATE_HZ))
+        fb_interp, fb_decim = quad_rate // g_fb, int(config.FILEBROADCAST_WORKING_RATE_HZ) // g_fb
+        fb_taps = firdes.low_pass(
+            fb_interp, quad_rate, config.FILEBROADCAST_WORKING_RATE_HZ / 2 * 0.9,
+            config.FILEBROADCAST_WORKING_RATE_HZ * 0.3, window.WIN_HAMMING,
+        )
+        self.filebroadcast_tx_resampler = filter.rational_resampler_ccf(
+            interpolation=fb_interp, decimation=fb_decim, taps=fb_taps,
+        )
+        self.connect(self.filebroadcast_source, self.filebroadcast_mod)
+        self.connect(self.filebroadcast_mod, self.filebroadcast_tx_resampler)
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -506,6 +564,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if RADE_AVAILABLE:
             self._null_sink_rade = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
+        self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -666,6 +725,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_tx_resampler
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
+        producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         return producers
 
     def _null_sink_for(self, producer):
@@ -679,6 +739,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_rade
         if producer is self.digitext_ssb_resampler:
             return self._null_sink_digitext
+        if producer is self.filebroadcast_tx_resampler:
+            return self._null_sink_filebroadcast
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def set_mode(self, mode: int):
@@ -704,8 +766,8 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
 
-        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT):
-            return  # all four bypass the NF filter/dynamics chain entirely, nothing to retap
+        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT, self.MODE_FILEBROADCAST):
+            return  # all five bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
@@ -790,6 +852,27 @@ class PlutoTxFlowgraph(gr.top_block):
                 col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
             )
             self._digitext_audio_dirty = False
+
+    def add_filebroadcast_file(self, filename: str, data: bytes):
+        """Adds a file to the rotation -- can be called at ANY time,
+        including while already keyed/mid-broadcast (Phase 2's whole point,
+        see filebroadcast_source.py): request_rebuild() only takes effect
+        at the end of the CURRENT rotation cycle, never interrupting a
+        frame already in flight. Returns the assigned file_id."""
+        file_id = self.filebroadcast_planner.add_file(filename, data)
+        self.filebroadcast_source.request_rebuild()
+        return file_id
+
+    def remove_filebroadcast_file(self, file_id):
+        self.filebroadcast_planner.remove_file(file_id)
+        self.filebroadcast_source.request_rebuild()
+
+    def clear_filebroadcast_files(self):
+        self.filebroadcast_planner.clear()
+        self.filebroadcast_source.request_rebuild()
+
+    def filebroadcast_files(self):
+        return self.filebroadcast_planner.files()
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)

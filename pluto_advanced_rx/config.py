@@ -149,3 +149,22 @@ RADE_AUTOTUNE_SETTLE_S = 0.4  # after a zoom/frequency/gain change, before trust
 # TARGET_SNR_DB itself, which may need a fresh real-hardware pass now that
 # the floor is measured correctly (see README ToDo).
 RADE_AUTOTUNE_NOISE_EXCLUDE_HZ = 1500.0
+
+# --- File Broadcast (repetitive file-broadcast mode) -- MIRRORED copy of
+# pluto_tx/config.py's FILEBROADCAST_* PHY block, MUST stay byte-for-byte
+# in sync with it (see that file's own comment for the full rationale and
+# Phase 0 real-hardware provenance of these exact numbers). A mismatch here
+# silently breaks the real link -- the demodulator would assume the wrong
+# deviation/working_rate for what the transmitter is actually sending.
+FILEBROADCAST_SYMBOL_RATE_HZ = 100_000.0
+FILEBROADCAST_DEVIATION_HZ = 50_000.0  # h=1 (deviation = symbol_rate/2)
+FILEBROADCAST_BT = 0.35
+FILEBROADCAST_SPS = 5
+FILEBROADCAST_WORKING_RATE_HZ = FILEBROADCAST_SYMBOL_RATE_HZ * FILEBROADCAST_SPS  # 500,000 Hz
+# digital.gfsk_demod's own symbol_sync_ff loop bandwidth -- its DEFAULT
+# (0.175) reproducibly cycle-slips mid-transmission at 100kbaud on real
+# hardware (Phase 0 finding); 0.005 gave BER well under 0.2%, twice,
+# reproducibly. RX-side only -- this is the copy that's actually read.
+FILEBROADCAST_GAIN_MU = 0.005
+FILEBROADCAST_CHUNK_SIZE = 64  # see pluto_tx/config.py's sizing rationale (frame survival vs. overhead)
+FILEBROADCAST_MAX_FILENAME_LEN = 64

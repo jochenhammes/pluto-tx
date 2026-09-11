@@ -25,13 +25,14 @@ constructor's signature and behavior are unchanged for existing callers.
 import math
 import sys
 
-from gnuradio import gr, blocks, filter, analog, audio
+from gnuradio import gr, blocks, filter, analog, audio, digital
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
 from . import config
 from . import devices
 from .fft_probe import FftProbe
+from .filebroadcast_deframer import FileBroadcastDeframer
 
 # RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
 # install-rade.sh), not something every user has.
@@ -51,7 +52,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  nf_gain=config.DEFAULT_NF_GAIN, fft_size=config.DEFAULT_FFT_SIZE,
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
-                 gain_values=None):
+                 gain_values=None, on_filebroadcast_frame=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -116,6 +117,65 @@ class AdvancedRxFlowgraph(gr.top_block):
         # for pluto_rx's enable_waterfall toggle.
         self.fft_probe = FftProbe(fft_size, self.sample_rate, config.WATERFALL_WINDOW, config.FFT_COMPUTE_RATE_HZ)
         self.connect(self.pluto_source, self.fft_probe)
+
+        # --- File Broadcast branch (repetitive file-broadcast mode, 23cm
+        # broadband GFSK -- see filebroadcast_deframer.py and the plan).
+        # ALWAYS wired, unconditionally, independent of demod_selector/
+        # nf_gain/audio_sink -- same "always-on parallel branch" pattern as
+        # fft_probe just above, not the demod_selector-registered pattern
+        # FM/SSB/RADE use below (this mode has no audio output to select).
+        #
+        # Taps pluto_source DIRECTLY (the full, operator-selected
+        # RX_BANDWIDTH span), NOT if_filter's narrowed-down
+        # DEMOD_IF_RATE=50kHz output the way RADE does below -- a real
+        # design catch made while wiring this up: File Broadcast's
+        # Phase-0-verified 100kbaud/h=1 signal occupies roughly 235kHz
+        # (2*deviation + (1+BT)*symbol_rate), far wider than
+        # DEMOD_IF_RATE's 50kHz Nyquist bandwidth could ever pass without
+        # severe aliasing/filtering loss -- if_filter's own anti-alias
+        # low-pass (designed for narrowband FM/SSB/RADE) would butcher this
+        # signal before the deframer ever saw it. fft_probe's tap point
+        # (the full-bandwidth pluto_source output) is the only existing
+        # branch point wide enough for this mode.
+        g_fb = math.gcd(int(self.sample_rate), int(config.FILEBROADCAST_WORKING_RATE_HZ))
+        fb_interp = int(config.FILEBROADCAST_WORKING_RATE_HZ) // g_fb
+        fb_decim = int(self.sample_rate) // g_fb
+        # EXPLICIT taps, never taps=[] (auto-design) -- Phase 0's confirmed
+        # finding: rational_resampler_ccf's auto-designed taps corrupt
+        # phase-continuous GFSK badly enough to break the receiver's own
+        # symbol clock recovery, even in a lossless software round-trip.
+        # Every RX_BANDWIDTH_PRESETS entry is a clean multiple of
+        # FILEBROADCAST_WORKING_RATE_HZ by construction (confirmed:
+        # {1M,2.5M,5M,8M,10M} all divide evenly by 500kHz), so fb_interp is
+        # 1 (pure decimation) for every currently offered preset -- gain=
+        # fb_interp (not hardcoded 1.0) stays correct even if that ever
+        # changes: an interpolating (fb_interp>1) stage needs its taps
+        # scaled by the interpolation factor, the same reasoning already
+        # documented for pluto_tx's M17 RRC filter and this mode's own
+        # mirror-image TX resampler.
+        fb_taps = firdes.low_pass(
+            float(fb_interp), self.sample_rate, config.FILEBROADCAST_WORKING_RATE_HZ / 2 * 0.9,
+            config.FILEBROADCAST_WORKING_RATE_HZ * 0.3, window.WIN_HAMMING,
+        )
+        self.filebroadcast_rx_resampler = filter.rational_resampler_ccf(
+            interpolation=fb_interp, decimation=fb_decim, taps=fb_taps,
+        )
+        self.connect(self.pluto_source, self.filebroadcast_rx_resampler)
+        fb_sensitivity = 2 * math.pi * config.FILEBROADCAST_DEVIATION_HZ / config.FILEBROADCAST_WORKING_RATE_HZ
+        # gain_mu explicitly set (NOT gfsk_demod's own default 0.175) --
+        # Phase 0's confirmed real-hardware finding: the default loop
+        # bandwidth reproducibly cycle-slips mid-transmission at 100kbaud;
+        # 0.005 gave BER well under 0.2%, twice, reproducibly, at these
+        # exact PHY parameters.
+        self.filebroadcast_demod = digital.gfsk_demod(
+            samples_per_symbol=config.FILEBROADCAST_SPS, sensitivity=fb_sensitivity,
+            gain_mu=config.FILEBROADCAST_GAIN_MU,
+        )
+        self.connect(self.filebroadcast_rx_resampler, self.filebroadcast_demod)
+        self.filebroadcast_deframer = FileBroadcastDeframer(
+            on_filebroadcast_frame or (lambda frame: None), config.FILEBROADCAST_CHUNK_SIZE,
+        )
+        self.connect(self.filebroadcast_demod, self.filebroadcast_deframer)
 
         # --- IF stage: decimate from the RX bandwidth preset down to the
         # fixed DEMOD_IF_RATE. rational_resampler_ccf (interpolation=1, i.e.

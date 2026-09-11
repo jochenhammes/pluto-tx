@@ -79,10 +79,12 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab = QtWidgets.QWidget()
         digimodes_tab_layout = QtWidgets.QVBoxLayout(digimodes_tab)
         self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
+        # File-Transfer: Phase 1 minimal UI (file picker + status label) --
+        # the full multi-file directory table is Phase 4 scope (see the
+        # plan). Enabled now, mirroring Digimodes' own tab.
         filetransfer_tab = QtWidgets.QWidget()
+        filetransfer_tab_layout = QtWidgets.QVBoxLayout(filetransfer_tab)
         self.mode_tab_widget.addTab(filetransfer_tab, "File-Transfer")
-        self.mode_tab_widget.setTabEnabled(2, False)
-        self.mode_tab_widget.setTabToolTip(2, "Not implemented yet")
         layout.addWidget(self.mode_tab_widget)
         layout.addWidget(self._hline())
 
@@ -217,6 +219,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # dependencies (see pluto_tx/digitext.py), not an external
         # from-source C library that might be missing.
         self.mode_combo.addItem("Digitext (Wasserfall-Text)", PlutoTxFlowgraph.MODE_DIGITEXT)
+        # File Broadcast: always available, no gating block, same reasoning
+        # as Digitext (pure Python/NumPy encoder, no external dependency).
+        self.mode_combo.addItem("File Broadcast", PlutoTxFlowgraph.MODE_FILEBROADCAST)
         # Sync to the flowgraph's ACTUAL mode before wiring the change
         # signal -- otherwise the combo always shows "FM" regardless of
         # what mode tb was actually constructed with (e.g. --mode ssb, or
@@ -426,6 +431,39 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addStretch(1)
         self._update_digitext_estimate()
         self._update_digitext_controls_enabled()
+
+        # --- File Broadcast rotation list -- lives in the "File-Transfer"
+        # tab, same "own tab" convention as Digitext's Digimodes tab. Phase
+        # 2 multi-file UI (a plain list + Add/Remove, live-editable even
+        # while broadcasting -- see FileBroadcastSource.request_rebuild())
+        # -- the plan defers the full directory-table-with-per-file-status
+        # to Phase 4. Start/Stop is deliberately just the existing generic
+        # PTT button in its already-supported click-toggle mode (see
+        # _configure_ptt_button), not a separate dedicated button: File
+        # Broadcast is a Start/Stop hold-to-transmit TX mode exactly like
+        # FM/SSB, so it reuses the same E-STOP/armed-state/hardware-
+        # readback machinery already built around that one button rather
+        # than duplicating any of it.
+        self.filebroadcast_list = QtWidgets.QListWidget()
+        filetransfer_tab_layout.addWidget(self.filebroadcast_list)
+        filebroadcast_btn_row = QtWidgets.QHBoxLayout()
+        self.filebroadcast_add_button = QtWidgets.QPushButton("Add File...")
+        self.filebroadcast_add_button.clicked.connect(self._on_filebroadcast_add_file)
+        filebroadcast_btn_row.addWidget(self.filebroadcast_add_button)
+        self.filebroadcast_remove_button = QtWidgets.QPushButton("Remove Selected")
+        self.filebroadcast_remove_button.clicked.connect(self._on_filebroadcast_remove_file)
+        filebroadcast_btn_row.addWidget(self.filebroadcast_remove_button)
+        filebroadcast_btn_row.addStretch(1)
+        filetransfer_tab_layout.addLayout(filebroadcast_btn_row)
+        filetransfer_tab_layout.addStretch(1)
+        # (path, filename, data) per entry, indexed the same as the list
+        # widget's rows -- carried across reconnects (see _rebuild()) since
+        # a fresh PlutoTxFlowgraph's filebroadcast_planner always starts
+        # empty. Keeping the actual bytes here (not just paths) means a
+        # reconnect doesn't need to re-read files from disk, and survives a
+        # file being added from a path that later becomes unavailable.
+        self._filebroadcast_entries = []
+        self._update_filebroadcast_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
         # power_slider is reused across backends (relabelled/reranged by
@@ -684,6 +722,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rade_controls_enabled()
         self._digitext_connected = enabled
         self._update_digitext_controls_enabled()
+        self._filebroadcast_connected = enabled
+        self._update_filebroadcast_controls_enabled()
 
     def _update_m17_controls_enabled(self):
         # Visibility follows the selected mode (row hidden entirely outside
@@ -727,6 +767,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digitext_layout_combo.setEnabled(connected)
         self.digitext_zoom_spin.setEnabled(connected)
         self.digitext_offset_slider.setEnabled(connected)
+
+    def _update_filebroadcast_controls_enabled(self):
+        # No visibility toggle -- lives in its own "File-Transfer" tab
+        # (mirrors _update_digitext_controls_enabled()'s reasoning exactly).
+        connected = getattr(self, "_filebroadcast_connected", True)
+        self.filebroadcast_add_button.setEnabled(connected)
+        self.filebroadcast_remove_button.setEnabled(connected)
 
     def _style_estop_button(self, locked: bool):
         self.estop_button.setText("Re-arm" if locked else "E-STOP")
@@ -936,53 +983,69 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_mode_changed(self, idx):
         mode = self.mode_combo.currentData()
-        if mode != PlutoTxFlowgraph.MODE_DIGITEXT:
+        if mode not in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_FILEBROADCAST):
             self._last_audio_mode = mode  # see _on_mode_tab_changed()
         if self.tb is not None:
             self.tb.set_mode(mode)
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
         self._update_rade_controls_enabled()
-        # Bidirectional with _on_mode_tab_changed() below: selecting Digitext
-        # here reveals its home tab; clicking the tab itself also drives mode
-        # selection the other way. setCurrentIndex() is a no-op (no signal)
-        # if already on the target tab, so this never fights that handler.
-        self.mode_tab_widget.setCurrentIndex(1 if mode == PlutoTxFlowgraph.MODE_DIGITEXT else 0)
+        # Bidirectional with _on_mode_tab_changed() below: selecting
+        # Digitext/File Broadcast here reveals its home tab; clicking the
+        # tab itself also drives mode selection the other way.
+        # setCurrentIndex() is a no-op (no signal) if already on the target
+        # tab, so this never fights that handler.
+        if mode == PlutoTxFlowgraph.MODE_DIGITEXT:
+            target_tab = 1
+        elif mode == PlutoTxFlowgraph.MODE_FILEBROADCAST:
+            target_tab = 2
+        else:
+            target_tab = 0
+        self.mode_tab_widget.setCurrentIndex(target_tab)
+
+    # tab index -> the one mode that tab is "home" for; Audio (0) has no
+    # single home mode (whichever of FM/SSB/M17/FreeDV/RADE was last used).
+    _TAB_HOME_MODE = {1: PlutoTxFlowgraph.MODE_DIGITEXT, 2: PlutoTxFlowgraph.MODE_FILEBROADCAST}
 
     def _on_mode_tab_changed(self, tab_idx):
         """Reverse direction of _on_mode_changed()'s tab auto-switch: the
-        operator clicking the "Audio" or "Digimodes" tab directly is a real
-        mode choice, not just navigation -- a real bug report on real
-        hardware this session ("FM/SSB kaputt") was exactly this being
-        one-directional: after selecting Digitext, mode_combo (the only
-        control that actually changed self.tb.mode) was hidden away in the
-        Audio tab with no visible prompt to look for it there, and the
-        operator had no way back to FM/SSB from the Digimodes tab. Tab index
-        2 (File-Transfer) is a disabled placeholder -- Qt won't let a click
-        select it, so it's never a real target here."""
-        if tab_idx not in (0, 1):
-            return
+        operator clicking a tab directly is a real mode choice, not just
+        navigation -- a real bug report on real hardware ("FM/SSB kaputt")
+        was exactly this being one-directional for Digitext's own tab:
+        after selecting Digitext, mode_combo (the only control that
+        actually changed self.tb.mode) was hidden away in the Audio tab
+        with no visible prompt to look for it there, and the operator had
+        no way back to FM/SSB from the Digimodes tab. Generalized to File
+        Broadcast's own tab (index 2) the same way, now that it's a real
+        (not disabled-placeholder) tab too."""
         current_mode = self.mode_combo.currentData()
-        if tab_idx == 0 and current_mode == PlutoTxFlowgraph.MODE_DIGITEXT:
-            target_idx = self.mode_combo.findData(self._last_audio_mode)
-            if target_idx < 0 or not self.mode_combo.model().item(target_idx).isEnabled():
-                # Last-used audio mode isn't selectable right now (e.g. an
-                # audio-only Soundcard device is connected, which greys out
-                # everything except RADE/Digitext) -- fall back to the first
-                # other enabled, non-Digitext entry, or give up silently
-                # rather than force an invalid selection.
-                target_idx = -1
-                for i in range(self.mode_combo.count()):
-                    if (self.mode_combo.itemData(i) != PlutoTxFlowgraph.MODE_DIGITEXT
-                            and self.mode_combo.model().item(i).isEnabled()):
-                        target_idx = i
-                        break
-            if target_idx >= 0:
-                self.mode_combo.setCurrentIndex(target_idx)
-        elif tab_idx == 1 and current_mode != PlutoTxFlowgraph.MODE_DIGITEXT:
-            idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT)
-            if idx >= 0 and self.mode_combo.model().item(idx).isEnabled():
-                self.mode_combo.setCurrentIndex(idx)
+        home_mode = self._TAB_HOME_MODE.get(tab_idx)
+        if home_mode is not None:
+            if current_mode != home_mode:
+                idx = self.mode_combo.findData(home_mode)
+                if idx >= 0 and self.mode_combo.model().item(idx).isEnabled():
+                    self.mode_combo.setCurrentIndex(idx)
+            return
+        # tab_idx == 0 (Audio): only act if the combo is currently showing
+        # one of the OTHER tabs' home modes (Digitext/File Broadcast) --
+        # leave it alone if it's already a plain audio mode.
+        if current_mode not in self._TAB_HOME_MODE.values():
+            return
+        target_idx = self.mode_combo.findData(self._last_audio_mode)
+        if target_idx < 0 or not self.mode_combo.model().item(target_idx).isEnabled():
+            # Last-used audio mode isn't selectable right now (e.g. an
+            # audio-only Soundcard device is connected, which greys out
+            # everything except RADE/Digitext) -- fall back to the first
+            # other enabled, non-tab-home entry, or give up silently rather
+            # than force an invalid selection.
+            target_idx = -1
+            for i in range(self.mode_combo.count()):
+                if (self.mode_combo.itemData(i) not in self._TAB_HOME_MODE.values()
+                        and self.mode_combo.model().item(i).isEnabled()):
+                    target_idx = i
+                    break
+        if target_idx >= 0:
+            self.mode_combo.setCurrentIndex(target_idx)
 
     def _on_digitext_text_changed(self, text):
         if self.tb is not None:
@@ -1050,6 +1113,48 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_freedv_callsign_changed(self, text):
         if self.tb is not None:
             self.tb.set_freedv_callsign(text)
+
+    def _on_filebroadcast_add_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Add File to Broadcast Rotation", "", "All files (*)")
+        if not path:
+            return
+        with open(path, "rb") as f:
+            data = f.read()
+        filename = os.path.basename(path)
+        self._filebroadcast_entries.append((filename, data))
+        self._refresh_filebroadcast_list()
+        if self.tb is not None:
+            # Live add -- takes effect at the end of the current rotation
+            # cycle (see FileBroadcastSource.request_rebuild()), whether
+            # currently keyed or not; no PTT/flowgraph interruption either way.
+            self.tb.add_filebroadcast_file(filename, data)
+
+    def _on_filebroadcast_remove_file(self):
+        row = self.filebroadcast_list.currentRow()
+        if not (0 <= row < len(self._filebroadcast_entries)):
+            return
+        self._filebroadcast_entries.pop(row)
+        self._refresh_filebroadcast_list()
+        if self.tb is not None:
+            self._reload_all_filebroadcast_files(self.tb)
+
+    def _refresh_filebroadcast_list(self):
+        self.filebroadcast_list.clear()
+        for filename, data in self._filebroadcast_entries:
+            self.filebroadcast_list.addItem(f"{filename} ({len(data) / 1024:.1f} KB)")
+
+    def _reload_all_filebroadcast_files(self, tb):
+        """Full resync of tb's rotation to match self._filebroadcast_entries
+        exactly -- used after a remove (no per-file remove-by-identity
+        exists on the flowgraph side beyond remove_filebroadcast_file(),
+        which needs the file_id the CURRENT tb assigned, not something this
+        GUI-side list tracks) and after a reconnect (see _rebuild()), where
+        the fresh tb's planner is empty regardless. Simpler and safer than
+        trying to keep GUI-side entries and flowgraph-side file_ids in
+        lockstep through arbitrary add/remove sequences."""
+        tb.clear_filebroadcast_files()
+        for filename, data in self._filebroadcast_entries:
+            tb.add_filebroadcast_file(filename, data)
 
     def _on_source_changed(self, idx):
         source = self.source_combo.currentData()
@@ -1393,6 +1498,8 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
         new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
         new_tb.set_rade_eoo_enabled(self.rade_eoo_checkbox.isChecked())
+        if self._filebroadcast_entries:
+            self._reload_all_filebroadcast_files(new_tb)
         self._wav_path = new_tb.wav_path
         self.tb = new_tb
         self._embed_waterfall(new_tb)

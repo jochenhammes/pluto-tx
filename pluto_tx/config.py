@@ -219,6 +219,63 @@ DIGITEXT_TAIL_S = 0.15
 # a harmless no-op.
 DIGITEXT_AUTO_UNKEY_WATCHDOG_S = 2.0
 
+# --- File Broadcast (repetitive file-broadcast mode, private-link only --
+# see pluto-tx-file-broadcast-briefing.md and the plan at
+# ~/.claude/plans/swirling-waddling-noodle.md). GFSK PHY parameters below
+# are the exact, real-hardware-verified result of Phase 0's staged
+# complexity/bandwidth test ladder (2026-09-11 session, direct-cable +
+# 40dB-attenuator bench link, Pluto TX -> RTL-SDR RX): 100kbaud, h=1
+# (deviation = symbol_rate/2), BT=0.35, with digital.gfsk_demod's OWN
+# gain_mu explicitly set to 0.005 (NOT its default 0.175, which
+# reproducibly cycle-slips mid-transmission at this rate -- see the plan's
+# Phase 0 progress log) gave BER well under 0.2% on real hardware, twice,
+# reproducibly. h=1 instead of the plan's originally-PLANNED h~=0.5: real
+# testing found h=0.5 has a much tighter, not-yet-solved SNR/noise margin
+# at this rate on this specific hardware pairing -- h~=0.5 was always
+# flagged in the plan as a planning-stage estimate to be calibrated by the
+# real test, not a fixed requirement.
+#
+# MUST STAY IN SYNC with pluto_advanced_rx/config.py's mirrored copy of
+# these same PHY values -- this project's established pattern for TX/RX
+# constants that must match exactly across the two independent app
+# packages (see e.g. rade_ctypes.py's own per-package copies). A mismatch
+# here silently breaks the real link (wrong deviation/rate assumed by the
+# demodulator), not a loud error.
+FILEBROADCAST_SYMBOL_RATE_HZ = 100_000.0
+FILEBROADCAST_DEVIATION_HZ = 50_000.0  # h=1 (deviation = symbol_rate/2)
+FILEBROADCAST_BT = 0.35
+# samples/symbol: gives working_rate = SYMBOL_RATE*SPS = 500,000Hz, which
+# divides Pluto's fixed 2.5MHz TX rate cleanly (interpolation=5) -- the
+# EXACT sps/working_rate combination Phase 0's final real-hardware test
+# verified (>=8 taps/branch in the polyphase TX resampler, the confirmed
+# root cause of Stage 4's original failure -- see the plan). Do not change
+# this without re-verifying taps/branch against whatever TX device's actual
+# quad_rate is in use.
+FILEBROADCAST_SPS = 5
+FILEBROADCAST_WORKING_RATE_HZ = FILEBROADCAST_SYMBOL_RATE_HZ * FILEBROADCAST_SPS  # 500,000 Hz
+# RX-only (digital.gfsk_demod's symbol_sync_ff loop bandwidth) -- listed
+# here anyway (TX never reads it) purely so both config.py copies carry the
+# complete, matched parameter set in one place, per the "must stay in sync"
+# note above.
+FILEBROADCAST_GAIN_MU = 0.005
+
+# --- Frame format sizing: CHUNK_SIZE trades per-frame overhead (14 fixed
+# bytes: SYNC_WORD not counted -- see filebroadcast.py -- + type/file_id/
+# offset/length/crc16) against per-frame SURVIVAL PROBABILITY at the real
+# measured link BER (a single bit error anywhere in a frame fails its
+# CRC-16, discarding the whole frame -- expected/designed-for, since the
+# round-robin rotation retries every chunk repeatedly, but a smaller chunk
+# obviously fails less often per attempt). At CHUNK_SIZE=200 (an earlier,
+# unconsidered default) and Phase 0's real measured BER range
+# (0.06%-0.2%), a 214-byte/1712-bit frame's survival probability is only
+# ~11-36% per rotation pass -- computed (not guessed) as
+# (1-ber)**(frame_bytes*8). CHUNK_SIZE=64 (78-byte/624-bit frames) raises
+# that to ~44-69% over the same BER range, a real, worthwhile improvement
+# for how fast a file actually completes, at a modest overhead cost
+# (14/64=22% vs 14/200=7%) -- picked deliberately, not a round number.
+FILEBROADCAST_CHUNK_SIZE = 64
+FILEBROADCAST_MAX_FILENAME_LEN = 64  # matches filebroadcast.MAX_FILENAME_LEN
+
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [
