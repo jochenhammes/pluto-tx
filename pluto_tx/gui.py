@@ -40,19 +40,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb = None
         self.setWindowTitle("PlutoSDR TX")
         self._armed = True  # False after emergency stop, until re-armed
-        # The last non-Digimodes-tab mode actually selected -- restored when
-        # the operator clicks back to the "Audio" tab (see
+        # Single source of truth for "what mode is actually active right
+        # now" -- decoupled from either combo box's own currentData(),
+        # since mode_combo (Audio tab: FM/SSB/M17/FreeDV/RADE/File
+        # Broadcast) and digimode_combo (Digimodes tab: Waterfall Writer/
+        # PSK31, its own dedicated combo, per explicit request to pull
+        # these two out of mode_combo/the Audio tab) are two separate
+        # widgets that can't both represent the live mode at once. Kept in
+        # sync by _activate_mode(), called from both combos' own change
+        # handlers and from _on_mode_tab_changed() when landing on a tab
+        # makes its own combo (or File-Transfer's fixed mode) active again.
+        self._current_mode = mode
+        # The last Audio-tab mode actually selected -- restored when the
+        # operator clicks back to the "Audio" tab (see
         # _on_mode_tab_changed() below). Defaults to FM if the app was
-        # started directly in a Digimodes-tab mode (Digitext/PSK31).
-        self._last_audio_mode = mode if mode not in self._mode_to_tab() else PlutoTxFlowgraph.MODE_FM
-        # Remembers which member of each MULTI-MEMBER tab (currently just
-        # Digimodes: Waterfall Writer vs. PSK31) was last active -- mirrors
-        # _last_audio_mode's own "remember last selection" idea, generalized
-        # per-tab. Seeded so a fresh app start in either Digimodes-tab mode
-        # is remembered correctly even before _on_mode_changed() ever fires.
-        self._last_tab_mode = {1: PlutoTxFlowgraph.MODE_DIGITEXT, 2: PlutoTxFlowgraph.MODE_FILEBROADCAST}
-        if mode in self._TAB_HOME_MODE.get(1, ()):
-            self._last_tab_mode[1] = mode
+        # started directly in File Broadcast or a Digimodes-tab mode.
+        self._last_audio_mode = (
+            mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
+                                  PlutoTxFlowgraph.MODE_PSK31)
+            else PlutoTxFlowgraph.MODE_FM
+        )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
         # for why this exists (real bug: repeated sends of the same text cut
         # off early).
@@ -228,16 +235,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
                 QtCore.Qt.ToolTipRole,
             )
-        # Digitext (waterfall-text digimode): always available, no gating
-        # block like M17/FreeDV/RADE above -- Pillow/NumPy are plain Python
-        # dependencies (see pluto_tx/digitext.py), not an external
-        # from-source C library that might be missing.
-        self.mode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
-        # PSK31 (BPSK31 keyboard chat): same reasoning, always available,
-        # pure Python/NumPy (see pluto_tx/psk31.py).
-        self.mode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
-        # File Broadcast: always available, no gating block, same reasoning
-        # as Digitext (pure Python/NumPy encoder, no external dependency).
+        # File Broadcast: always available, no gating block (pure Python/
+        # NumPy encoder, no external from-source dependency).
+        #
+        # Waterfall Writer/PSK31 are deliberately NOT entries here -- per
+        # explicit request, the two Digimodes-tab modes get their OWN
+        # dedicated combo (digimode_combo, built below with the rest of
+        # the Digimodes tab's content) instead of living in this Audio-tab
+        # combo alongside FM/SSB/M17/FreeDV/RADE. self._current_mode (not
+        # mode_combo.currentData()) is the actual source of truth for
+        # "which mode is active" everywhere in this file -- see its own
+        # comment above and _activate_mode() below.
         self.mode_combo.addItem("File Broadcast", PlutoTxFlowgraph.MODE_FILEBROADCAST)
         # Sync to the flowgraph's ACTUAL mode before wiring the change
         # signal -- otherwise the combo always shows "FM" regardless of
@@ -359,6 +367,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_row_widget.setLayout(rade_row)
         audio_tab_layout.addWidget(self.rade_row_widget)
         self._update_rade_controls_enabled()
+
+        # --- Digimode selector -- its OWN dedicated combo (per explicit
+        # request, pulled out of mode_combo/the Audio tab entirely), choosing
+        # between the Digimodes tab's two members. Selecting either activates
+        # it immediately (mirrors mode_combo's own currentIndexChanged ->
+        # _on_mode_changed() wiring) via _on_digimode_changed() below.
+        digimode_row = QtWidgets.QHBoxLayout()
+        digimode_row.addWidget(QtWidgets.QLabel("Digimode:"))
+        self.digimode_combo = QtWidgets.QComboBox()
+        self.digimode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
+        self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
+        # Sync to the flowgraph's actual mode BEFORE wiring the change
+        # signal, same reasoning/ordering as mode_combo's own identical
+        # comment above -- avoids firing _on_digimode_changed() ->
+        # tb.set_mode() during construction, before tb.start() has run.
+        initial_digimode_idx = self.digimode_combo.findData(mode)
+        if initial_digimode_idx >= 0:
+            self.digimode_combo.setCurrentIndex(initial_digimode_idx)
+        self.digimode_combo.currentIndexChanged.connect(self._on_digimode_changed)
+        digimode_row.addWidget(self.digimode_combo)
+        digimode_row.addStretch(1)
+        digimodes_tab_layout.addLayout(digimode_row)
 
         # --- Digitext controls -- live in the "Digimodes" tab (not
         # audio_tab_layout like every mode above), per explicit request
@@ -739,15 +769,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uri_combo.setEnabled(True)
         self.device_type_combo.setEnabled(True)
         self._sync_device_dependent_widgets()  # sync freq range/power label/amp visibility to "PlutoSDR"
-        # Connected AFTER the initial mode_combo sync above (and after every
-        # widget it touches exists) -- bidirectional counterpart to
-        # _on_mode_changed()'s own setCurrentIndex() on this same tab widget,
-        # fixed after a real regression report: manually clicking the "Audio"
-        # tab used to be pure navigation that left mode_combo (and the actual
-        # flowgraph mode) on Digitext, with no way back to FM/SSB short of
-        # noticing the still-selectable-but-unobvious combo underneath. Now
-        # each tab is a real, two-way choice: "Audio" <-> the last-used
-        # audio mode, "Digimodes" <-> Digitext (see _on_mode_tab_changed()).
+        # Show whichever tab actually matches the flowgraph's starting mode
+        # (e.g. --mode psk31/filebroadcast) -- mode_combo/digimode_combo's
+        # own initial sync (both done before their own change signals were
+        # connected, so neither fired _on_mode_changed()/_on_digimode_changed()
+        # to do this automatically) only set the COMBO values, not which tab
+        # is showing. Done before connecting currentChanged just below, same
+        # "sync before wiring the signal" ordering as both combos.
+        if self._current_mode == PlutoTxFlowgraph.MODE_FILEBROADCAST:
+            self.mode_tab_widget.setCurrentIndex(2)
+        elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31):
+            self.mode_tab_widget.setCurrentIndex(1)
+        # Connected AFTER the initial sync above (and after every widget it
+        # touches exists) -- bidirectional counterpart to _on_mode_changed()/
+        # _on_digimode_changed()'s own setCurrentIndex() on this same tab
+        # widget, fixed after a real regression report: manually clicking the
+        # "Audio" tab used to be pure navigation that left mode_combo (and
+        # the actual flowgraph mode) on Digitext, with no way back to FM/SSB
+        # short of noticing the still-selectable-but-unobvious combo
+        # underneath. Now each tab is a real, two-way choice: "Audio" <->
+        # the last-used audio mode, "Digimodes" <-> digimode_combo's own
+        # selection, "File-Transfer" <-> File Broadcast (see
+        # _on_mode_tab_changed()).
         self.mode_tab_widget.currentChanged.connect(self._on_mode_tab_changed)
         self._rebuild(uri, self._wav_path)
 
@@ -792,7 +835,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.waterfall_container.addWidget(widget)
 
     def _set_connected_controls_enabled(self, enabled: bool):
-        for w in (self.freq_spin, self.fine_slider, self.mode_combo, self.source_combo,
+        for w in (self.freq_spin, self.fine_slider, self.mode_combo, self.digimode_combo, self.source_combo,
                   self.power_slider, self.unlock_full_power, self.amp_checkbox, self.nf_gain_slider,
                   self.gate_enable, self.compressor_enable, self.limiter_enable,
                   self.ptt_button, self.ptt_mode_button, self.estop_button):
@@ -850,11 +893,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # system's libcodec2.
 
     def _update_digitext_controls_enabled(self):
-        # Visibility toggle needed as of this session: the "Digimodes" tab
-        # now hosts a SECOND mode (PSK31) too, so tab selection alone no
-        # longer disambiguates which group's controls should show -- mirrors
-        # _update_m17_controls_enabled()'s own reasoning exactly.
-        is_digitext_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_DIGITEXT
+        # Visibility toggle needed since the "Digimodes" tab hosts TWO
+        # modes (via digimode_combo), so tab selection alone doesn't
+        # disambiguate which group's controls should show -- mirrors
+        # _update_m17_controls_enabled()'s own reasoning exactly. Checks
+        # self._current_mode (not mode_combo, which no longer has a
+        # Digitext entry at all -- see digimode_combo's own comment).
+        is_digitext_mode = self._current_mode == PlutoTxFlowgraph.MODE_DIGITEXT
         self.digitext_group_widget.setVisible(is_digitext_mode)
         connected = getattr(self, "_digitext_connected", True)
         self.digitext_text_edit.setEnabled(connected)
@@ -864,7 +909,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_psk31_controls_enabled(self):
         # Structural mirror of _update_digitext_controls_enabled() above.
-        is_psk31_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_PSK31
+        is_psk31_mode = self._current_mode == PlutoTxFlowgraph.MODE_PSK31
         self.psk31_group_widget.setVisible(is_psk31_mode)
         connected = getattr(self, "_psk31_connected", True)
         self.psk31_text_edit.setEnabled(connected)
@@ -980,16 +1025,20 @@ class MainWindow(QtWidgets.QMainWindow):
     _AUDIO_ONLY_CAPABLE_MODES = (PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31)
 
     def _sync_mode_combo_availability(self):
-        """Greys out every mode except the audio-only-capable ones (RADE,
-        Digitext) when an audio-only device (Soundcard) is selected.
-        Composes with the module-availability graying already applied once
-        at construction time (M17_AVAILABLE/FREEDV_AVAILABLE/RADE_AVAILABLE)
-        -- an item stays disabled if EITHER reason applies. Forces the
-        selection to whichever audio-only-capable mode is actually
-        available (Digitext first -- always available, unlike RADE) when
-        switching to an audio-only device with a now-invalid mode active;
-        never forces a selection back on switching away (the operator picks
-        freely again once everything is re-enabled)."""
+        """Greys out every mode_combo entry except RADE (the only
+        audio-only-capable mode still IN mode_combo -- Digitext/PSK31 live
+        in digimode_combo now, always available there regardless of
+        device, no gating needed) when an audio-only device (Soundcard) is
+        selected. Composes with the module-availability graying already
+        applied once at construction time (M17_AVAILABLE/FREEDV_AVAILABLE/
+        RADE_AVAILABLE) -- an item stays disabled if EITHER reason
+        applies. Forces a switch away from mode_combo's current selection
+        when it needs real RF but the device just became audio-only:
+        prefers RADE (stays on the Audio tab) if available, otherwise
+        falls back to the Digimodes tab (always available, no external
+        dependency, unlike RADE) -- never forces a selection back on
+        switching away (the operator picks freely again once everything
+        is re-enabled)."""
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         is_rf = not device_cls.is_audio_only()
         module_available = {
@@ -998,19 +1047,16 @@ class MainWindow(QtWidgets.QMainWindow):
             PlutoTxFlowgraph.MODE_M17: M17_AVAILABLE,
             PlutoTxFlowgraph.MODE_FREEDV: FREEDV_AVAILABLE,
             PlutoTxFlowgraph.MODE_RADE: RADE_AVAILABLE,
-            PlutoTxFlowgraph.MODE_DIGITEXT: True,
-            PlutoTxFlowgraph.MODE_PSK31: True,
         }
         for mode, available in module_available.items():
             idx = self.mode_combo.findData(mode)
             enabled = available and (is_rf or mode in self._AUDIO_ONLY_CAPABLE_MODES)
             self.mode_combo.model().item(idx).setEnabled(enabled)
-        current = self.mode_combo.currentData()
-        if not is_rf and current not in self._AUDIO_ONLY_CAPABLE_MODES:
-            for mode in self._AUDIO_ONLY_CAPABLE_MODES:
-                if module_available[mode]:
-                    self.mode_combo.setCurrentIndex(self.mode_combo.findData(mode))
-                    break
+        if not is_rf and self._current_mode not in self._AUDIO_ONLY_CAPABLE_MODES:
+            if RADE_AVAILABLE:
+                self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE))
+            else:
+                self.mode_tab_widget.setCurrentIndex(1)
 
     def _set_indicator_idle(self):
         self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")
@@ -1085,34 +1131,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.set_limiter_enabled(checked)
 
-    # tab index -> the TUPLE of modes that tab can show; Audio (0) has no
-    # entry (means "whichever of FM/SSB/M17/FreeDV/RADE was last used",
-    # tracked by self._last_audio_mode). Digimodes (1) now hosts TWO modes
-    # (Waterfall Writer/Digitext and PSK31) as of this session -- generalized
-    # from a single bare mode per tab to a tuple, with self._last_tab_mode
-    # remembering which member was last active in each multi-member tab
-    # (same "remember last selection" idea _last_audio_mode already used
-    # for tab 0, now applied per-tab).
-    _TAB_HOME_MODE = {
-        1: (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31),
-        2: (PlutoTxFlowgraph.MODE_FILEBROADCAST,),
-    }
-
-    def _mode_to_tab(self):
-        """Flattened {mode: tab_idx} lookup derived from _TAB_HOME_MODE --
-        computed fresh each call (the dict is tiny), not cached, so it never
-        goes stale if _TAB_HOME_MODE itself ever changes at runtime (it
-        doesn't today, but this way there's nothing to keep in sync)."""
-        return {m: t for t, modes in self._TAB_HOME_MODE.items() for m in modes}
-
-    def _on_mode_changed(self, idx):
-        mode = self.mode_combo.currentData()
-        mode_to_tab = self._mode_to_tab()
-        target_tab = mode_to_tab.get(mode, 0)
-        if target_tab == 0:
-            self._last_audio_mode = mode  # see _on_mode_tab_changed()
-        else:
-            self._last_tab_mode[target_tab] = mode
+    def _activate_mode(self, mode):
+        """Single point where a mode actually BECOMES the live one --
+        updates self._current_mode (see its own comment in __init__),
+        pushes it to the flowgraph if connected, and refreshes every
+        mode-dependent control's visibility. Called from both combos' own
+        change handlers (_on_mode_changed()/_on_digimode_changed()) AND
+        from _on_mode_tab_changed() when landing on a tab makes its own
+        combo (or File-Transfer's fixed mode) live again without that
+        combo's own value having changed."""
+        self._current_mode = mode
         if self.tb is not None:
             self.tb.set_mode(mode)
         self._update_m17_controls_enabled()
@@ -1120,65 +1148,80 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rade_controls_enabled()
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
-        # Bidirectional with _on_mode_tab_changed() below: selecting a
-        # Digimodes-tab mode (or File Broadcast) here reveals its home tab;
-        # clicking the tab itself also drives mode selection the other way.
-        # setCurrentIndex() is a no-op (no signal) if already on the target
-        # tab, so this never fights that handler.
+
+    def _on_mode_changed(self, idx):
+        mode = self.mode_combo.currentData()
+        if mode == PlutoTxFlowgraph.MODE_FILEBROADCAST:
+            target_tab = 2
+        else:
+            self._last_audio_mode = mode  # see _on_mode_tab_changed()
+            target_tab = 0
+        self._activate_mode(mode)
+        # Bidirectional with _on_mode_tab_changed() below: selecting File
+        # Broadcast here reveals its home tab; clicking the tab itself also
+        # drives mode selection the other way. setCurrentIndex() is a
+        # no-op (no signal) if already on the target tab, so this never
+        # fights that handler.
         self.mode_tab_widget.setCurrentIndex(target_tab)
 
+    def _on_digimode_changed(self, idx):
+        """digimode_combo's own change handler -- the Digimodes-tab
+        counterpart to _on_mode_changed() above, kept separate since the
+        two combos are now fully independent widgets (see digimode_combo's
+        own construction comment for why they were split)."""
+        mode = self.digimode_combo.currentData()
+        self._activate_mode(mode)
+        self.mode_tab_widget.setCurrentIndex(1)
+
     def _on_mode_tab_changed(self, tab_idx):
-        """Reverse direction of _on_mode_changed()'s tab auto-switch: the
-        operator clicking a tab directly is a real mode choice, not just
-        navigation -- a real bug report on real hardware ("FM/SSB kaputt")
-        was exactly this being one-directional for Digitext's own tab:
+        """Reverse direction of _on_mode_changed()/_on_digimode_changed()'s
+        own tab auto-switch: the operator clicking a tab directly is a real
+        mode choice, not just navigation -- a real bug report on real
+        hardware ("FM/SSB kaputt") was exactly this being one-directional
+        for Digitext's own tab, back when it still lived in mode_combo:
         after selecting Digitext, mode_combo (the only control that
         actually changed self.tb.mode) was hidden away in the Audio tab
         with no visible prompt to look for it there, and the operator had
-        no way back to FM/SSB from the Digimodes tab. Generalized to a
-        MULTI-MEMBER tab (Digimodes now hosts both Waterfall Writer and
-        PSK31): landing on such a tab restores whichever of its members
-        was last active (self._last_tab_mode), not a single hardcoded mode."""
-        mode_to_tab = self._mode_to_tab()
-        current_mode = self.mode_combo.currentData()
-        home_modes = self._TAB_HOME_MODE.get(tab_idx)
-        if home_modes is not None:
-            if current_mode not in home_modes:
-                target_mode = self._last_tab_mode.get(tab_idx, home_modes[0])
-                idx = self.mode_combo.findData(target_mode)
-                if idx < 0 or not self.mode_combo.model().item(idx).isEnabled():
-                    # Remembered/first member isn't selectable right now
-                    # (e.g. an audio-only Soundcard device disabled one
-                    # alternative) -- fall back to the first enabled member.
-                    idx = -1
-                    for candidate in home_modes:
-                        i = self.mode_combo.findData(candidate)
-                        if i >= 0 and self.mode_combo.model().item(i).isEnabled():
-                            idx = i
-                            break
-                if idx >= 0:
-                    self.mode_combo.setCurrentIndex(idx)
+        no way back to FM/SSB from the Digimodes tab.
+
+        Digimodes (tab 1) needs no "remember which mode" bookkeeping of
+        its own -- digimode_combo is a normal Qt widget that already keeps
+        its own currentIndex when its tab isn't visible, so simply reading
+        it here is enough."""
+        if tab_idx == 1:  # Digimodes
+            self._activate_mode(self.digimode_combo.currentData())
             return
-        # tab_idx == 0 (Audio): only act if the combo is currently showing
-        # one of the OTHER tabs' modes -- leave it alone if it's already a
-        # plain audio mode.
-        if current_mode not in mode_to_tab:
+        if tab_idx == 2:  # File-Transfer
+            if self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_FILEBROADCAST:
+                idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_FILEBROADCAST)
+                if idx >= 0 and self.mode_combo.model().item(idx).isEnabled():
+                    self.mode_combo.setCurrentIndex(idx)  # fires _on_mode_changed() -> activates
+                    return
+            self._activate_mode(PlutoTxFlowgraph.MODE_FILEBROADCAST)
+            return
+        # tab_idx == 0 (Audio): only act if mode_combo is currently showing
+        # File Broadcast -- leave it alone if it's already a plain audio
+        # mode (its value never changes while a different tab is showing,
+        # so it's already correct in that case; only the FLOWGRAPH's own
+        # active mode might be stale, coming from Digimodes/File-Transfer).
+        if self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_FILEBROADCAST:
+            self._activate_mode(self.mode_combo.currentData())
             return
         target_idx = self.mode_combo.findData(self._last_audio_mode)
         if target_idx < 0 or not self.mode_combo.model().item(target_idx).isEnabled():
             # Last-used audio mode isn't selectable right now (e.g. an
             # audio-only Soundcard device is connected, which greys out
-            # everything except the audio-only-capable modes) -- fall back
-            # to the first other enabled, non-tab-home entry, or give up
-            # silently rather than force an invalid selection.
+            # everything except RADE) -- fall back to the first other
+            # enabled, non-File-Broadcast entry, or give up silently
+            # rather than force an invalid selection.
             target_idx = -1
             for i in range(self.mode_combo.count()):
-                if (self.mode_combo.itemData(i) not in mode_to_tab
+                if (self.mode_combo.itemData(i) != PlutoTxFlowgraph.MODE_FILEBROADCAST
                         and self.mode_combo.model().item(i).isEnabled()):
                     target_idx = i
                     break
         if target_idx >= 0:
-            self.mode_combo.setCurrentIndex(target_idx)
+            self.mode_combo.setCurrentIndex(target_idx)  # fires _on_mode_changed() -> activates
 
     def _on_digitext_text_changed(self, text):
         if self.tb is not None:
@@ -1470,7 +1513,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if a newer press has started in the meantime -- the tb-identity
         check alone stays too (still needed for the torn-down/rebuilt-
         flowgraph case, which the epoch doesn't cover)."""
-        if self.tb is None or self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_DIGITEXT:
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_DIGITEXT:
             return
         token = self.tb
         self._digitext_ptt_epoch += 1
@@ -1514,7 +1557,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _log_psk31_sent(self):
         # Local echo only -- pluto_tx can never show what was received, see
         # psk31_sent_log's own tooltip/docstring context.
-        if self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_PSK31:
+        if self._current_mode != PlutoTxFlowgraph.MODE_PSK31:
             return
         text = self.psk31_text_edit.text()
         if text:
@@ -1526,7 +1569,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pattern was built to fix (repeated identical sends cutting off
         early because a stale timer from an earlier press fired mid-way
         through a new one)."""
-        if self.tb is None or self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_PSK31:
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_PSK31:
             return
         token = self.tb
         self._psk31_ptt_epoch += 1
@@ -1666,7 +1709,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 frequency=self.freq_spin.value() * 1e6,
                 power_ceiling=self._atten_ceiling_db,
                 wav_path=wav_path,
-                mode=self.mode_combo.currentData(),
+                mode=self._current_mode,
                 source=self.source_combo.currentData(),
                 enable_waterfall=True,
                 m17_src_callsign=self.m17_src_edit.text(),
