@@ -61,6 +61,20 @@ class RxDevice(abc.ABC):
         self.sample_rate_hz = sample_rate_hz
         self.bandwidth_hz = bandwidth_hz
 
+    @classmethod
+    def is_audio_only(cls) -> bool:
+        """True for backends with no RF concept at all (frequency_range_hz
+        == (0.0, 0.0)) -- e.g. AudioDevice. Mirrors pluto_tx's
+        TxDevice.is_audio_only() exactly. Gates whether a device can carry
+        a wideband-RF-native feature like File Broadcast's GFSK branch,
+        which assumes real RF bandwidth (hundreds of kHz) to design its
+        resampler against -- a real bug found on real use: AudioDevice's
+        20kHz sample rate made firdes.low_pass's cutoff (225kHz, derived
+        from FILEBROADCAST_WORKING_RATE_HZ) exceed sample_rate/2, raising
+        IndexError at construction time and making Soundcard mode
+        completely unable to connect."""
+        return cls.frequency_range_hz == (0.0, 0.0)
+
     @abc.abstractmethod
     def build_source(self):
         """Construct and configure the GNU Radio source block and return it

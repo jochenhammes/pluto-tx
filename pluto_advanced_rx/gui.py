@@ -756,6 +756,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is None:
             self.filebroadcast_signal_label.setText("Not connected.")
             return
+        if self.tb.filebroadcast_deframer is None:
+            # Audio-only device (Soundcard) -- the branch isn't built at
+            # all for these, see AdvancedRxFlowgraph's own comment (File
+            # Broadcast needs real RF bandwidth, a sound card has none).
+            self.filebroadcast_signal_label.setText("Not available for this device (no RF).")
+            return
         frame_count = self.tb.filebroadcast_deframer.frame_count
         crc_fail_count = self.tb.filebroadcast_deframer.crc_fail_count
         total = frame_count + crc_fail_count
