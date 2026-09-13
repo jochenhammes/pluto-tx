@@ -12,6 +12,7 @@ from PyQt5 import QtCore, QtWidgets, sip
 from . import config
 from . import devices
 from . import digitext
+from . import filebroadcast
 from .devices import pluto as pluto_device
 from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, _default_wav_path
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
@@ -433,12 +434,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_digitext_controls_enabled()
 
         # --- File Broadcast rotation list -- lives in the "File-Transfer"
-        # tab, same "own tab" convention as Digitext's Digimodes tab. Phase
-        # 2 multi-file UI (a plain list + Add/Remove, live-editable even
-        # while broadcasting -- see FileBroadcastSource.request_rebuild())
-        # -- the plan defers the full directory-table-with-per-file-status
-        # to Phase 4. Start/Stop is deliberately just the existing generic
-        # PTT button in its already-supported click-toggle mode (see
+        # tab, same "own tab" convention as Digitext's Digimodes tab.
+        # Multi-file UI (a plain list + Add/Remove, live-editable even
+        # while broadcasting -- see FileBroadcastSource.request_rebuild()).
+        # Start/Stop is deliberately just the existing generic PTT button
+        # in its already-supported click-toggle mode (see
         # _configure_ptt_button), not a separate dedicated button: File
         # Broadcast is a Start/Stop hold-to-transmit TX mode exactly like
         # FM/SSB, so it reuses the same E-STOP/armed-state/hardware-
@@ -455,14 +455,28 @@ class MainWindow(QtWidgets.QMainWindow):
         filebroadcast_btn_row.addWidget(self.filebroadcast_remove_button)
         filebroadcast_btn_row.addStretch(1)
         filetransfer_tab_layout.addLayout(filebroadcast_btn_row)
+        # Rotation status: total on-air bytes (framing overhead included)
+        # and the estimated time for ONE full rotation cycle at
+        # FILEBROADCAST_SYMBOL_RATE_HZ -- directly relevant "per-file
+        # status" info (Phase 4 scope): tells the operator roughly how
+        # often each file's directory frame (and therefore each of its
+        # chunks) repeats, which is exactly what governs how fast a
+        # receiver can expect to complete a file (see Phase 3's real
+        # gap-fill timing). Computed via a throwaway FileBroadcastPlanner
+        # mirroring self._filebroadcast_entries, not tb.filebroadcast_planner
+        # directly -- stays informative even while disconnected, same
+        # reasoning as Digitext's own estimate label.
+        self.filebroadcast_estimate_label = QtWidgets.QLabel()
+        filetransfer_tab_layout.addWidget(self.filebroadcast_estimate_label)
         filetransfer_tab_layout.addStretch(1)
-        # (path, filename, data) per entry, indexed the same as the list
-        # widget's rows -- carried across reconnects (see _rebuild()) since
-        # a fresh PlutoTxFlowgraph's filebroadcast_planner always starts
-        # empty. Keeping the actual bytes here (not just paths) means a
-        # reconnect doesn't need to re-read files from disk, and survives a
-        # file being added from a path that later becomes unavailable.
+        # (filename, data) per entry, indexed the same as the list widget's
+        # rows -- carried across reconnects (see _rebuild()) since a fresh
+        # PlutoTxFlowgraph's filebroadcast_planner always starts empty.
+        # Keeping the actual bytes here (not just paths) means a reconnect
+        # doesn't need to re-read files from disk, and survives a file
+        # being added from a path that later becomes unavailable.
         self._filebroadcast_entries = []
+        self._update_filebroadcast_estimate()
         self._update_filebroadcast_controls_enabled()
 
         # --- Power / attenuation ---------------------------------------
@@ -1142,6 +1156,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filebroadcast_list.clear()
         for filename, data in self._filebroadcast_entries:
             self.filebroadcast_list.addItem(f"{filename} ({len(data) / 1024:.1f} KB)")
+        self._update_filebroadcast_estimate()
+
+    def _update_filebroadcast_estimate(self):
+        if not self._filebroadcast_entries:
+            self.filebroadcast_estimate_label.setText("No files loaded.")
+            return
+        planner = filebroadcast.FileBroadcastPlanner()
+        for filename, data in self._filebroadcast_entries:
+            planner.add_file(filename, data)
+        rotation_bytes = len(planner.build_rotation_bytes(config.FILEBROADCAST_CHUNK_SIZE))
+        cycle_s = rotation_bytes * 8 / config.FILEBROADCAST_SYMBOL_RATE_HZ
+        total_kb = sum(len(data) for _, data in self._filebroadcast_entries) / 1024
+        self.filebroadcast_estimate_label.setText(
+            f"{len(self._filebroadcast_entries)} file(s), {total_kb:.1f} KB total -- "
+            f"one full rotation cycle takes ~{cycle_s:.1f}s on air ({rotation_bytes} bytes incl. framing)."
+        )
 
     def _reload_all_filebroadcast_files(self, tb):
         """Full resync of tb's rotation to match self._filebroadcast_entries

@@ -22,11 +22,14 @@ number of cycles. There is deliberately no uplink/back-channel in this app
 suite, so a real closed-loop request-based hole-fill (telling the sender
 what's missing) is out of scope here, not an oversight.
 
-Per-file record/don't-record selection (record_flag exists so Phase 4's
-planned UI has somewhere to land, but stays True unconditionally for now --
-everything directory-announced is recorded automatically) is still
-deferred to Phase 4, unchanged from Phase 1/2.
-"""
+Phase 4 scope (this module): per-file record/don't-record selection is now
+real -- `record_flag` defaults to True (matches Phase 1-3's existing
+auto-record-everything behavior, so nothing already working changes by
+default), but `set_record(file_id, False)` actually stops `on_data_frame()`
+from applying any FURTHER chunks to that file (already-buffered bytes/holes
+are left exactly as they are, not discarded -- re-enabling resumes exactly
+where it left off, since the sender keeps re-broadcasting every file every
+rotation cycle regardless of who's listening)."""
 import threading
 import time
 
@@ -70,7 +73,7 @@ class FileEntry:
         # design ("sorted (offset, length) gaps... interval merge/split on
         # each received chunk").
         self.holes = [(0, total_size)] if total_size > 0 else []
-        self.record_flag = True  # Phase 4 will make this operator-toggleable; always True for now
+        self.record_flag = True  # operator-toggleable, see FileBroadcastState.set_record()
         self.first_seen_at = time.time()
         self.last_updated_at = time.time()
 
@@ -117,7 +120,21 @@ class FileBroadcastState:
             entry = self._files.get(file_id)
             if entry is None:
                 return  # data frame arrived before its directory frame this cycle -- drop, catches up next rotation
+            if not entry.record_flag:
+                return  # operator turned recording off for this file -- directory frames still update last_updated_at
             entry.apply_chunk(offset, payload)
+
+    def set_record(self, file_id, enabled: bool):
+        """Operator toggle (Phase 4 GUI record-toggle checkbox). Purely
+        gates whether FUTURE data frames get applied -- never discards
+        bytes/holes already buffered, so toggling back on simply resumes
+        (the sender re-broadcasts every file every rotation cycle
+        regardless of listeners, so there's no "missed window" to worry
+        about)."""
+        with self._lock:
+            entry = self._files.get(file_id)
+            if entry is not None:
+                entry.record_flag = enabled
 
     def get_snapshot(self):
         """Plain-data list, safe to use outside the lock (matches

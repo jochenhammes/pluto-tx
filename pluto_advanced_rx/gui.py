@@ -18,6 +18,7 @@ cannot happen here, because nothing here is C++-owned.
 """
 import signal
 import sys
+import time
 
 from PyQt5 import QtCore, QtWidgets
 
@@ -115,16 +116,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
         self.mode_tab_widget.setTabEnabled(1, False)
         self.mode_tab_widget.setTabToolTip(1, "Not implemented yet")
-        # File-Transfer: Phase 1 minimal UI (a per-file list with byte/%
-        # progress + a Save button for completed files) -- the full
-        # directory-table-with-record-toggles is Phase 4 scope (see the
-        # plan). Always live, independent of demod_mode/connection state,
-        # since the underlying GNU Radio branch is always wired too.
+        # File-Transfer: Phase 4's directory table -- this codebase's first
+        # QTableWidget (Filename/Size/Progress/Record-toggle per row),
+        # replacing Phase 1-3's plain QListWidget. Always live, independent
+        # of demod_mode/connection state, since the underlying GNU Radio
+        # branch is always wired too. Driven by the same QTimer poll of
+        # FileBroadcastState.get_snapshot() as before (see
+        # _poll_filebroadcast()) -- the lock-guarded "compute a plain
+        # snapshot under the lock, rebuild the widget from it" idiom
+        # already proven by FftProbe/waterfall_widget.py, not new
+        # cross-thread Qt signal plumbing.
         filetransfer_tab = QtWidgets.QWidget()
         filetransfer_tab_layout = QtWidgets.QVBoxLayout(filetransfer_tab)
-        self.filebroadcast_list = QtWidgets.QListWidget()
-        self.filebroadcast_list.currentRowChanged.connect(self._on_filebroadcast_selection_changed)
-        filetransfer_tab_layout.addWidget(self.filebroadcast_list)
+        # Static PHY info -- the operator needs to know what to expect/tune
+        # for; these are fixed constants (not adjustable), unlike FM/SSB's
+        # width sliders, so a plain label is enough.
+        filetransfer_tab_layout.addWidget(QtWidgets.QLabel(
+            f"PHY: {config.FILEBROADCAST_SYMBOL_RATE_HZ/1000:.0f} kbaud GFSK, "
+            f"deviation {config.FILEBROADCAST_DEVIATION_HZ/1000:.0f} kHz, BT={config.FILEBROADCAST_BT}"
+        ))
+        # Start/Stop reception -- mirrors receive_button's mute-gate
+        # pattern below (own toggle, own _style_*, defaults to NOT
+        # receiving so a fresh connect never silently starts accumulating
+        # files the operator hasn't asked for yet). Gates only WHETHER
+        # incoming frames get applied to FileBroadcastState (see
+        # _on_filebroadcast_frame()) -- the underlying GNU Radio GFSK
+        # branch keeps running regardless (cheap, passive, and its
+        # frame_count/crc_fail_count counters are what the signal-status
+        # label below reads to show "is anything even being decoded here"
+        # independently of whether the operator has pressed Start).
+        self.filebroadcast_receive_button = QtWidgets.QPushButton()
+        self.filebroadcast_receive_button.setCheckable(True)
+        self.filebroadcast_receive_button.setChecked(False)
+        self.filebroadcast_receive_button.setMinimumHeight(40)
+        self.filebroadcast_receive_button.toggled.connect(self._on_filebroadcast_receive_toggled)
+        self._style_filebroadcast_receive_button(receiving=False)
+        filetransfer_tab_layout.addWidget(self.filebroadcast_receive_button)
+        self._filebroadcast_receiving = False
+        # Live signal/tuning indicator: derived from the deframer's own
+        # frame_count/crc_fail_count -- EITHER counter moving means the
+        # bit-by-bit SYNC_WORD search is actually matching something in
+        # the incoming bit stream (a real, always-available proxy for "is
+        # there a File Broadcast signal here at all, roughly correctly
+        # tuned", since a sync match only happens after real symbol-level
+        # lock -- see filebroadcast_deframer.py), regardless of whether
+        # those frames go on to pass their CRC-16 check. Updated every
+        # _poll_filebroadcast() tick.
+        self.filebroadcast_signal_label = QtWidgets.QLabel()
+        filetransfer_tab_layout.addWidget(self.filebroadcast_signal_label)
+        self._filebroadcast_last_attempt_total = 0
+        self._filebroadcast_last_activity_time = 0.0
+        self._update_filebroadcast_signal_label()
+        self.filebroadcast_table = QtWidgets.QTableWidget(0, 4)
+        self.filebroadcast_table.setHorizontalHeaderLabels(["Filename", "Size", "Received", "Record"])
+        self.filebroadcast_table.horizontalHeader().setStretchLastSection(False)
+        self.filebroadcast_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.Stretch,
+        )
+        self.filebroadcast_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.filebroadcast_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.filebroadcast_table.currentCellChanged.connect(self._on_filebroadcast_selection_changed)
+        self.filebroadcast_table.itemChanged.connect(self._on_filebroadcast_item_changed)
+        filetransfer_tab_layout.addWidget(self.filebroadcast_table)
         self.filebroadcast_save_button = QtWidgets.QPushButton("Save Selected File...")
         self.filebroadcast_save_button.setEnabled(False)
         self.filebroadcast_save_button.clicked.connect(self._on_filebroadcast_save_clicked)
@@ -434,7 +487,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
                   self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
                   self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
-                  self.receive_button, self.autotune_button):
+                  self.receive_button, self.autotune_button, self.filebroadcast_receive_button):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
         if not enabled:
@@ -444,6 +497,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.receive_button.setText("Receiving (click to mute)" if receiving else "Muted (click to receive)")
         color = "#27ae60" if receiving else "#7f8c8d"
         self.receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
+
+    def _style_filebroadcast_receive_button(self, receiving: bool):
+        self.filebroadcast_receive_button.setText(
+            "Receiving Files (click to stop)" if receiving else "Stopped (click to start receiving)"
+        )
+        color = "#27ae60" if receiving else "#7f8c8d"
+        self.filebroadcast_receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -661,13 +721,56 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.rade_status_label.setText("Not synced")
 
+    def _on_filebroadcast_receive_toggled(self, checked):
+        self._filebroadcast_receiving = checked
+        self._style_filebroadcast_receive_button(receiving=checked)
+
+    def _update_filebroadcast_signal_label(self):
+        """Independent of _filebroadcast_receiving (Start/Stop) -- reads
+        FileBroadcastDeframer's own counters directly off the flowgraph,
+        which keeps running/counting regardless of the Start/Stop button,
+        so the operator can see whether they're even correctly tuned
+        BEFORE pressing Start. See the button's own construction comment
+        for why either counter moving is a valid proxy for "a real signal
+        is being decoded here", not just successfully-parsed frames."""
+        if self.tb is None:
+            self.filebroadcast_signal_label.setText("Not connected.")
+            return
+        frame_count = self.tb.filebroadcast_deframer.frame_count
+        crc_fail_count = self.tb.filebroadcast_deframer.crc_fail_count
+        total = frame_count + crc_fail_count
+        if total > self._filebroadcast_last_attempt_total:
+            self._filebroadcast_last_attempt_total = total
+            self._filebroadcast_last_activity_time = time.time()
+        recently_active = (
+            self._filebroadcast_last_activity_time > 0
+            and time.time() - self._filebroadcast_last_activity_time < 2.0
+        )
+        if recently_active:
+            self.filebroadcast_signal_label.setText(
+                f"Signal detected -- {frame_count} valid frame(s), {crc_fail_count} CRC failure(s) since connecting."
+            )
+        else:
+            self.filebroadcast_signal_label.setText(
+                "No signal detected -- check frequency/tuning (no File Broadcast sync word seen recently)."
+            )
+
     def _on_filebroadcast_frame(self, frame):
         """Passed to AdvancedRxFlowgraph as on_filebroadcast_frame -- called
         from FileBroadcastDeframer.work() on the GNU Radio SCHEDULER thread,
         not the Qt thread. FileBroadcastState's own methods are lock-
         guarded (safe to call directly from here); nothing here touches any
         Qt widget -- _poll_filebroadcast() (Qt-thread, timer-driven) is what
-        actually updates the list, via get_snapshot()."""
+        actually updates the list, via get_snapshot().
+
+        Gated on _filebroadcast_receiving (Start/Stop button): while
+        stopped, frames are simply dropped here rather than applied to
+        FileBroadcastState -- the GNU Radio GFSK branch itself keeps
+        running regardless (see the Start/Stop button's construction
+        comment), so the signal-status label stays accurate even while
+        stopped."""
+        if not self._filebroadcast_receiving:
+            return
         if frame["type"] == "directory":
             self._filebroadcast_state.on_directory_frame(
                 frame["file_id"], frame["filename"], frame["total_size"], frame["checksum"],
@@ -675,36 +778,80 @@ class MainWindow(QtWidgets.QMainWindow):
         elif frame["type"] == "data":
             self._filebroadcast_state.on_data_frame(frame["file_id"], frame["offset"], frame["payload"])
 
+    _FB_COL_FILENAME, _FB_COL_SIZE, _FB_COL_RECEIVED, _FB_COL_RECORD = range(4)
+
     def _poll_filebroadcast(self):
+        self._update_filebroadcast_signal_label()
         # Independent of self.tb's connection state (unlike _poll_fft) --
         # the state itself lives on MainWindow and should keep showing
         # whatever was already received even across a brief reconnect.
         snapshot = self._filebroadcast_state.get_snapshot()
         self._filebroadcast_snapshot = snapshot
-        current_row = self.filebroadcast_list.currentRow()
-        self.filebroadcast_list.blockSignals(True)
-        self.filebroadcast_list.clear()
-        for entry in snapshot:
-            pct = 100.0 * entry["bytes_received"] / entry["total_size"] if entry["total_size"] else 0.0
-            status = "COMPLETE" if entry["is_complete"] else f"{pct:.0f}%"
-            self.filebroadcast_list.addItem(
-                f"[{entry['file_id']}] {entry['filename']} "
-                f"({entry['bytes_received']}/{entry['total_size']} bytes, {status})"
-            )
-        if 0 <= current_row < self.filebroadcast_list.count():
-            self.filebroadcast_list.setCurrentRow(current_row)
-        self.filebroadcast_list.blockSignals(False)
-        self._on_filebroadcast_selection_changed(self.filebroadcast_list.currentRow())
+        table = self.filebroadcast_table
+        selected_file_id = self._filebroadcast_selected_file_id()
+        # blockSignals covers both currentCellChanged (row count/selection
+        # churn while rebuilding) and itemChanged (setCheckState() below
+        # would otherwise fire _on_filebroadcast_item_changed() on every
+        # single poll tick, not just real operator clicks).
+        table.blockSignals(True)
+        table.setRowCount(len(snapshot))
+        restore_row = -1
+        for row, entry in enumerate(snapshot):
+            if entry["file_id"] == selected_file_id:
+                restore_row = row
+            name_item = QtWidgets.QTableWidgetItem(entry["filename"])
+            name_item.setData(QtCore.Qt.UserRole, entry["file_id"])
+            name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemIsEditable)
+            table.setItem(row, self._FB_COL_FILENAME, name_item)
 
-    def _on_filebroadcast_selection_changed(self, row):
-        complete = 0 <= row < len(self._filebroadcast_snapshot) and self._filebroadcast_snapshot[row]["is_complete"]
-        self.filebroadcast_save_button.setEnabled(complete)
+            size_item = QtWidgets.QTableWidgetItem(f"{entry['total_size']} B")
+            size_item.setFlags(size_item.flags() & ~QtCore.Qt.ItemIsEditable)
+            table.setItem(row, self._FB_COL_SIZE, size_item)
+
+            pct = 100.0 * entry["bytes_received"] / entry["total_size"] if entry["total_size"] else 0.0
+            status = "COMPLETE" if entry["is_complete"] else f"{entry['bytes_received']}/{entry['total_size']} ({pct:.0f}%)"
+            recv_item = QtWidgets.QTableWidgetItem(status)
+            recv_item.setFlags(recv_item.flags() & ~QtCore.Qt.ItemIsEditable)
+            table.setItem(row, self._FB_COL_RECEIVED, recv_item)
+
+            record_item = QtWidgets.QTableWidgetItem()
+            record_item.setFlags(
+                (record_item.flags() | QtCore.Qt.ItemIsUserCheckable) & ~QtCore.Qt.ItemIsEditable
+            )
+            record_item.setCheckState(QtCore.Qt.Checked if entry["record_flag"] else QtCore.Qt.Unchecked)
+            record_item.setData(QtCore.Qt.UserRole, entry["file_id"])
+            table.setItem(row, self._FB_COL_RECORD, record_item)
+        if restore_row >= 0:
+            table.setCurrentCell(restore_row, 0)
+        table.blockSignals(False)
+        self._on_filebroadcast_selection_changed()
+
+    def _filebroadcast_selected_file_id(self):
+        row = self.filebroadcast_table.currentRow()
+        if not (0 <= row < len(self._filebroadcast_snapshot)):
+            return None
+        return self._filebroadcast_snapshot[row]["file_id"]
+
+    def _on_filebroadcast_selection_changed(self, *_args):
+        # *_args swallows currentCellChanged's (row, col, prevRow, prevCol)
+        # signature -- the actual selection is re-read via currentRow()
+        # either way (also called directly from _poll_filebroadcast() after
+        # a rebuild, with no signal args at all).
+        file_id = self._filebroadcast_selected_file_id()
+        entry = next((e for e in self._filebroadcast_snapshot if e["file_id"] == file_id), None)
+        self.filebroadcast_save_button.setEnabled(entry is not None and entry["is_complete"])
+
+    def _on_filebroadcast_item_changed(self, item):
+        if item.column() != self._FB_COL_RECORD:
+            return
+        file_id = item.data(QtCore.Qt.UserRole)
+        self._filebroadcast_state.set_record(file_id, item.checkState() == QtCore.Qt.Checked)
 
     def _on_filebroadcast_save_clicked(self):
-        row = self.filebroadcast_list.currentRow()
-        if not (0 <= row < len(self._filebroadcast_snapshot)):
+        file_id = self._filebroadcast_selected_file_id()
+        entry = next((e for e in self._filebroadcast_snapshot if e["file_id"] == file_id), None)
+        if entry is None:
             return
-        entry = self._filebroadcast_snapshot[row]
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Received File", entry["filename"])
         if not path:
             return
@@ -1132,6 +1279,8 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_fft_zoom(self.zoom_slider.value())  # carry the current zoom/averaging over too --
         new_tb.set_fft_avg_count(self.avg_slider.value())  # a fresh FftProbe otherwise silently resets to 1x/off
         self._fft_gen = -1
+        self._filebroadcast_last_attempt_total = 0  # new tb's deframer counters start at 0 too, see _update_filebroadcast_signal_label()
+        self._filebroadcast_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb
         self._sync_waterfall()
@@ -1171,6 +1320,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb.shutdown()
         self.tb = None
         self._fft_gen = -1
+        self._filebroadcast_last_attempt_total = 0
+        self._filebroadcast_last_activity_time = 0.0
         self.waterfall.clear()
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
@@ -1185,6 +1336,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.receive_button.setChecked(False)
         self.receive_button.blockSignals(False)
         self._style_receive_button(receiving=False)
+        # Same reset-only-on-disconnect reasoning as _rx_muted above --
+        # a fresh connect (or reconnect via _on_bandwidth_changed, which
+        # does NOT call _disconnect()) shouldn't silently resume dumping
+        # frames into FileBroadcastState without the operator pressing
+        # Start again.
+        self._filebroadcast_receiving = False
+        self.filebroadcast_receive_button.blockSignals(True)
+        self.filebroadcast_receive_button.setChecked(False)
+        self.filebroadcast_receive_button.blockSignals(False)
+        self._style_filebroadcast_receive_button(receiving=False)
 
     def _connect(self, uri_text):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -1238,6 +1399,8 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_fft_zoom(self.zoom_slider.value())  # carry the operator's current zoom/averaging
         new_tb.set_fft_avg_count(self.avg_slider.value())  # preference over a fresh connect too
         self._fft_gen = -1
+        self._filebroadcast_last_attempt_total = 0
+        self._filebroadcast_last_activity_time = 0.0
         self.tb = new_tb
         self._sync_waterfall()
         new_tb.start()
