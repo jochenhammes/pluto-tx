@@ -276,6 +276,50 @@ FILEBROADCAST_GAIN_MU = 0.005
 FILEBROADCAST_CHUNK_SIZE = 64
 FILEBROADCAST_MAX_FILENAME_LEN = 64  # matches filebroadcast.MAX_FILENAME_LEN
 
+# --- PSK31 (BPSK31 keyboard-to-keyboard chat digimode) -- see
+# pluto_tx/psk31.py and the plan at ~/.claude/plans/swirling-waddling-noodle.md.
+# Symbol rate is fixed by international PSK31 convention, not adjustable.
+PSK31_SYMBOL_RATE_HZ = 31.25
+# 1500Hz: a conventional PSK31 audio-tone offset, roughly centered in a
+# typical SSB voice passband -- the real-hardware-verified value used
+# throughout this mode's own Phase 0 PHY testing (2026-09-14 session).
+PSK31_DEFAULT_TONE_HZ = 1500.0
+# Sanity range for the operator's tone-offset control (mirrors
+# DIGITEXT_MIN_FREQ_HZ_FLOOR/DIGITEXT_MIN_FREQ_HZ's own offset-slider
+# idiom) -- a typical SSB voice passband.
+PSK31_TONE_RANGE_HZ = (300.0, 2700.0)
+PSK31_MAX_TEXT_LEN = 120  # a sanity cap only, mirrors DIGITEXT_MAX_TEXT_LEN
+# Real, measured finding from this mode's own Phase 0 real-hardware
+# testing (2026-09-14 session, staged real-hardware round trips over the
+# air): the receiver's Costas loop (carrier phase) and symbol_sync_ff
+# (symbol timing) genuinely need several SECONDS of settle time on real
+# hardware to reach stable lock, not the tens-of-milliseconds scale
+# GFSK's own preamble needed -- a 16-character (~0.5s) preamble looked
+# adequate on one short test message but was NOT actually sufficient (a
+# longer message revealed real, reproducible mid-transmission decode
+# failure in its first half); 60 characters (~1.9s) still failed; 150
+# characters (~4.8s) made a previously-failing message decode 100%
+# correctly, reproducibly, on repeat real-hardware runs. 200 is a
+# deliberate margin above that confirmed-sufficient 150, not itself
+# re-verified at exactly this value -- revisit if real testing in Phase 3/4
+# shows it's still not enough on a different link.
+PSK31_PREAMBLE_CHARS = 200
+PSK31_TAIL_S = 0.15  # mirrors DIGITEXT_TAIL_S's own real-hardware-motivated rationale
+# Unconditional backstop watchdog, mirrors DIGITEXT_AUTO_UNKEY_WATCHDOG_S.
+PSK31_AUTO_UNKEY_WATCHDOG_S = 2.0
+# Real, measured, and important caveat (2026-09-14 Phase 0 testing, see the
+# plan's own progress log): this specific Pluto+RTL-SDR pairing showed a
+# REAL, substantial, CONTINUOUSLY DRIFTING frequency offset between TX and
+# RX (observed drifting over 150Hz across ~40 minutes of testing, never
+# settling to a stable value) -- PSK31's ~50-60Hz occupied bandwidth makes
+# this a serious problem a fixed/hardcoded correction cannot solve. There
+# is deliberately NO frequency-correction constant here: Phase 4's RX
+# integration needs a real AFC/frequency-search mechanism (the plan
+# recommends reusing pluto_advanced_rx/rade_autotune.py's already-built
+# "Auto Fine-Tune" feature as a direct precedent, not designing from
+# scratch) rather than a guessed number that will already be stale by the
+# time this ships.
+
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [

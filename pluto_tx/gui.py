@@ -25,7 +25,8 @@ class MainWindow(QtWidgets.QMainWindow):
                  m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
                  digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
-                 digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ):
+                 digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ,
+                 psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ):
         """Builds the window in a disconnected/default state using the given
         initial settings (mirrors PlutoTxFlowgraph's own constructor
         defaults), then immediately attempts one real connection via
@@ -39,14 +40,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb = None
         self.setWindowTitle("PlutoSDR TX")
         self._armed = True  # False after emergency stop, until re-armed
-        # The last non-Digitext mode actually selected -- restored when the
-        # operator clicks back to the "Audio" tab (see _on_mode_tab_changed()
-        # below). Defaults to FM if the app was started directly in Digitext.
-        self._last_audio_mode = mode if mode != PlutoTxFlowgraph.MODE_DIGITEXT else PlutoTxFlowgraph.MODE_FM
+        # The last non-Digimodes-tab mode actually selected -- restored when
+        # the operator clicks back to the "Audio" tab (see
+        # _on_mode_tab_changed() below). Defaults to FM if the app was
+        # started directly in a Digimodes-tab mode (Digitext/PSK31).
+        self._last_audio_mode = mode if mode not in self._mode_to_tab() else PlutoTxFlowgraph.MODE_FM
+        # Remembers which member of each MULTI-MEMBER tab (currently just
+        # Digimodes: Waterfall Writer vs. PSK31) was last active -- mirrors
+        # _last_audio_mode's own "remember last selection" idea, generalized
+        # per-tab. Seeded so a fresh app start in either Digimodes-tab mode
+        # is remembered correctly even before _on_mode_changed() ever fires.
+        self._last_tab_mode = {1: PlutoTxFlowgraph.MODE_DIGITEXT, 2: PlutoTxFlowgraph.MODE_FILEBROADCAST}
+        if mode in self._TAB_HOME_MODE.get(1, ()):
+            self._last_tab_mode[1] = mode
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
         # for why this exists (real bug: repeated sends of the same text cut
         # off early).
         self._digitext_ptt_epoch = 0
+        # Same per-press staleness guard as Digitext's, for PSK31's own
+        # auto-unkey timers (see _schedule_psk31_auto_unkey()).
+        self._psk31_ptt_epoch = 0
         self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
 
@@ -220,6 +233,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # dependencies (see pluto_tx/digitext.py), not an external
         # from-source C library that might be missing.
         self.mode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
+        # PSK31 (BPSK31 keyboard chat): same reasoning, always available,
+        # pure Python/NumPy (see pluto_tx/psk31.py).
+        self.mode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
         # File Broadcast: always available, no gating block, same reasoning
         # as Digitext (pure Python/NumPy encoder, no external dependency).
         self.mode_combo.addItem("File Broadcast", PlutoTxFlowgraph.MODE_FILEBROADCAST)
@@ -344,12 +360,19 @@ class MainWindow(QtWidgets.QMainWindow):
         audio_tab_layout.addWidget(self.rade_row_widget)
         self._update_rade_controls_enabled()
 
-        # --- Digitext row -- lives in the "Digimodes" tab (not audio_tab_layout
-        # like every mode above), per explicit request ("Textfeld im Mode-Tab").
-        # _on_mode_changed() below auto-switches mode_tab_widget to this tab
-        # whenever Digitext is selected -- one-directional (selecting the mode
-        # reveals its home tab; manually clicking the tab is just navigation,
-        # doesn't itself change the active TX mode).
+        # --- Digitext controls -- live in the "Digimodes" tab (not
+        # audio_tab_layout like every mode above), per explicit request
+        # ("Textfeld im Mode-Tab"). Now wrapped in self.digitext_group_widget
+        # (a QWidget, same wrap-in-a-QWidget pattern already proven for the
+        # M17/FreeDV/RADE rows in the Audio tab) since the Digimodes tab
+        # hosts a SECOND mode (PSK31) as of this session -- both groups'
+        # visibility is toggled by _update_digitext_controls_enabled()/
+        # _update_psk31_controls_enabled() (see below), not by tab
+        # selection alone anymore (that only decides WHICH tab is showing,
+        # not which of the two groups within it).
+        digitext_group = QtWidgets.QWidget()
+        digitext_group_layout = QtWidgets.QVBoxLayout(digitext_group)
+        digitext_group_layout.setContentsMargins(0, 0, 0, 0)
         digitext_row = QtWidgets.QHBoxLayout()
         digitext_row.addWidget(QtWidgets.QLabel("Text:"))
         self.digitext_text_edit = QtWidgets.QLineEdit(digitext_text)
@@ -385,7 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digitext_zoom_spin.valueChanged.connect(self._on_digitext_zoom_changed)
         digitext_row.addWidget(self.digitext_zoom_spin)
         digitext_row.addStretch(1)
-        digimodes_tab_layout.addLayout(digitext_row)
+        digitext_group_layout.addLayout(digitext_row)
 
         # --- Offset slider -- by explicit request ("Slider... 4000Hz soll das
         # Maximum sein, ich würde gerne kleinere Werte probieren"): lets the
@@ -418,7 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digitext_offset_label = QtWidgets.QLabel(f"{int(digitext_min_freq_hz)} Hz")
         self.digitext_offset_label.setMinimumWidth(60)
         digitext_offset_row.addWidget(self.digitext_offset_label)
-        digimodes_tab_layout.addLayout(digitext_offset_row)
+        digitext_group_layout.addLayout(digitext_offset_row)
 
         self.digitext_estimate_label = QtWidgets.QLabel()
         self.digitext_estimate_label.setToolTip(
@@ -428,10 +451,63 @@ class MainWindow(QtWidgets.QMainWindow):
             "abgeschaltet) -- die Zahl bleibt als Orientierungshilfe stehen, begrenzt aber "
             "nichts."
         )
-        digimodes_tab_layout.addWidget(self.digitext_estimate_label)
+        digitext_group_layout.addWidget(self.digitext_estimate_label)
+        digimodes_tab_layout.addWidget(digitext_group)
+        self.digitext_group_widget = digitext_group
+
+        # --- PSK31 controls -- own group widget, same pattern as
+        # digitext_group above, coexisting in the same "Digimodes" tab.
+        psk31_group = QtWidgets.QWidget()
+        psk31_group_layout = QtWidgets.QVBoxLayout(psk31_group)
+        psk31_group_layout.setContentsMargins(0, 0, 0, 0)
+        psk31_text_row = QtWidgets.QHBoxLayout()
+        psk31_text_row.addWidget(QtWidgets.QLabel("Text:"))
+        self.psk31_text_edit = QtWidgets.QLineEdit(psk31_text)
+        self.psk31_text_edit.setMaxLength(config.PSK31_MAX_TEXT_LEN)
+        self.psk31_text_edit.setPlaceholderText("Type a line, then press PTT to send it")
+        self.psk31_text_edit.textChanged.connect(self._on_psk31_text_changed)
+        self.psk31_text_edit.setMinimumWidth(420)
+        self.psk31_text_edit.setStyleSheet("font-size: 13pt;")
+        psk31_text_row.addWidget(self.psk31_text_edit)
+        psk31_group_layout.addLayout(psk31_text_row)
+
+        psk31_tone_row = QtWidgets.QHBoxLayout()
+        psk31_tone_row.addWidget(QtWidgets.QLabel("Tone (Hz):"))
+        self.psk31_tone_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.psk31_tone_slider.setRange(int(config.PSK31_TONE_RANGE_HZ[0]), int(config.PSK31_TONE_RANGE_HZ[1]))
+        self.psk31_tone_slider.setSingleStep(10)
+        self.psk31_tone_slider.setPageStep(100)
+        self.psk31_tone_slider.setValue(int(psk31_tone_hz))
+        self.psk31_tone_slider.setToolTip(
+            "Audio tone offset from the carrier -- the receiving operator needs to "
+            "tune (or auto-tune) to this same tone. Real hardware testing found a "
+            "substantial, continuously DRIFTING frequency offset can appear between "
+            "independent TX/RX devices -- if the other station reports not "
+            "decoding, this is the first thing worth double-checking/re-tuning."
+        )
+        self.psk31_tone_slider.valueChanged.connect(self._on_psk31_tone_changed)
+        psk31_tone_row.addWidget(self.psk31_tone_slider)
+        self.psk31_tone_label = QtWidgets.QLabel(f"{int(psk31_tone_hz)} Hz")
+        self.psk31_tone_label.setMinimumWidth(60)
+        psk31_tone_row.addWidget(self.psk31_tone_label)
+        psk31_group_layout.addLayout(psk31_tone_row)
+
+        self.psk31_sent_log = QtWidgets.QTextEdit()
+        self.psk31_sent_log.setReadOnly(True)
+        self.psk31_sent_log.setMaximumHeight(120)
+        self.psk31_sent_log.setToolTip(
+            "Local echo of what THIS station has sent -- pluto_tx has no receive "
+            "capability at all, so this can never show what was received; that "
+            "only ever appears in a separately-running pluto_advanced_rx instance."
+        )
+        psk31_group_layout.addWidget(self.psk31_sent_log)
+        digimodes_tab_layout.addWidget(psk31_group)
+        self.psk31_group_widget = psk31_group
+
         digimodes_tab_layout.addStretch(1)
         self._update_digitext_estimate()
         self._update_digitext_controls_enabled()
+        self._update_psk31_controls_enabled()
 
         # --- File Broadcast rotation list -- lives in the "File-Transfer"
         # tab, same "own tab" convention as Digitext's Digimodes tab.
@@ -736,6 +812,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rade_controls_enabled()
         self._digitext_connected = enabled
         self._update_digitext_controls_enabled()
+        self._psk31_connected = enabled
+        self._update_psk31_controls_enabled()
         self._filebroadcast_connected = enabled
         self._update_filebroadcast_controls_enabled()
 
@@ -772,15 +850,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # system's libcodec2.
 
     def _update_digitext_controls_enabled(self):
-        # No visibility toggle -- the row lives in its own "Digimodes" tab
-        # (not audio_tab_layout), which _on_mode_changed() already switches
-        # to/away from; enabled state within it still follows connection
-        # state, same as every other control in the app.
+        # Visibility toggle needed as of this session: the "Digimodes" tab
+        # now hosts a SECOND mode (PSK31) too, so tab selection alone no
+        # longer disambiguates which group's controls should show -- mirrors
+        # _update_m17_controls_enabled()'s own reasoning exactly.
+        is_digitext_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_DIGITEXT
+        self.digitext_group_widget.setVisible(is_digitext_mode)
         connected = getattr(self, "_digitext_connected", True)
         self.digitext_text_edit.setEnabled(connected)
         self.digitext_layout_combo.setEnabled(connected)
         self.digitext_zoom_spin.setEnabled(connected)
         self.digitext_offset_slider.setEnabled(connected)
+
+    def _update_psk31_controls_enabled(self):
+        # Structural mirror of _update_digitext_controls_enabled() above.
+        is_psk31_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_PSK31
+        self.psk31_group_widget.setVisible(is_psk31_mode)
+        connected = getattr(self, "_psk31_connected", True)
+        self.psk31_text_edit.setEnabled(connected)
+        self.psk31_tone_slider.setEnabled(connected)
 
     def _update_filebroadcast_controls_enabled(self):
         # No visibility toggle -- lives in its own "File-Transfer" tab
@@ -885,10 +973,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # Modes whose IQ/audio output is directly SSB-injectable, so they make
     # sense with an audio-only (Soundcard) device -- RADE's raw IQ real part
-    # (see devices/soundcard.py) and Digitext's own audio (already sits in
-    # the normal SSB voice band from DIGITEXT_MIN_FREQ_HZ upward, see
-    # digitext.py -- no extra shifting needed, same reasoning as RADE's).
-    _AUDIO_ONLY_CAPABLE_MODES = (PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT)
+    # (see devices/soundcard.py), Digitext's own audio (already sits in the
+    # normal SSB voice band from DIGITEXT_MIN_FREQ_HZ upward, see
+    # digitext.py), and PSK31's own audio (likewise already a plain SSB-
+    # injectable tone, see psk31.py) -- no extra shifting needed for either.
+    _AUDIO_ONLY_CAPABLE_MODES = (PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31)
 
     def _sync_mode_combo_availability(self):
         """Greys out every mode except the audio-only-capable ones (RADE,
@@ -910,6 +999,7 @@ class MainWindow(QtWidgets.QMainWindow):
             PlutoTxFlowgraph.MODE_FREEDV: FREEDV_AVAILABLE,
             PlutoTxFlowgraph.MODE_RADE: RADE_AVAILABLE,
             PlutoTxFlowgraph.MODE_DIGITEXT: True,
+            PlutoTxFlowgraph.MODE_PSK31: True,
         }
         for mode, available in module_available.items():
             idx = self.mode_combo.findData(mode)
@@ -995,31 +1085,47 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.set_limiter_enabled(checked)
 
+    # tab index -> the TUPLE of modes that tab can show; Audio (0) has no
+    # entry (means "whichever of FM/SSB/M17/FreeDV/RADE was last used",
+    # tracked by self._last_audio_mode). Digimodes (1) now hosts TWO modes
+    # (Waterfall Writer/Digitext and PSK31) as of this session -- generalized
+    # from a single bare mode per tab to a tuple, with self._last_tab_mode
+    # remembering which member was last active in each multi-member tab
+    # (same "remember last selection" idea _last_audio_mode already used
+    # for tab 0, now applied per-tab).
+    _TAB_HOME_MODE = {
+        1: (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31),
+        2: (PlutoTxFlowgraph.MODE_FILEBROADCAST,),
+    }
+
+    def _mode_to_tab(self):
+        """Flattened {mode: tab_idx} lookup derived from _TAB_HOME_MODE --
+        computed fresh each call (the dict is tiny), not cached, so it never
+        goes stale if _TAB_HOME_MODE itself ever changes at runtime (it
+        doesn't today, but this way there's nothing to keep in sync)."""
+        return {m: t for t, modes in self._TAB_HOME_MODE.items() for m in modes}
+
     def _on_mode_changed(self, idx):
         mode = self.mode_combo.currentData()
-        if mode not in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_FILEBROADCAST):
+        mode_to_tab = self._mode_to_tab()
+        target_tab = mode_to_tab.get(mode, 0)
+        if target_tab == 0:
             self._last_audio_mode = mode  # see _on_mode_tab_changed()
+        else:
+            self._last_tab_mode[target_tab] = mode
         if self.tb is not None:
             self.tb.set_mode(mode)
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
         self._update_rade_controls_enabled()
-        # Bidirectional with _on_mode_tab_changed() below: selecting
-        # Digitext/File Broadcast here reveals its home tab; clicking the
-        # tab itself also drives mode selection the other way.
+        self._update_digitext_controls_enabled()
+        self._update_psk31_controls_enabled()
+        # Bidirectional with _on_mode_tab_changed() below: selecting a
+        # Digimodes-tab mode (or File Broadcast) here reveals its home tab;
+        # clicking the tab itself also drives mode selection the other way.
         # setCurrentIndex() is a no-op (no signal) if already on the target
         # tab, so this never fights that handler.
-        if mode == PlutoTxFlowgraph.MODE_DIGITEXT:
-            target_tab = 1
-        elif mode == PlutoTxFlowgraph.MODE_FILEBROADCAST:
-            target_tab = 2
-        else:
-            target_tab = 0
         self.mode_tab_widget.setCurrentIndex(target_tab)
-
-    # tab index -> the one mode that tab is "home" for; Audio (0) has no
-    # single home mode (whichever of FM/SSB/M17/FreeDV/RADE was last used).
-    _TAB_HOME_MODE = {1: PlutoTxFlowgraph.MODE_DIGITEXT, 2: PlutoTxFlowgraph.MODE_FILEBROADCAST}
 
     def _on_mode_tab_changed(self, tab_idx):
         """Reverse direction of _on_mode_changed()'s tab auto-switch: the
@@ -1029,32 +1135,45 @@ class MainWindow(QtWidgets.QMainWindow):
         after selecting Digitext, mode_combo (the only control that
         actually changed self.tb.mode) was hidden away in the Audio tab
         with no visible prompt to look for it there, and the operator had
-        no way back to FM/SSB from the Digimodes tab. Generalized to File
-        Broadcast's own tab (index 2) the same way, now that it's a real
-        (not disabled-placeholder) tab too."""
+        no way back to FM/SSB from the Digimodes tab. Generalized to a
+        MULTI-MEMBER tab (Digimodes now hosts both Waterfall Writer and
+        PSK31): landing on such a tab restores whichever of its members
+        was last active (self._last_tab_mode), not a single hardcoded mode."""
+        mode_to_tab = self._mode_to_tab()
         current_mode = self.mode_combo.currentData()
-        home_mode = self._TAB_HOME_MODE.get(tab_idx)
-        if home_mode is not None:
-            if current_mode != home_mode:
-                idx = self.mode_combo.findData(home_mode)
-                if idx >= 0 and self.mode_combo.model().item(idx).isEnabled():
+        home_modes = self._TAB_HOME_MODE.get(tab_idx)
+        if home_modes is not None:
+            if current_mode not in home_modes:
+                target_mode = self._last_tab_mode.get(tab_idx, home_modes[0])
+                idx = self.mode_combo.findData(target_mode)
+                if idx < 0 or not self.mode_combo.model().item(idx).isEnabled():
+                    # Remembered/first member isn't selectable right now
+                    # (e.g. an audio-only Soundcard device disabled one
+                    # alternative) -- fall back to the first enabled member.
+                    idx = -1
+                    for candidate in home_modes:
+                        i = self.mode_combo.findData(candidate)
+                        if i >= 0 and self.mode_combo.model().item(i).isEnabled():
+                            idx = i
+                            break
+                if idx >= 0:
                     self.mode_combo.setCurrentIndex(idx)
             return
         # tab_idx == 0 (Audio): only act if the combo is currently showing
-        # one of the OTHER tabs' home modes (Digitext/File Broadcast) --
-        # leave it alone if it's already a plain audio mode.
-        if current_mode not in self._TAB_HOME_MODE.values():
+        # one of the OTHER tabs' modes -- leave it alone if it's already a
+        # plain audio mode.
+        if current_mode not in mode_to_tab:
             return
         target_idx = self.mode_combo.findData(self._last_audio_mode)
         if target_idx < 0 or not self.mode_combo.model().item(target_idx).isEnabled():
             # Last-used audio mode isn't selectable right now (e.g. an
             # audio-only Soundcard device is connected, which greys out
-            # everything except RADE/Digitext) -- fall back to the first
-            # other enabled, non-tab-home entry, or give up silently rather
-            # than force an invalid selection.
+            # everything except the audio-only-capable modes) -- fall back
+            # to the first other enabled, non-tab-home entry, or give up
+            # silently rather than force an invalid selection.
             target_idx = -1
             for i in range(self.mode_combo.count()):
-                if (self.mode_combo.itemData(i) not in self._TAB_HOME_MODE.values()
+                if (self.mode_combo.itemData(i) not in mode_to_tab
                         and self.mode_combo.model().item(i).isEnabled()):
                     target_idx = i
                     break
@@ -1081,6 +1200,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.set_digitext_min_freq_hz(float(value))
         self._update_digitext_estimate()
+
+    def _on_psk31_text_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_psk31_text(text)
+
+    def _on_psk31_tone_changed(self, value):
+        self.psk31_tone_label.setText(f"{value} Hz")
+        if self.tb is not None:
+            self.tb.set_psk31_tone_hz(float(value))
 
     def _update_digitext_estimate(self):
         text = self.digitext_text_edit.text()
@@ -1262,6 +1390,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ptt_button.setText("PTT (click to stop)")
             self._set_indicator_on_air()
             self._schedule_digitext_auto_unkey()
+            self._schedule_psk31_auto_unkey()
+            self._log_psk31_sent()
         else:
             self.ptt_button.setText("PTT (click to send)")
             self._release_ptt()
@@ -1272,6 +1402,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb.key_ptt()
         self._set_indicator_on_air()
         self._schedule_digitext_auto_unkey()
+        self._schedule_psk31_auto_unkey()
+        self._log_psk31_sent()
 
     def _on_ptt_released(self):
         if self.tb is None or not self.tb.keyed:
@@ -1374,6 +1506,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _digitext_watchdog_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._digitext_ptt_epoch:
+            return
+        if self.tb.keyed:
+            self._reset_digitext_ptt_visual()
+            self._release_ptt()
+
+    def _log_psk31_sent(self):
+        # Local echo only -- pluto_tx can never show what was received, see
+        # psk31_sent_log's own tooltip/docstring context.
+        if self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_PSK31:
+            return
+        text = self.psk31_text_edit.text()
+        if text:
+            self.psk31_sent_log.append(text)
+
+    def _schedule_psk31_auto_unkey(self):
+        """Structural mirror of _schedule_digitext_auto_unkey() -- see that
+        method's docstring for the real per-press-epoch bug this same
+        pattern was built to fix (repeated identical sends cutting off
+        early because a stale timer from an earlier press fired mid-way
+        through a new one)."""
+        if self.tb is None or self.mode_combo.currentData() != PlutoTxFlowgraph.MODE_PSK31:
+            return
+        token = self.tb
+        self._psk31_ptt_epoch += 1
+        epoch = self._psk31_ptt_epoch
+        QtCore.QTimer.singleShot(
+            int(self.tb.psk31_duration_s * 1000),
+            lambda: self._finish_psk31_auto_unkey(token, epoch),
+        )
+        QtCore.QTimer.singleShot(
+            int((self.tb.psk31_duration_s + config.PSK31_AUTO_UNKEY_WATCHDOG_S) * 1000),
+            lambda: self._psk31_watchdog_unkey(token, epoch),
+        )
+
+    def _finish_psk31_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._psk31_ptt_epoch or not self.tb.keyed:
+            return
+        self._reset_digitext_ptt_visual()
+        self._release_ptt()
+
+    def _psk31_watchdog_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._psk31_ptt_epoch:
             return
         if self.tb.keyed:
             self._reset_digitext_ptt_visual()
@@ -1503,6 +1677,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 digitext_layout=self.digitext_layout_combo.currentData(),
                 digitext_zoom=self.digitext_zoom_spin.value(),
                 digitext_min_freq_hz=float(self.digitext_offset_slider.value()),
+                psk31_text=self.psk31_text_edit.text(),
+                psk31_tone_hz=float(self.psk31_tone_slider.value()),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")

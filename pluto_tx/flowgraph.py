@@ -29,6 +29,7 @@ from . import digitext
 from . import dynamics
 from . import filebroadcast
 from .filebroadcast_source import FileBroadcastSource
+from . import psk31
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
 # install-m17.sh), not something every pluto_tx user necessarily has. The
@@ -91,6 +92,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_RADE = 4
     MODE_DIGITEXT = 5
     MODE_FILEBROADCAST = 6
+    MODE_PSK31 = 7
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -98,7 +100,8 @@ class PlutoTxFlowgraph(gr.top_block):
                  m17_src_callsign="", m17_dst_callsign=config.M17_DEFAULT_DST_CALLSIGN,
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
                  digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
-                 digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ):
+                 digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ,
+                 psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -453,6 +456,37 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
         self.connect(self.digitext_audio_gain, self.digitext_audio_sink)
 
+        # --- PSK31 branch (BPSK31 keyboard-chat digimode, pluto_tx/psk31.py
+        # -- see the plan). Architecturally a direct structural mirror of
+        # the Digitext branch just above: a one-shot rebuilt-per-press
+        # vector_source_f feeding this app's existing Hilbert-based USB
+        # modulation chain (own dedicated instances), plus the same
+        # Soundcard-output alternative. Unlike File Broadcast's raw-IQ
+        # GFSK branch below, PSK31 is audio-domain (like Digitext/FreeDV),
+        # so it reuses this technique instead of a separate IQ path.
+        self.psk31_text = psk31_text
+        self.psk31_tone_hz = psk31_tone_hz
+        self._psk31_audio = None
+        self._psk31_audio_dirty = True
+        self.psk31_duration_s = 0.0
+        self.psk31_source = blocks.vector_source_f([0.0], repeat=False)
+        self.psk31_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+        # fractional_bw=0.4 -- the DEFAULT every other narrowband audio-domain
+        # mode in this file uses, NOT Digitext's special-cased 0.47: PSK31's
+        # own real-hardware-verified occupied bandwidth is only ~50-60Hz
+        # (see pluto_tx/psk31.py), nowhere near Digitext's ~18-23kHz signal
+        # that actually needed the wider passband fix.
+        self.psk31_ssb_resampler = filter.rational_resampler_ccf(
+            interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
+            taps=[], fractional_bw=0.4,
+        )
+        self.connect(self.psk31_source, self.psk31_ssb_mod)
+        self.connect(self.psk31_ssb_mod, self.psk31_ssb_resampler)
+        self.psk31_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/digitext_audio_gain
+        self.connect(self.psk31_source, self.psk31_audio_gain)
+        self.psk31_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
+        self.connect(self.psk31_audio_gain, self.psk31_audio_sink)
+
         # --- File Broadcast branch (repetitive file-broadcast mode, 23cm
         # broadband GFSK -- see pluto_tx/filebroadcast.py and the plan).
         # IQ-native like M17/RADE (gfsk_mod produces complex baseband
@@ -564,6 +598,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if RADE_AVAILABLE:
             self._null_sink_rade = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
+        self._null_sink_psk31 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see PSK31 branch above
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
@@ -725,6 +760,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_tx_resampler
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
+        producers[self.MODE_PSK31] = self.psk31_ssb_resampler  # always available, see its branch above
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         return producers
 
@@ -739,6 +775,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_rade
         if producer is self.digitext_ssb_resampler:
             return self._null_sink_digitext
+        if producer is self.psk31_ssb_resampler:
+            return self._null_sink_psk31
         if producer is self.filebroadcast_tx_resampler:
             return self._null_sink_filebroadcast
         raise ValueError(f"no null_sink registered for producer {producer!r}")
@@ -766,8 +804,9 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
 
-        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT, self.MODE_FILEBROADCAST):
-            return  # all five bypass the NF filter/dynamics chain entirely, nothing to retap
+        if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
+                    self.MODE_PSK31, self.MODE_FILEBROADCAST):
+            return  # all six bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
@@ -852,6 +891,27 @@ class PlutoTxFlowgraph(gr.top_block):
                 col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
             )
             self._digitext_audio_dirty = False
+
+    def set_psk31_text(self, text: str):
+        """Only caches the value and marks the cached audio stale -- mirrors
+        set_digitext_text() exactly (the actual, comparatively expensive
+        Varicode/BPSK synthesis happens lazily in _ensure_psk31_audio(),
+        called from key_ptt(), not on every keystroke)."""
+        self.psk31_text = text
+        self._psk31_audio_dirty = True
+
+    def set_psk31_tone_hz(self, tone_hz: float):
+        self.psk31_tone_hz = float(tone_hz)
+        self._psk31_audio_dirty = True
+
+    def _ensure_psk31_audio(self):
+        """Mirrors _ensure_digitext_audio() exactly."""
+        if self._psk31_audio_dirty or self._psk31_audio is None:
+            self._psk31_audio, self.psk31_duration_s = psk31.encode_text(
+                self.psk31_text, config.AUDIO_RATE, self.psk31_tone_hz,
+                tail_s=config.PSK31_TAIL_S, preamble_chars=config.PSK31_PREAMBLE_CHARS,
+            )
+            self._psk31_audio_dirty = False
 
     def add_filebroadcast_file(self, filename: str, data: bytes):
         """Adds a file to the rotation -- can be called at ANY time,
@@ -1024,6 +1084,26 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.digitext_audio_gain.set_k(1.0)
                 self._keyed = True
                 return
+        if self.mode == self.MODE_PSK31:
+            # Exact structural mirror of the MODE_DIGITEXT branch just
+            # above -- see its own comments for the full reasoning
+            # (one-shot fresh vector_source_f per press, both downstream
+            # fan-out branches reconnected, Soundcard early return).
+            self._ensure_psk31_audio()
+            self.lock()
+            try:
+                self.disconnect(self.psk31_source, self.psk31_ssb_mod)
+                self.disconnect(self.psk31_source, self.psk31_audio_gain)
+                self.psk31_source = blocks.vector_source_f(self._psk31_audio.tolist(), repeat=False)
+                self.connect(self.psk31_source, self.psk31_ssb_mod)
+                self.connect(self.psk31_source, self.psk31_audio_gain)
+            finally:
+                self.unlock()
+            if self.device.is_audio_only():
+                self.tx_gain.set_k(1.0 + 0j)
+                self.psk31_audio_gain.set_k(1.0)
+                self._keyed = True
+                return
         self.device.pre_key()
         if self.mode == self.MODE_M17:
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
@@ -1095,6 +1175,11 @@ class PlutoTxFlowgraph(gr.top_block):
             # Mirrors RADE's Soundcard early return immediately above.
             self.tx_gain.set_k(0.0 + 0j)
             self.digitext_audio_gain.set_k(0.0)
+            self._keyed = False
+            return
+        if self.mode == self.MODE_PSK31 and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.psk31_audio_gain.set_k(0.0)
             self._keyed = False
             return
         if self.mode == self.MODE_M17:
