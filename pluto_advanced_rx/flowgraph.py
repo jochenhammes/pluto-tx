@@ -31,8 +31,10 @@ from gnuradio.fft import window
 
 from . import config
 from . import devices
+from . import rade_autotune
 from .fft_probe import FftProbe
 from .filebroadcast_deframer import FileBroadcastDeframer
+from .psk31_deframer import PSK31VaricodeDeframer
 
 # RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
 # install-rade.sh), not something every user has.
@@ -52,7 +54,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  nf_gain=config.DEFAULT_NF_GAIN, fft_size=config.DEFAULT_FFT_SIZE,
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
-                 gain_values=None, on_filebroadcast_frame=None):
+                 gain_values=None, on_filebroadcast_frame=None, on_psk31_char=None,
+                 psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -313,6 +316,92 @@ class AdvancedRxFlowgraph(gr.top_block):
             )
             self.connect(self.rade_short_to_float, self.rade_audio_resampler_up)
 
+        # --- PSK31 (BPSK31 keyboard-to-keyboard chat digimode) -- always-on
+        # parallel branch, no audio output to select (same "always-on
+        # parallel branch" pattern as fft_probe/File Broadcast above, not
+        # the demod_selector-registered pattern FM/SSB/RADE use). Taps
+        # if_filter's output (NOT pluto_source directly, unlike File
+        # Broadcast) -- PSK31's ~50-60Hz occupied bandwidth is tiny, the
+        # same if_filter tap point RADE already uses above is more than
+        # enough, avoiding the documented real scheduler-crash risk of
+        # decimating straight off a multi-Msps pluto_source in one stage.
+        # Built UNCONDITIONALLY, no is_audio_only() gate (unlike File
+        # Broadcast) -- if_filter's own decimation-ratio math degrades
+        # gracefully for AudioDevice's ~20kHz rate (confirmed via a
+        # headless construction test with device_type="audio" before this
+        # was considered done), the same reason FM/SSB/RADE already work
+        # uniformly across real SDR and Soundcard backends with zero
+        # special-casing.
+        #
+        # AFC (frequency drift compensation): real over-the-air testing
+        # during this mode's own Phase 0 PHY work found a substantial,
+        # CONTINUOUSLY DRIFTING TX/RX frequency offset (see pluto_tx/
+        # config.py's PSK31_AUTO_UNKEY_WATCHDOG_S comment for the full
+        # progress-log finding) that a fixed/hardcoded correction cannot
+        # track. Design (verified in an offline software round-trip test
+        # before being wired in here -- see config.py's own PSK31_AFC_*
+        # comment for the full rationale): a SECOND, dedicated FftProbe
+        # instance (psk31_afc_probe below, independent of the main
+        # waterfall's fft_probe -- own fft_size/compute_rate, no shared
+        # zoom state) also taps if_filter's output; psk31_afc_step()
+        # (called periodically by gui.py's _poll_psk31()) uses
+        # rade_autotune.estimate_signal_center() -- REUSED, not
+        # reimplemented, per the plan's own explicit recommendation -- to
+        # find the tone's actual current center and retune
+        # psk31_tone_filter to match. This was deliberately chosen over
+        # reading costas_loop_cc.get_frequency() directly (tried first,
+        # offline-tested, and rejected): the Costas loop can only report a
+        # residual for a signal that's already within psk31_tone_filter's
+        # own narrow (+-100Hz) passband, so it cannot recover once real
+        # drift pushes the tone entirely outside that passband -- a
+        # dedicated wideband FFT search can.
+        self.psk31_tone_hz = float(psk31_tone_hz)
+        # AFC's current best estimate of the tone's true center -- starts
+        # at the operator's nominal, then drifts away from it over a
+        # session as psk31_afc_step() finds real corrections. Deliberately
+        # separate from psk31_tone_hz itself: see set_psk31_tone_hz()'s
+        # docstring for why a manual retune resets this back to nominal.
+        self.psk31_tone_center_hz = self.psk31_tone_hz
+        psk31_decim = max(1, round(self.if_rate / config.PSK31_WORKING_RATE_HZ))
+        self.psk31_working_rate = self.if_rate / psk31_decim
+        psk31_xlate_taps = firdes.low_pass(
+            1.0, self.if_rate, config.PSK31_XLATE_CUTOFF_HZ, config.PSK31_XLATE_TRANS_HZ, window.WIN_HAMMING,
+        )
+        self.psk31_tone_filter = filter.freq_xlating_fir_filter_ccf(
+            psk31_decim, psk31_xlate_taps, self.psk31_tone_center_hz, self.if_rate,
+        )
+        self.connect(self.if_filter, self.psk31_tone_filter)
+        self.psk31_costas_loop = digital.costas_loop_cc(config.PSK31_LOOP_BW, 2, False)
+        self.connect(self.psk31_tone_filter, self.psk31_costas_loop)
+        self.psk31_complex_to_real = blocks.complex_to_real()
+        self.connect(self.psk31_costas_loop, self.psk31_complex_to_real)
+        psk31_sps = self.psk31_working_rate / config.PSK31_SYMBOL_RATE_HZ
+        self.psk31_symbol_sync = digital.symbol_sync_ff(
+            digital.TED_MUELLER_AND_MULLER, psk31_sps, config.PSK31_LOOP_BW, 1.0, 1.0, 0.05, 1,
+            digital.constellation_bpsk().base(), digital.IR_MMSE_8TAP, 128, [],
+        )
+        self.connect(self.psk31_complex_to_real, self.psk31_symbol_sync)
+        self.psk31_slicer = digital.binary_slicer_fb()
+        self.connect(self.psk31_symbol_sync, self.psk31_slicer)
+        self.psk31_diff_decoder = digital.diff_decoder_bb(2)
+        self.connect(self.psk31_slicer, self.psk31_diff_decoder)
+        # Inverter: digital.diff_decoder_bb's standard convention
+        # (decoded[n] = encoded[n] XOR encoded[n-1], 1=transition) is the
+        # OPPOSITE of PSK31's own (0=phase reversal, 1=no change) --
+        # determined empirically during Phase 0 PHY testing, see pluto_tx/
+        # psk31.py's own docstring.
+        self.psk31_inverter = blocks.not_bb()
+        self.connect(self.psk31_diff_decoder, self.psk31_inverter)
+        self.psk31_deframer = PSK31VaricodeDeframer(on_psk31_char or (lambda ch: None))
+        self.connect(self.psk31_inverter, self.psk31_deframer)
+
+        # Dedicated AFC search probe -- see the AFC comment above.
+        self.psk31_afc_probe = FftProbe(
+            config.PSK31_AFC_FFT_SIZE, self.if_rate, config.WATERFALL_WINDOW, config.PSK31_AFC_COMPUTE_RATE_HZ,
+        )
+        self.connect(self.if_filter, self.psk31_afc_probe)
+        self._psk31_afc_gen = -1
+
         self.nf_gain = blocks.multiply_const_ff(nf_gain)
         # Exactly one of {demod_selector, rade_audio_resampler_up} feeds
         # nf_gain at a time -- the other drains into a null_sink. See
@@ -443,6 +532,63 @@ class AdvancedRxFlowgraph(gr.top_block):
         taps = firdes.complex_band_pass(1.0, self.if_rate, f_lo, f_lo + width_hz,
                                          config.SSB_AUDIO_BAND_HZ[2], window.WIN_HAMMING)
         self.ssb_filter.set_taps(taps)
+
+    def set_psk31_tone_hz(self, tone_hz: float):
+        """Retunes psk31_tone_filter in place (freq_xlating_fir_filter_ccf.
+        set_center_freq() is safe at runtime, same technique
+        set_fm_demod_width() already relies on for its own filter) and
+        resets the AFC's own tracked center back to this new nominal -- an
+        operator manually retuning implies "start the drift search over
+        from here", not "keep whatever correction had accumulated against
+        the OLD nominal"."""
+        self.psk31_tone_hz = float(tone_hz)
+        self.psk31_tone_center_hz = self.psk31_tone_hz
+        self.psk31_tone_filter.set_center_freq(self.psk31_tone_hz)
+
+    def psk31_afc_step(self):
+        """Reads psk31_afc_probe's latest FFT row (if a new one is ready
+        since the last call) and, if a real tone peak is found, retunes
+        psk31_tone_filter to it once the estimate differs from the
+        currently-applied center by more than PSK31_AFC_DEADBAND_HZ.
+        Returns the estimated center (float) if a peak was found this
+        call (whether or not it was already within the deadband), or None
+        if no real signal was found (weak/absent -- correctly leaves the
+        current tuning alone rather than chasing noise, since
+        estimate_signal_center() itself already returns None in that
+        case; see PSK31_AFC_THRESHOLD_DB's own comment for a real,
+        important finding about how permissive its default is on
+        featureless noise).
+
+        The search window is always anchored at psk31_tone_hz (the
+        STABLE operator nominal), NOT at the last-applied
+        psk31_tone_center_hz -- deliberately, to bound the worst case of
+        an occasional bad estimate (e.g. a stray real interferer, or
+        PSK31_AFC_THRESHOLD_DB's own known centroid-regresses-to-window-
+        center bias on pure noise): searching from a WALKING center could
+        let a string of small missteps drift the filter further and
+        further from the true signal with nothing pulling it back: with a
+        FIXED search center, each call is an independent fresh estimate
+        of "where is the real tone relative to where the operator
+        actually asked to listen", so a bad call can't compound with the
+        next one, and PSK31_AFC_SEARCH_RADIUS_HZ already comfortably
+        covers the full drift range observed in real testing. Safe/cheap
+        to call often -- psk31_afc_probe internally throttles its own
+        compute rate (PSK31_AFC_COMPUTE_RATE_HZ) independent of how often
+        this is called; gui.py's _poll_psk31() additionally throttles the
+        cadence at which it actually calls this, see its own comment."""
+        row, self._psk31_afc_gen = self.psk31_afc_probe.get_latest_row(self._psk31_afc_gen)
+        if row is None:
+            return None
+        est = rade_autotune.estimate_signal_center(
+            row, center_hz=0.0, span_hz=self.if_rate, freq_hz=self.psk31_tone_hz,
+            radius_hz=config.PSK31_AFC_SEARCH_RADIUS_HZ, threshold_db=config.PSK31_AFC_THRESHOLD_DB,
+        )
+        if est is None:
+            return None
+        if abs(est - self.psk31_tone_center_hz) > config.PSK31_AFC_DEADBAND_HZ:
+            self.psk31_tone_center_hz = est
+            self.psk31_tone_filter.set_center_freq(est)
+        return est
 
     def shutdown(self):
         """Stop the flowgraph. Safe to call more than once."""

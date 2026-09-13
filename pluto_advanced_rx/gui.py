@@ -28,6 +28,7 @@ from . import rade_autotune
 from .fft_probe import FftProbe
 from .filebroadcast_state import FileBroadcastState
 from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE
+from .psk31_state import Psk31ChatState
 from .waterfall_widget import AdvancedWaterfallWidget
 
 
@@ -58,6 +59,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # construct a new tb -- this must already exist by then.
         self._filebroadcast_state = FileBroadcastState()
         self._filebroadcast_snapshot = []
+
+        # PSK31 chat RX state -- same "constructed ONCE, survives every
+        # flowgraph rebuild" reasoning as _filebroadcast_state above.
+        # AdvancedRxFlowgraph's PSK31 branch is always wired regardless of
+        # connection state, so characters can start arriving from the
+        # moment _connect()/_on_bandwidth_changed() construct a new tb --
+        # this must already exist by then.
+        self._psk31_state = Psk31ChatState()
+        self._psk31_receiving = False
+        self._psk31_last_afc_poll_time = 0.0
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -131,9 +142,62 @@ class MainWindow(QtWidgets.QMainWindow):
         audio_tab_layout = QtWidgets.QVBoxLayout(audio_tab)
         self.mode_tab_widget.addTab(audio_tab, "Audio")
         digimodes_tab = QtWidgets.QWidget()
+        digimodes_tab_layout = QtWidgets.QVBoxLayout(digimodes_tab)
         self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
-        self.mode_tab_widget.setTabEnabled(1, False)
-        self.mode_tab_widget.setTabToolTip(1, "Not implemented yet")
+        # PSK31 (BPSK31 chat) -- the tab's only occupant so far (pluto_tx's
+        # own "Waterfall Writer" digimode is TX-only, never lands here --
+        # see the plan). Always-on branch (see flowgraph.py), independent
+        # of demod_mode/connection state, matching File-Transfer's tab
+        # below.
+        digimodes_tab_layout.addWidget(QtWidgets.QLabel(
+            f"PHY: {config.PSK31_SYMBOL_RATE_HZ:g} baud BPSK31, Varicode -- keyboard-to-keyboard chat"
+        ))
+        psk31_tone_row = QtWidgets.QHBoxLayout()
+        psk31_tone_row.addWidget(QtWidgets.QLabel("Tone (Hz):"))
+        self.psk31_tone_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.psk31_tone_slider.setRange(int(config.PSK31_TONE_RANGE_HZ[0]), int(config.PSK31_TONE_RANGE_HZ[1]))
+        self.psk31_tone_slider.setSingleStep(10)
+        self.psk31_tone_slider.setPageStep(100)
+        self.psk31_tone_slider.setValue(int(config.PSK31_DEFAULT_TONE_HZ))
+        self.psk31_tone_slider.setToolTip(
+            "Audio tone offset from the carrier -- must match the sending station's own "
+            "tone. Real hardware testing found a substantial, continuously DRIFTING "
+            "frequency offset can appear between independent TX/RX devices -- this app "
+            "runs an automatic background search (AFC) to track it, but a manual retune "
+            "here is always the fallback if the signal indicator below stays quiet."
+        )
+        self.psk31_tone_slider.valueChanged.connect(self._on_psk31_tone_changed)
+        psk31_tone_row.addWidget(self.psk31_tone_slider)
+        self.psk31_tone_label = QtWidgets.QLabel(f"{int(config.PSK31_DEFAULT_TONE_HZ)} Hz")
+        self.psk31_tone_label.setMinimumWidth(60)
+        psk31_tone_row.addWidget(self.psk31_tone_label)
+        digimodes_tab_layout.addLayout(psk31_tone_row)
+        # Start/Stop reception -- same reasoning as filebroadcast_receive_button
+        # below: gates only whether decoded characters get APPENDED to
+        # Psk31ChatState (see _on_psk31_char()), the underlying GNU Radio
+        # branch (and its own AFC search) keeps running regardless, so the
+        # signal-status label stays accurate even while stopped.
+        self.psk31_receive_button = QtWidgets.QPushButton()
+        self.psk31_receive_button.setCheckable(True)
+        self.psk31_receive_button.setChecked(False)
+        self.psk31_receive_button.setMinimumHeight(40)
+        self.psk31_receive_button.toggled.connect(self._on_psk31_receive_toggled)
+        self._style_psk31_receive_button(receiving=False)
+        digimodes_tab_layout.addWidget(self.psk31_receive_button)
+        self.psk31_signal_label = QtWidgets.QLabel()
+        digimodes_tab_layout.addWidget(self.psk31_signal_label)
+        self._psk31_last_chars_decoded = 0
+        self._psk31_last_activity_time = 0.0
+        self._update_psk31_signal_label()
+        self.psk31_transcript = QtWidgets.QTextEdit()
+        self.psk31_transcript.setReadOnly(True)
+        digimodes_tab_layout.addWidget(self.psk31_transcript)
+        clear_row = QtWidgets.QHBoxLayout()
+        clear_row.addStretch(1)
+        self.psk31_clear_button = QtWidgets.QPushButton("Clear Transcript")
+        self.psk31_clear_button.clicked.connect(self._on_psk31_clear_clicked)
+        clear_row.addWidget(self.psk31_clear_button)
+        digimodes_tab_layout.addLayout(clear_row)
         # File-Transfer: Phase 4's directory table -- this codebase's first
         # QTableWidget (Filename/Size/Progress/Record-toggle per row),
         # replacing Phase 1-3's plain QListWidget. Always live, independent
@@ -480,6 +544,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(self._poll_fft)
         self._timer.timeout.connect(self._poll_filebroadcast)
+        self._timer.timeout.connect(self._poll_psk31)
         self._timer.start(config.WATERFALL_POLL_INTERVAL_MS)
 
         # Everything above builds the window with widgets in their normal
@@ -507,7 +572,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
                   self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
                   self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
-                  self.receive_button, self.autotune_button, self.filebroadcast_receive_button):
+                  self.receive_button, self.autotune_button, self.filebroadcast_receive_button,
+                  self.psk31_receive_button, self.psk31_tone_slider):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
         if not enabled:
@@ -524,6 +590,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         color = "#27ae60" if receiving else "#7f8c8d"
         self.filebroadcast_receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
+
+    def _style_psk31_receive_button(self, receiving: bool):
+        self.psk31_receive_button.setText(
+            "Receiving Chat (click to stop)" if receiving else "Stopped (click to start receiving)"
+        )
+        color = "#27ae60" if receiving else "#7f8c8d"
+        self.psk31_receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -803,6 +876,86 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elif frame["type"] == "data":
             self._filebroadcast_state.on_data_frame(frame["file_id"], frame["offset"], frame["payload"])
+
+    def _on_psk31_receive_toggled(self, checked):
+        self._psk31_receiving = checked
+        self._style_psk31_receive_button(receiving=checked)
+
+    def _on_psk31_tone_changed(self, value):
+        self.psk31_tone_label.setText(f"{value} Hz")
+        if self.tb is not None:
+            self.tb.set_psk31_tone_hz(float(value))
+
+    def _on_psk31_clear_clicked(self):
+        self._psk31_state.clear()
+        self.psk31_transcript.clear()
+
+    def _update_psk31_signal_label(self):
+        """Independent of _psk31_receiving (Start/Stop) -- reads
+        PSK31VaricodeDeframer's own chars_decoded counter directly off the
+        flowgraph, which keeps counting regardless of the Start/Stop
+        button, so the operator can see whether they're even correctly
+        tuned BEFORE pressing Start. Mirrors
+        _update_filebroadcast_signal_label()'s own reasoning exactly."""
+        if self.tb is None:
+            self.psk31_signal_label.setText("Not connected.")
+            return
+        chars_decoded = self.tb.psk31_deframer.chars_decoded
+        if chars_decoded > self._psk31_last_chars_decoded:
+            self._psk31_last_chars_decoded = chars_decoded
+            self._psk31_last_activity_time = time.time()
+        recently_active = (
+            self._psk31_last_activity_time > 0
+            and time.time() - self._psk31_last_activity_time < 5.0
+        )
+        afc_note = f" -- AFC tracking near {self.tb.psk31_tone_center_hz:.0f} Hz"
+        if recently_active:
+            self.psk31_signal_label.setText(
+                f"Signal detected -- {chars_decoded} character(s) decoded since connecting.{afc_note}"
+            )
+        else:
+            self.psk31_signal_label.setText(
+                f"No signal detected -- check tone/tuning (no valid Varicode character seen recently).{afc_note}"
+            )
+
+    def _on_psk31_char(self, char):
+        """Passed to AdvancedRxFlowgraph as on_psk31_char -- called from
+        PSK31VaricodeDeframer.work() on the GNU Radio SCHEDULER thread, not
+        the Qt thread. Psk31ChatState.on_char() is lock-guarded (safe to
+        call directly from here); nothing here touches any Qt widget --
+        _poll_psk31() (Qt-thread, timer-driven) is what actually updates
+        the transcript, via get_snapshot(). Gated on _psk31_receiving
+        (Start/Stop button), same reasoning as _on_filebroadcast_frame()."""
+        if not self._psk31_receiving:
+            return
+        self._psk31_state.on_char(char)
+
+    def _poll_psk31(self):
+        self._update_psk31_signal_label()
+        # Independent of self.tb's connection state (unlike the AFC step
+        # below) -- the transcript itself lives on MainWindow and should
+        # keep showing whatever was already received even across a brief
+        # reconnect, same reasoning as _poll_filebroadcast().
+        snapshot = self._psk31_state.get_snapshot()
+        if snapshot != self.psk31_transcript.toPlainText():
+            scrollbar = self.psk31_transcript.verticalScrollBar()
+            at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+            self.psk31_transcript.setPlainText(snapshot)
+            if at_bottom:
+                scrollbar.setValue(scrollbar.maximum())
+        # AFC step, throttled to PSK31_AFC_POLL_INTERVAL_S -- see
+        # AdvancedRxFlowgraph.psk31_afc_step()'s own docstring for why this
+        # doesn't need to run on every ~33ms waterfall-poll tick (the
+        # underlying FftProbe already throttles its own compute rate
+        # independently; this throttle is purely about how often gui.py
+        # itself bothers to ask).
+        if self.tb is None:
+            return
+        now = time.time()
+        if now - self._psk31_last_afc_poll_time < config.PSK31_AFC_POLL_INTERVAL_S:
+            return
+        self._psk31_last_afc_poll_time = now
+        self.tb.psk31_afc_step()
 
     _FB_COL_FILENAME, _FB_COL_SIZE, _FB_COL_RECEIVED, _FB_COL_RECORD = range(4)
 
@@ -1283,6 +1436,7 @@ class MainWindow(QtWidgets.QMainWindow):
         fft_size = self.fft_size_combo.currentData()
         fm_width = self.tb.fm_demod_width_hz
         ssb_width = self.tb.ssb_demod_width_hz
+        psk31_tone = self.tb.psk31_tone_hz
 
         try:
             new_tb = AdvancedRxFlowgraph(
@@ -1290,6 +1444,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone,
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
@@ -1307,6 +1462,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fft_gen = -1
         self._filebroadcast_last_attempt_total = 0  # new tb's deframer counters start at 0 too, see _update_filebroadcast_signal_label()
         self._filebroadcast_last_activity_time = 0.0
+        self._psk31_last_chars_decoded = 0  # new tb's psk31_deframer.chars_decoded starts at 0 too
+        self._psk31_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb
         self._sync_waterfall()
@@ -1348,6 +1505,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fft_gen = -1
         self._filebroadcast_last_attempt_total = 0
         self._filebroadcast_last_activity_time = 0.0
+        self._psk31_last_chars_decoded = 0
+        self._psk31_last_activity_time = 0.0
         self.waterfall.clear()
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
@@ -1372,6 +1531,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filebroadcast_receive_button.setChecked(False)
         self.filebroadcast_receive_button.blockSignals(False)
         self._style_filebroadcast_receive_button(receiving=False)
+        # Same reset-only-on-disconnect reasoning as _filebroadcast_receiving above.
+        self._psk31_receiving = False
+        self.psk31_receive_button.blockSignals(True)
+        self.psk31_receive_button.setChecked(False)
+        self.psk31_receive_button.blockSignals(False)
+        self._style_psk31_receive_button(receiving=False)
 
     def _connect(self, uri_text):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -1415,6 +1580,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fft_size=self.fft_size_combo.currentData(),
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()),
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:

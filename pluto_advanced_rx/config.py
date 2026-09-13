@@ -6,6 +6,8 @@ should be free to diverge from pluto_rx without risking the stable app, the
 same relationship pluto_rx itself has to pluto_tx. Only genuinely generic,
 non-RX-specific constants/helpers are still re-exported from pluto_tx.config.
 """
+import math
+
 from gnuradio.fft import window
 
 from pluto_tx.config import DEFAULT_URI, DE_AMATEUR_BANDS_HZ, in_amateur_band, normalize_uri  # noqa: F401 (re-exported)
@@ -168,3 +170,98 @@ FILEBROADCAST_WORKING_RATE_HZ = FILEBROADCAST_SYMBOL_RATE_HZ * FILEBROADCAST_SPS
 FILEBROADCAST_GAIN_MU = 0.005
 FILEBROADCAST_CHUNK_SIZE = 64  # see pluto_tx/config.py's sizing rationale (frame survival vs. overhead)
 FILEBROADCAST_MAX_FILENAME_LEN = 64
+
+# --- PSK31 RX (BPSK31 keyboard-to-keyboard chat digimode) -- MIRRORED copy
+# of pluto_tx/config.py's PSK31_* PHY block (symbol rate/tone defaults,
+# MUST stay in sync -- see that file's own comment for the full real-
+# hardware provenance), plus RX-only demod-chain/AFC constants that have
+# no TX-side equivalent (pluto_tx never receives).
+PSK31_SYMBOL_RATE_HZ = 31.25
+PSK31_DEFAULT_TONE_HZ = 1500.0
+PSK31_TONE_RANGE_HZ = (300.0, 2700.0)
+
+# Fixed working rate the demod chain (Costas loop/symbol_sync_ff) runs at,
+# decimated down from DEMOD_IF_RATE via psk31_tone_filter -- sps =
+# 1000/31.25 = 32, comfortable margin (matches FILEBROADCAST_SPS's own
+# sps>=4 lesson). Real-hardware-verified during this mode's own Phase 0
+# OTA testing (see pluto_tx/config.py's PSK31_PREAMBLE_CHARS comment).
+PSK31_WORKING_RATE_HZ = 1_000.0
+# psk31_tone_filter's low-pass cutoff/transition (Hz) -- narrow, matching
+# PSK31's tiny ~50-60Hz occupied bandwidth. Real-hardware-verified: a
+# WIDER passband (250/150Hz) was deliberately tried during Phase 0 OTA
+# testing specifically to tolerate more frequency drift before the tone
+# fell outside it -- this made results WORSE, not better (more admitted
+# noise hurt Costas lock more than the wider margin helped). Do not widen
+# this without re-verifying on real hardware; drift tolerance is instead
+# handled by the AFC mechanism below, not by a wider static filter.
+PSK31_XLATE_CUTOFF_HZ = 100.0
+PSK31_XLATE_TRANS_HZ = 80.0
+# Costas loop / symbol_sync_ff loop bandwidth (radians/sample), real-
+# hardware-verified. A SLOWER loop (2*pi/300, mirroring the direction that
+# fixed FILEBROADCAST_GAIN_MU's own GFSK cycle-slip problem) was tried
+# during Phase 0 OTA testing and made results WORSE (more scattered
+# errors) -- PSK31's loop-bandwidth-vs-jitter relationship is NOT a copy
+# of GFSK's.
+PSK31_LOOP_BW = 2 * math.pi / 100
+
+# --- PSK31 AFC (continuous frequency-drift compensation) -----------------
+# Real over-the-air testing during Phase 0 found a substantial,
+# CONTINUOUSLY DRIFTING TX/RX frequency offset between this project's own
+# Pluto+RTL-SDR pairing (observed drifting >150Hz over ~40 minutes, never
+# settling -- see pluto_tx/config.py's PSK31_AUTO_UNKEY_WATCHDOG_S comment
+# for the full finding) -- large enough that a fixed/hardcoded correction
+# cannot track it, and (confirmed via an offline software test before this
+# was wired into the real flowgraph, see flowgraph.py's own AFC comment)
+# large enough to push the tone entirely outside psk31_tone_filter's own
+# narrow +-100Hz passband, meaning digital.costas_loop_cc's own tracked
+# residual (get_frequency()) is NOT a usable error signal on its own --
+# it reads ~0 when there's no signal reaching it at all, not the true
+# offset. Design: a SECOND, dedicated FftProbe (psk31_afc_probe, see
+# flowgraph.py) taps if_filter's output at real frequency resolution
+# (~12Hz/bin at DEMOD_IF_RATE=50kHz here) independent of the main
+# waterfall's own zoom/display state; periodically,
+# rade_autotune.estimate_signal_center() (REUSED, not reimplemented --
+# this mode's own plan explicitly recommended reusing RADE's Auto
+# Fine-Tune machinery) finds the tone's actual current position within
+# PSK31_AFC_SEARCH_RADIUS_HZ of wherever it was last found, and
+# AdvancedRxFlowgraph.psk31_afc_step() retunes psk31_tone_filter to match
+# if the estimate differs from the current tuning by more than
+# PSK31_AFC_DEADBAND_HZ -- an incremental, self-correcting search that
+# tracks drift continuously across a whole receive session, confirmed
+# (offline, synthetic +-180Hz-offset software test, a case the
+# uncorrected/Costas-only approach could NOT recover) to find a tone's
+# true center to well under 1Hz accuracy and recover a 100%-correct decode
+# from a signal the static filter alone could not lock onto at all.
+PSK31_AFC_FFT_SIZE = 4096
+PSK31_AFC_COMPUTE_RATE_HZ = 20  # FftProbe's own internal compute throttle
+PSK31_AFC_POLL_INTERVAL_S = 2.0  # how often gui.py's _poll_psk31() actually calls psk31_afc_step()
+PSK31_AFC_SEARCH_RADIUS_HZ = 600.0  # margin above the largest drift actually observed (~430Hz) this session
+# Real, IMPORTANT finding from wiring this up against real Pluto hardware
+# (432.15MHz, no PSK31 signal transmitting -- just real RF background):
+# RADE_AUTOTUNE's own default threshold_db=6.0 (a sensible choice for
+# RADE's own use, an ALWAYS-present-while-tuned-in wide OFDM signal) is
+# FAR too permissive here -- with no real PSK31 tone present at all,
+# estimate_signal_center() still returned a confident-looking estimate at
+# 6/10/15/20dB, repeatedly, across a real live 8-poll test (this is
+# actually mostly a property of the estimator itself, not noisy hardware:
+# a power-weighted centroid computed over a symmetric search window with
+# no real single dominant peak systematically regrades toward the
+# window's own center, i.e. `freq_hz`, on roughly-flat/symmetric noise --
+# RADE's own Auto Fine-Tune masks this by only ever trusting an estimate
+# that emerges from its own coarse frequency SWEEP with dwell time, not a
+# single bare snapshot; PSK31's simpler one-shot use of the same function
+# needed its own real threshold instead). 25.0dB reliably rejected the
+# real background in all 8 live samples (est=None every time) while a
+# separate deliberately weak synthetic test signal (heavy added noise,
+# ~44dB local peak SNR -- comfortably weaker than the ~88dB seen with an
+# actual strong real over-the-air PSK31 signal in Phase 0 testing) was
+# still found and correctly located at this same threshold. Residual risk
+# accepted deliberately, not fixed further: a genuinely strong, STABLE
+# real interferer landing inside the search window could in principle
+# still fool this -- this mode is a best-effort, operator-supervised
+# receive aid (the operator sees the transcript and can always retune
+# set_psk31_tone_hz() manually), the same "passive, best-effort" posture
+# already established for File Broadcast's RX side, not a claim of a
+# bulletproof automatic system.
+PSK31_AFC_THRESHOLD_DB = 25.0
+PSK31_AFC_DEADBAND_HZ = 15.0  # ignore sub-15Hz jitter in the estimate itself, only retune on a real drift-sized correction
