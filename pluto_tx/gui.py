@@ -219,7 +219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # block like M17/FreeDV/RADE above -- Pillow/NumPy are plain Python
         # dependencies (see pluto_tx/digitext.py), not an external
         # from-source C library that might be missing.
-        self.mode_combo.addItem("Digitext (Wasserfall-Text)", PlutoTxFlowgraph.MODE_DIGITEXT)
+        self.mode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
         # File Broadcast: always available, no gating block, same reasoning
         # as Digitext (pure Python/NumPy encoder, no external dependency).
         self.mode_combo.addItem("File Broadcast", PlutoTxFlowgraph.MODE_FILEBROADCAST)
