@@ -35,10 +35,23 @@ from .base import PowerStage, TxDevice
 
 FREQUENCY_RANGE_HZ = (1_000_000, 6_000_000_000)
 SAMPLE_RATE_RANGE_HZ = (2_000_000, 20_000_000)
-# 8 Msps: within HackRF's usable range, gives a clean interpolation=500/
-# decimation=3 resampler ratio against this app's 48kHz audio rate
-# (comparable computational cost to Pluto's proven 625:12 at 2.5 Msps).
-DEFAULT_SAMPLE_RATE_HZ = 8_000_000
+# 2 Msps: enough for every voice mode this app supports (FM +-2.5kHz,
+# SSB, M17, FreeDV, RADE -- none needs more than ~200kHz of bandwidth) and
+# gives a clean interpolation=125/decimation=3 fm_resampler_fff ratio
+# against this app's 48kHz audio rate. Was 8_000_000 -- found too high on
+# real hardware (an Intel i5-6300U dual-core laptop): fm_resampler_fff's
+# interpolation=500 (500 polyphase branches) PLUS the TX waterfall's own
+# 8Msps->50kHz resampler (a very tight 160:1 antialiasing filter running
+# at the full 8Msps input rate) together overran the CPU's ability to keep
+# the HackRF's USB buffer fed, producing real GNU Radio buffer underruns
+# (a choppy, unintelligible received signal). The old comment's claim of
+# "comparable computational cost" to Pluto's 2.5Msps was wrong: resampler
+# cost scales with sample_rate * n_taps, and 8Msps/500 taps is measurably
+# MORE expensive than Pluto's 625:12 ratio at 2.5Msps, on top of the
+# waterfall resampler also running 3.2x faster. At 2Msps: interpolation
+# drops to 125 taps, and the waterfall resampler itself runs 4x slower --
+# roughly an order of magnitude less total resampler load than 8Msps.
+DEFAULT_SAMPLE_RATE_HZ = 2_000_000
 
 # Deliberately conservative, NOT a computed "equivalent" of Pluto's
 # -20 dBFS default -- the two devices' gain chains and external-PA drive

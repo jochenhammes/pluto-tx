@@ -23,6 +23,27 @@
 # Safe to re-run: apt-get install on already-installed packages is a no-op.
 set -euo pipefail
 
+# This script runs as a normal user and calls `sudo apt-get` internally only
+# where actually needed -- running the WHOLE script with sudo (or as root)
+# sets $HOME=/root, which silently sends the launcher scripts below to
+# /root/.local/bin instead of the real user's -- a real installation this
+# was found on ended up with a broken 'pluto-tx' command for exactly this
+# reason. Refuse rather than silently install to the wrong place.
+if [ "$(id -u)" = "0" ]; then
+    echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
+    echo "Richtig: ./install.sh   (das Skript ruft sudo intern fuer apt-get auf)" >&2
+    exit 1
+fi
+# Last-resort fallback: some container/CI environments still end up with
+# HOME=/root even for a non-root invocation (e.g. via a root-owned sudo
+# wrapper further up the call chain). If SUDO_USER is set, trust it over a
+# possibly-wrong $HOME.
+if [ -n "${SUDO_USER:-}" ]; then
+    HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    export HOME
+    echo "HINWEIS: HOME auf $HOME korrigiert (SUDO_USER=$SUDO_USER)." >&2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "== pluto-tx / pluto-rx / pluto-advanced-rx installer =="

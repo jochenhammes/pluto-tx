@@ -35,6 +35,16 @@
 # Safe to re-run.
 set -euo pipefail
 
+# See install-m17.sh's identical guard for the full reasoning: this script
+# builds into $SCRIPT_DIR/rade_c and regenerates launchers under
+# $HOME/.local/bin -- running it with sudo/as root sets $HOME=/root and
+# silently sends the regenerated launchers to the wrong place.
+if [ "$(id -u)" = "0" ]; then
+    echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
+    echo "Richtig: ./install-rade.sh   (das Skript ruft sudo intern fuer apt-get auf)" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RADE_C_DIR="$SCRIPT_DIR/rade_c"
 # Pinned to the exact commit this integration's offline feasibility
@@ -97,6 +107,28 @@ echo
 echo "Configuring and building rade_c (this also fetches and builds a"
 echo "patched Opus/FARGAN fork -- can take a few minutes)..."
 mkdir -p "$RADE_C_DIR/build"
+
+# wget wrapper with a real timeout: cmake's ExternalProject build of the
+# patched Opus fork runs its own autogen.sh, which in turn calls
+# dnn/download_model.sh to fetch a ~100MB FARGAN/LPCNet model from
+# media.xiph.org via plain `wget` with NO timeout flag of its own. If that
+# host is unreachable (server down, routing issue), the whole build just
+# hangs indefinitely with no error -- found on a real installation.
+# download_model.sh lives inside the Opus fork's own source tree (only
+# fetched/unpacked by cmake at build time), so it can't be patched directly
+# from here -- instead, put a wrapper earlier on PATH that forces a real
+# timeout on every `wget` call for the duration of this build, including
+# calls made deep inside the ExternalProject build (PATH is searched before
+# the real /usr/bin/wget regardless of who invokes it).
+WGET_WRAP_DIR="$(mktemp -d)"
+trap 'rm -rf "$WGET_WRAP_DIR"' EXIT
+cat > "$WGET_WRAP_DIR/wget" <<'WGET_EOF'
+#!/bin/sh
+exec /usr/bin/wget --timeout=30 --tries=2 "$@"
+WGET_EOF
+chmod +x "$WGET_WRAP_DIR/wget"
+export PATH="$WGET_WRAP_DIR:$PATH"
+
 cd "$RADE_C_DIR/build"
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j"$(nproc)"

@@ -21,6 +21,21 @@
 # Safe to re-run.
 set -euo pipefail
 
+# This script builds gr-m17 into $HOME/.local -- no sudo needed for the
+# build itself (only the handful of apt build-tool packages below, via
+# `sudo apt-get` calls internal to this script). Running the WHOLE script
+# with sudo (or as root) sets $HOME=/root, silently sending the build
+# install prefix AND the regenerated launcher to /root/.local instead of
+# the real user's -- a real installation this was found on ended up with
+# `make install` writing to /root/.local/lib and a broken pluto-tx launcher
+# in /root/.local/bin, with "from gnuradio import m17" then failing for the
+# real user. Refuse rather than silently install to the wrong place.
+if [ "$(id -u)" = "0" ]; then
+    echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
+    echo "Richtig: ./install-m17.sh   (das Skript ruft sudo intern fuer apt-get auf)" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GR_M17_DIR="$SCRIPT_DIR/gr-m17"
 INSTALL_PREFIX="$HOME/.local"
@@ -124,13 +139,58 @@ EOF
 
 echo
 echo "Updating the pluto-tx launcher (~/.local/bin/pluto-tx) to set LD_LIBRARY_PATH..."
-mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/pluto-tx" <<EOF
-#!/usr/bin/env bash
-export LD_LIBRARY_PATH="$LIBDIR:\${LD_LIBRARY_PATH:-}"
-cd "$SCRIPT_DIR" && exec python3 -m pluto_tx.app --gui "\$@"
-EOF
-chmod +x "$HOME/.local/bin/pluto-tx"
+# Merge-safe regeneration -- a real bug found on real installations: this
+# used to overwrite the launcher wholesale with a plain `cat > ... <<EOF`,
+# which silently DROPPED an existing PATH entry install-rade.sh had already
+# added (installing RADE, then M17, left RADE greyed out again because its
+# lpcnet_demo could no longer be found on PATH). Read whatever LD_LIBRARY_
+# PATH/PATH the launcher already exports (if it exists) and fold this
+# script's own LIBDIR into LD_LIBRARY_PATH only, preserving PATH untouched
+# -- mirrors install-rade.sh's own regenerate_launcher(), which already
+# solved this correctly; M17 itself never needs a PATH addition (only
+# LD_LIBRARY_PATH, for the .so), unlike RADE's separate lpcnet_demo binary.
+prepend_if_missing() {
+    local dir="$1" list="$2"
+    if [ -z "$list" ]; then
+        echo "$dir"
+        return
+    fi
+    local IFS=':'
+    local part
+    for part in $list; do
+        if [ "$part" = "$dir" ]; then
+            echo "$list"
+            return
+        fi
+    done
+    echo "$dir:$list"
+}
+
+regenerate_launcher() {
+    local name="$1" module_invocation="$2"
+    local launcher="$HOME/.local/bin/$name"
+    local existing_ld="" existing_path=""
+    if [ -f "$launcher" ]; then
+        existing_ld="$(grep -oP '(?<=export LD_LIBRARY_PATH=")[^"]*(?=:\$\{LD_LIBRARY_PATH:-\}")' "$launcher" 2>/dev/null || true)"
+        existing_path="$(grep -oP '(?<=export PATH=")[^"]*(?=:\$\{PATH:-\}")' "$launcher" 2>/dev/null || true)"
+    fi
+    local new_ld
+    new_ld="$(prepend_if_missing "$LIBDIR" "$existing_ld")"
+
+    mkdir -p "$HOME/.local/bin"
+    {
+        echo '#!/usr/bin/env bash'
+        echo "export LD_LIBRARY_PATH=\"$new_ld:\${LD_LIBRARY_PATH:-}\""
+        if [ -n "$existing_path" ]; then
+            echo "export PATH=\"$existing_path:\${PATH:-}\""
+        fi
+        echo "cd \"$SCRIPT_DIR\" && exec python3 -m $module_invocation \"\$@\""
+    } > "$launcher"
+    chmod +x "$launcher"
+    echo "Updated $launcher"
+}
+
+regenerate_launcher "pluto-tx" "pluto_tx.app --gui"
 echo "Done -- pluto-tx now finds gr-m17 automatically."
 
 echo
