@@ -280,10 +280,24 @@ FILEBROADCAST_MAX_FILENAME_LEN = 64  # matches filebroadcast.MAX_FILENAME_LEN
 # pluto_tx/psk31.py and the plan at ~/.claude/plans/swirling-waddling-noodle.md.
 # Symbol rate is fixed by international PSK31 convention, not adjustable.
 PSK31_SYMBOL_RATE_HZ = 31.25
-# 1500Hz: a conventional PSK31 audio-tone offset, roughly centered in a
-# typical SSB voice passband -- the real-hardware-verified value used
-# throughout this mode's own Phase 0 PHY testing (2026-09-14 session).
-PSK31_DEFAULT_TONE_HZ = 1500.0
+# Real, measured finding (post-Phase-5 session): a real over-the-air
+# capture at the original 1500Hz default showed THREE distinct peaks
+# close together in the waterfall/spectrum -- the real PSK31 tone, a
+# carrier/LO-leakage spike near 0Hz, and a mirror-image spur (confirmed,
+# via a no-TX control capture, to be caused by our own transmission, not
+# external RF) -- this is the SAME already-documented AD9361 TX IQ-
+# imbalance mirror-image characteristic behind DIGITEXT_MIN_FREQ_HZ's own
+# real-hardware finding (~13-18dB image suppression measured for this
+# exact Hilbert-based USB modulation chain, an analog hardware
+# characteristic, not fixable in software), just far more visible here
+# because 1500Hz sits much closer to the carrier than Digitext's own
+# 4000Hz default. Raised to 2500Hz -- doubles the carrier-to-signal
+# separation (and therefore the signal-to-mirror separation too, since
+# the mirror sits at -tone_hz) -- while staying within PSK31_TONE_RANGE_HZ
+# below and the conventional SSB voice passband PSK31 traffic expects for
+# real interop (unlike Digitext, which has no such convention constraint
+# and can use a far higher offset).
+PSK31_DEFAULT_TONE_HZ = 2500.0
 # Sanity range for the operator's tone-offset control (mirrors
 # DIGITEXT_MIN_FREQ_HZ_FLOOR/DIGITEXT_MIN_FREQ_HZ's own offset-slider
 # idiom) -- a typical SSB voice passband.

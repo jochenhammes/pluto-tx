@@ -177,7 +177,14 @@ FILEBROADCAST_MAX_FILENAME_LEN = 64
 # hardware provenance), plus RX-only demod-chain/AFC constants that have
 # no TX-side equivalent (pluto_tx never receives).
 PSK31_SYMBOL_RATE_HZ = 31.25
-PSK31_DEFAULT_TONE_HZ = 1500.0
+# 2500Hz -- kept in sync with pluto_tx/config.py's own PSK31_DEFAULT_TONE_HZ
+# (see its comment for the real-hardware mirror-image finding that
+# motivated raising it from 1500Hz): this RX default is the search center
+# psk31_afc_step() starts from, so it must match what a fresh TX session
+# actually sends by default, or a fresh RX session wouldn't find it at all
+# (the real signal would sit outside PSK31_AFC_SEARCH_RADIUS_HZ of a
+# stale 1500Hz assumption).
+PSK31_DEFAULT_TONE_HZ = 2500.0
 PSK31_TONE_RANGE_HZ = (300.0, 2700.0)
 
 # Fixed working rate the demod chain (Costas loop/symbol_sync_ff) runs at,
