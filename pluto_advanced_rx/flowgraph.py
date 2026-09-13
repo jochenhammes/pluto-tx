@@ -551,13 +551,47 @@ class AdvancedRxFlowgraph(gr.top_block):
         psk31_tone_filter to it once the estimate differs from the
         currently-applied center by more than PSK31_AFC_DEADBAND_HZ.
         Returns the estimated center (float) if a peak was found this
-        call (whether or not it was already within the deadband), or None
-        if no real signal was found (weak/absent -- correctly leaves the
-        current tuning alone rather than chasing noise, since
+        call (whether or not it triggered a retune), or None if no real
+        signal was found (weak/absent -- correctly leaves the current
+        tuning alone rather than chasing noise, since
         estimate_signal_center() itself already returns None in that
         case; see PSK31_AFC_THRESHOLD_DB's own comment for a real,
         important finding about how permissive its default is on
         featureless noise).
+
+        Phase 4.5 rework history (real-hardware findings, both tried and
+        rejected before landing on the current design): the original
+        version retuned unconditionally on every call with a SMALL (15Hz)
+        deadband against a NARROW (+-100Hz) static filter -- real testing
+        found the true drift is continuous and fast enough (~4-19Hz/s,
+        sustained, no leveling off across 60+ seconds) that this either
+        missed the signal entirely once it drifted outside the narrow
+        filter, or (once the filter was widened, see
+        PSK31_XLATE_CUTOFF_HZ's own comment) kept yanking the passband's
+        center on every poll, each retune itself a discontinuity that
+        disrupted the Costas loop's own ability to track the REST of the
+        drift continuously on its own. A follow-up attempt gated retuning
+        on "is a message currently actively decoding"
+        (psk31_deframer.chars_decoded recently advancing) to stop exactly
+        that mid-lock disruption -- also rejected: pure background noise
+        alone reliably produces a low but non-zero trickle of spurious
+        decoded characters (confirmed on real hardware, no TX active at
+        all), so that gate almost never actually reported "idle" and the
+        filter's center stayed pinned wherever it started.
+
+        **What actually works, confirmed via a real over-the-air test with
+        the actual app classes decoding a full message correctly**: keep
+        retuning unconditionally (no activity gate at all), but use a
+        LARGE deadband (PSK31_AFC_DEADBAND_HZ) instead of a small one --
+        large enough that only a genuinely big offset (e.g. the initial
+        gap between the operator's nominal tone and the real, currently-
+        drifted position) triggers an external retune at all; ordinary
+        continuous drift within a message stays under the deadband and is
+        left entirely to the Costas loop's own NCO to track, which it can
+        do well once given a wide-enough starting passband (see
+        PSK31_XLATE_CUTOFF_HZ) and a fast-enough loop bandwidth (see
+        PSK31_LOOP_BW) -- external retuning becomes a rare coarse
+        correction, not a constant fight with the loop's own tracking.
 
         The search window is always anchored at psk31_tone_hz (the
         STABLE operator nominal), NOT at the last-applied

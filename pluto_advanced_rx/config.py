@@ -181,57 +181,89 @@ PSK31_DEFAULT_TONE_HZ = 1500.0
 PSK31_TONE_RANGE_HZ = (300.0, 2700.0)
 
 # Fixed working rate the demod chain (Costas loop/symbol_sync_ff) runs at,
-# decimated down from DEMOD_IF_RATE via psk31_tone_filter -- sps =
-# 1000/31.25 = 32, comfortable margin (matches FILEBROADCAST_SPS's own
-# sps>=4 lesson). Real-hardware-verified during this mode's own Phase 0
-# OTA testing (see pluto_tx/config.py's PSK31_PREAMBLE_CHARS comment).
-PSK31_WORKING_RATE_HZ = 1_000.0
-# psk31_tone_filter's low-pass cutoff/transition (Hz) -- narrow, matching
-# PSK31's tiny ~50-60Hz occupied bandwidth. Real-hardware-verified: a
-# WIDER passband (250/150Hz) was deliberately tried during Phase 0 OTA
-# testing specifically to tolerate more frequency drift before the tone
-# fell outside it -- this made results WORSE, not better (more admitted
-# noise hurt Costas lock more than the wider margin helped). Do not widen
-# this without re-verifying on real hardware; drift tolerance is instead
-# handled by the AFC mechanism below, not by a wider static filter.
-PSK31_XLATE_CUTOFF_HZ = 100.0
-PSK31_XLATE_TRANS_HZ = 80.0
-# Costas loop / symbol_sync_ff loop bandwidth (radians/sample), real-
-# hardware-verified. A SLOWER loop (2*pi/300, mirroring the direction that
-# fixed FILEBROADCAST_GAIN_MU's own GFSK cycle-slip problem) was tried
-# during Phase 0 OTA testing and made results WORSE (more scattered
-# errors) -- PSK31's loop-bandwidth-vs-jitter relationship is NOT a copy
-# of GFSK's.
-PSK31_LOOP_BW = 2 * math.pi / 100
+# decimated down from DEMOD_IF_RATE via psk31_tone_filter. Raised from the
+# originally-verified 1000Hz to 2000Hz as part of the Phase 4.5 continuous-
+# drift rework (see PSK31_XLATE_CUTOFF_HZ's own comment): a higher working
+# rate gives psk31_tone_filter's own decimated Nyquist (working_rate/2) more
+# headroom for a wider passband without aliasing, AND (a free side effect,
+# since digital.costas_loop_cc's loop_bw is a normalized rad/sample value)
+# doubles the Costas loop's own default +-1.0 rad/sample frequency-capture
+# range from roughly +-159Hz to +-318Hz for the same PSK31_LOOP_BW. sps =
+# 2000/31.25 = 64, still a comfortable margin (matches FILEBROADCAST_SPS's
+# own sps>=4 lesson).
+PSK31_WORKING_RATE_HZ = 2_000.0
+# psk31_tone_filter's low-pass cutoff/transition (Hz).
+#
+# Phase 0 (original, narrow-passband + periodic-external-retune AFC
+# design): 100Hz/80Hz, real-hardware-verified against that era's
+# characterized drift (slow, over MINUTES, between separate short test
+# sessions). A WIDER passband (250/150Hz) was tried then and made results
+# WORSE (more admitted noise hurt Costas lock more than the wider margin
+# helped).
+#
+# Phase 4.5 (this rework): real end-to-end testing with the actual app
+# classes found a DIFFERENT, much faster problem Phase 0 never
+# characterized -- a CONTINUOUS, near-linear intra-message drift of
+# roughly 8-19Hz/s, ~400-500Hz over a single ~25s message with no sign of
+# leveling off. The AFC's own external-retune mechanism (psk31_afc_step())
+# now deliberately stops retuning once a message is actively decoding (see
+# its own docstring) and instead relies on the Costas loop's own
+# continuous closed-loop tracking to absorb further drift for the REST of
+# a message once locked -- which requires the passband to stay wide enough
+# to contain a full message's worst-case drift on its own, unlike Phase
+# 0's design where the filter only ever needed to bracket a slow, between-
+# message offset. Widened to 700Hz/200Hz (stopband edge at 900Hz, still
+# comfortably under the new 2000Hz working rate's 1000Hz Nyquist) as the
+# Phase 4.5 starting candidate -- Phase 0's own "wider is worse" finding
+# was measured against the OLD, slower-drift problem shape and a design
+# that still retuned mid-message; it does not necessarily still hold here
+# and needs its own real-hardware re-verification, not a blind carry-over
+# in either direction.
+PSK31_XLATE_CUTOFF_HZ = 700.0
+PSK31_XLATE_TRANS_HZ = 200.0
+# Costas loop / symbol_sync_ff loop bandwidth (radians/sample). Phase 0
+# real-hardware-verified this exact value against ITS OWN narrow-passband/
+# periodic-retune design (a 3x SLOWER loop, mirroring the direction that
+# fixed FILEBROADCAST_GAIN_MU's own GFSK cycle-slip problem, made results
+# WORSE then). Left unchanged as the Phase 4.5 starting candidate -- the
+# working-rate increase above already doubles its EFFECTIVE Hz bandwidth
+# for free (loop_bw is normalized to working_rate), which may be enough
+# continuous-tracking headroom on its own; re-verify on real hardware
+# before tuning this independently.
+PSK31_LOOP_BW = 2 * math.pi / 30
 
-# --- PSK31 AFC (continuous frequency-drift compensation) -----------------
-# Real over-the-air testing during Phase 0 found a substantial,
-# CONTINUOUSLY DRIFTING TX/RX frequency offset between this project's own
-# Pluto+RTL-SDR pairing (observed drifting >150Hz over ~40 minutes, never
-# settling -- see pluto_tx/config.py's PSK31_AUTO_UNKEY_WATCHDOG_S comment
-# for the full finding) -- large enough that a fixed/hardcoded correction
-# cannot track it, and (confirmed via an offline software test before this
-# was wired into the real flowgraph, see flowgraph.py's own AFC comment)
-# large enough to push the tone entirely outside psk31_tone_filter's own
-# narrow +-100Hz passband, meaning digital.costas_loop_cc's own tracked
-# residual (get_frequency()) is NOT a usable error signal on its own --
-# it reads ~0 when there's no signal reaching it at all, not the true
-# offset. Design: a SECOND, dedicated FftProbe (psk31_afc_probe, see
-# flowgraph.py) taps if_filter's output at real frequency resolution
-# (~12Hz/bin at DEMOD_IF_RATE=50kHz here) independent of the main
-# waterfall's own zoom/display state; periodically,
-# rade_autotune.estimate_signal_center() (REUSED, not reimplemented --
-# this mode's own plan explicitly recommended reusing RADE's Auto
-# Fine-Tune machinery) finds the tone's actual current position within
-# PSK31_AFC_SEARCH_RADIUS_HZ of wherever it was last found, and
-# AdvancedRxFlowgraph.psk31_afc_step() retunes psk31_tone_filter to match
-# if the estimate differs from the current tuning by more than
-# PSK31_AFC_DEADBAND_HZ -- an incremental, self-correcting search that
-# tracks drift continuously across a whole receive session, confirmed
-# (offline, synthetic +-180Hz-offset software test, a case the
-# uncorrected/Costas-only approach could NOT recover) to find a tone's
-# true center to well under 1Hz accuracy and recover a 100%-correct decode
-# from a signal the static filter alone could not lock onto at all.
+# --- PSK31 AFC (frequency-drift compensation) -----------------------------
+# Real over-the-air testing (Phase 0) found a substantial, CONTINUOUSLY
+# DRIFTING TX/RX frequency offset between this project's own Pluto+RTL-SDR
+# pairing -- both a slow, between-message drift (Phase 0, >150Hz over ~40
+# minutes) and (Phase 4.5, found once real end-to-end testing with the
+# actual app classes was tried, not just standalone scripts) a much
+# faster, sustained, CONTINUOUS intra-message drift (~4-19Hz/s, ~400-500Hz
+# over a single ~25s message, never leveling off). Design (current, Phase
+# 4.5): a SECOND, dedicated FftProbe (psk31_afc_probe, see flowgraph.py)
+# taps if_filter's output at real frequency resolution (~12Hz/bin at
+# DEMOD_IF_RATE=50kHz here) independent of the main waterfall's own zoom/
+# display state; periodically, rade_autotune.estimate_signal_center()
+# (REUSED, not reimplemented -- this mode's own plan explicitly
+# recommended reusing RADE's Auto Fine-Tune machinery) finds the tone's
+# actual current position, anchored at the operator's own stable nominal
+# (psk31_tone_hz, not a walking center -- see psk31_afc_step()'s own
+# docstring for why). AdvancedRxFlowgraph.psk31_afc_step() only retunes
+# psk31_tone_filter when that estimate differs from the current tuning by
+# more than the LARGE PSK31_AFC_DEADBAND_HZ below -- ordinary continuous
+# drift stays under the deadband and is deliberately left to the Costas
+# loop's own NCO to track on its own (see PSK31_XLATE_CUTOFF_HZ/
+# PSK31_LOOP_BW above for the wide-passband/fast-loop half of this design
+# that makes that possible); external retuning becomes a rare, coarse
+# correction (e.g. the initial gap between nominal and the real drifted
+# position at the start of a session), not a constant fight with the
+# loop's own tracking. Two smaller-deadband/gated-retune variants were
+# tried first and rejected -- see psk31_afc_step()'s own docstring for the
+# real-hardware findings that ruled each one out. This design (wide
+# passband + fast loop + large-deadband coarse retuning) is the one
+# CONFIRMED via a real over-the-air test with the actual
+# PlutoTxFlowgraph/AdvancedRxFlowgraph classes (not a standalone script)
+# to correctly decode a full test message end-to-end.
 PSK31_AFC_FFT_SIZE = 4096
 PSK31_AFC_COMPUTE_RATE_HZ = 20  # FftProbe's own internal compute throttle
 PSK31_AFC_POLL_INTERVAL_S = 2.0  # how often gui.py's _poll_psk31() actually calls psk31_afc_step()
@@ -264,4 +296,12 @@ PSK31_AFC_SEARCH_RADIUS_HZ = 600.0  # margin above the largest drift actually ob
 # already established for File Broadcast's RX side, not a claim of a
 # bulletproof automatic system.
 PSK31_AFC_THRESHOLD_DB = 25.0
-PSK31_AFC_DEADBAND_HZ = 15.0  # ignore sub-15Hz jitter in the estimate itself, only retune on a real drift-sized correction
+# LARGE deadband, by design (Phase 4.5) -- see PSK31_AFC section's own
+# comment above and psk31_afc_step()'s docstring for the full real-
+# hardware story. The original value (15Hz) forced a retune on almost
+# every poll given real continuous drift, fighting the Costas loop's own
+# tracking; 120Hz confirmed (real over-the-air test, actual app classes)
+# to let the loop absorb ordinary intra-message drift on its own while
+# still catching genuinely large offsets (e.g. a session's starting gap
+# from the operator's nominal).
+PSK31_AFC_DEADBAND_HZ = 120.0

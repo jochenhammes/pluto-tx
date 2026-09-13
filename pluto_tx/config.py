@@ -290,35 +290,56 @@ PSK31_DEFAULT_TONE_HZ = 1500.0
 PSK31_TONE_RANGE_HZ = (300.0, 2700.0)
 PSK31_MAX_TEXT_LEN = 120  # a sanity cap only, mirrors DIGITEXT_MAX_TEXT_LEN
 # Real, measured finding from this mode's own Phase 0 real-hardware
-# testing (2026-09-14 session, staged real-hardware round trips over the
-# air): the receiver's Costas loop (carrier phase) and symbol_sync_ff
-# (symbol timing) genuinely need several SECONDS of settle time on real
-# hardware to reach stable lock, not the tens-of-milliseconds scale
-# GFSK's own preamble needed -- a 16-character (~0.5s) preamble looked
-# adequate on one short test message but was NOT actually sufficient (a
-# longer message revealed real, reproducible mid-transmission decode
-# failure in its first half); 60 characters (~1.9s) still failed; 150
-# characters (~4.8s) made a previously-failing message decode 100%
-# correctly, reproducibly, on repeat real-hardware runs. 200 is a
-# deliberate margin above that confirmed-sufficient 150, not itself
-# re-verified at exactly this value -- revisit if real testing in Phase 3/4
-# shows it's still not enough on a different link.
-PSK31_PREAMBLE_CHARS = 200
+# testing: the receiver's Costas loop (carrier phase) and symbol_sync_ff
+# (symbol timing) genuinely need real SETTLE TIME on real hardware to
+# reach stable lock, not the tens-of-milliseconds scale GFSK's own
+# preamble needed. Each idle preamble character costs exactly 3 bits
+# (Varicode "1" for space + the "00" inter-character separator), i.e.
+# `chars * 3 / PSK31_SYMBOL_RATE_HZ` real seconds -- Phase 0's own
+# original write-up here MISCALCULATED this as ~1 bit/char (a 3x
+# underestimate, caught and fixed during the Phase 4.5 rework below) --
+# 16 chars is really ~1.54s (not "~0.5s"), 60 chars ~5.76s (not "~1.9s"),
+# 150 chars ~14.4s (not "~4.8s").
+#
+# Phase 0 (original design: narrow +-100Hz static passband, small-deadband
+# periodic external retune): 16 chars alone was NOT sufficient (looked
+# adequate on one short test message, but a longer message revealed real,
+# reproducible mid-transmission decode failure); 60 chars still failed;
+# 150 chars worked reproducibly; shipped at 200 chars (~19.2s) as margin.
+#
+# Phase 4.5 (this rework: wide +-700Hz static passband, fast Costas loop,
+# large-deadband coarse-only external retune -- see pluto_advanced_rx/
+# config.py's own PSK31_AFC/PSK31_XLATE_CUTOFF_HZ/PSK31_LOOP_BW comments):
+# the redesigned chain locks MUCH faster -- real over-the-air re-testing
+# with the actual PlutoTxFlowgraph/AdvancedRxFlowgraph classes found even
+# 16 chars (~1.54s) decoded a short message correctly, and 30 chars
+# (~2.88s) AND 60 chars (~5.76s) both decoded a longer (70-char) message
+# 100% correctly, reproducibly, using the real production AFC poll cadence
+# (PSK31_AFC_POLL_INTERVAL_S=2.0s). Set to 60 chars -- 2x margin above the
+# also-confirmed-working 30 chars, comfortably above one AFC poll interval
+# so the coarse correction reliably lands during the preamble rather than
+# the real payload -- a large reduction from the old 200 (19.2s), not a
+# re-verification of that old value under the new design.
+PSK31_PREAMBLE_CHARS = 60
 PSK31_TAIL_S = 0.15  # mirrors DIGITEXT_TAIL_S's own real-hardware-motivated rationale
 # Unconditional backstop watchdog, mirrors DIGITEXT_AUTO_UNKEY_WATCHDOG_S.
 PSK31_AUTO_UNKEY_WATCHDOG_S = 2.0
-# Real, measured, and important caveat (2026-09-14 Phase 0 testing, see the
-# plan's own progress log): this specific Pluto+RTL-SDR pairing showed a
-# REAL, substantial, CONTINUOUSLY DRIFTING frequency offset between TX and
-# RX (observed drifting over 150Hz across ~40 minutes of testing, never
-# settling to a stable value) -- PSK31's ~50-60Hz occupied bandwidth makes
-# this a serious problem a fixed/hardcoded correction cannot solve. There
-# is deliberately NO frequency-correction constant here: Phase 4's RX
-# integration needs a real AFC/frequency-search mechanism (the plan
-# recommends reusing pluto_advanced_rx/rade_autotune.py's already-built
-# "Auto Fine-Tune" feature as a direct precedent, not designing from
-# scratch) rather than a guessed number that will already be stale by the
-# time this ships.
+# Real, measured, and important caveat: this specific Pluto+RTL-SDR
+# pairing shows a REAL frequency offset between TX and RX that DRIFTS --
+# both slowly between separate sessions (Phase 0: >150Hz over ~40 minutes)
+# and, found later (Phase 4.5), continuously and much faster WITHIN a
+# single message (~4-19Hz/s, ~400-500Hz over ~25s, never leveling off).
+# PSK31's tiny occupied bandwidth makes this a serious problem a fixed/
+# hardcoded correction cannot solve. There is deliberately NO frequency-
+# correction constant here: pluto_advanced_rx (which actually receives)
+# owns a real, working AFC -- see its own config.py's PSK31_AFC_*/
+# PSK31_XLATE_CUTOFF_HZ/PSK31_LOOP_BW comments for the current design
+# (reuses pluto_advanced_rx/rade_autotune.py's Auto Fine-Tune machinery
+# for coarse acquisition, combined with a wide passband + fast Costas loop
+# so the receiver's own carrier tracking absorbs ordinary continuous
+# drift) and psk31_afc_step()'s docstring for the real-hardware findings
+# that shaped it, including two earlier designs that were tried and
+# rejected.
 
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
