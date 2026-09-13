@@ -61,7 +61,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
+        outer_layout = QtWidgets.QVBoxLayout(central)
+
+        # Two-column layout: left column holds every RX control (Device +
+        # Mode groups), right column holds the Waterfall/Spectrum group
+        # (which already contains its own zoom/averaging/FFT-size/dB
+        # sliders alongside the plot itself). Neither group's internal
+        # construction changes below -- only which of these two columns
+        # each group's own layout.addWidget(...) call targets, further
+        # down. Fixes a real small/low-vertical-resolution-screen problem:
+        # stacking controls above the waterfall (the old single-column
+        # layout) made the window's minimum height the SUM of both; side
+        # by side, it's just the max of the two, and the control stack
+        # alone is comfortably short (~300-450px).
+        columns_layout = QtWidgets.QHBoxLayout()
+        left_column = QtWidgets.QVBoxLayout()
+        right_column = QtWidgets.QVBoxLayout()
+        columns_layout.addLayout(left_column, 0)   # natural width -- controls don't need to grow
+        columns_layout.addLayout(right_column, 1)  # takes all extra horizontal space -- the waterfall should stay wide
+        outer_layout.addLayout(columns_layout, 1)
 
         # --- Device group: type + connection, scan/connect -----------------
         # One connection combo shared by every backend (a libiio URI for
@@ -92,7 +110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button = QtWidgets.QPushButton("Disconnect")
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
-        layout.addWidget(device_group)
+        left_column.addWidget(device_group)
         self._update_device_connection_labels()
 
         # --- Mode group: a QTabWidget ("Audio" holds today's full FM/SSB/
@@ -348,7 +366,9 @@ class MainWindow(QtWidgets.QMainWindow):
         bandwidth_row.addStretch(1)
         device_group_layout.addLayout(bandwidth_row)
 
-        layout.addWidget(mode_group)
+        left_column.addWidget(mode_group)
+        left_column.addStretch(1)  # keeps device_group/mode_group at natural height instead of
+        # stretching to fill the (likely taller) right column's height -- see the column-layout comment above
 
         # --- Waterfall / spectrum group -------------------------------------
         waterfall_group = QtWidgets.QGroupBox("Waterfall / Spectrum")
@@ -447,10 +467,10 @@ class MainWindow(QtWidgets.QMainWindow):
         content_row.addLayout(db_sliders_col)
         waterfall_layout.addLayout(content_row, 1)
 
-        layout.addWidget(waterfall_group, 1)
+        right_column.addWidget(waterfall_group)
 
         self.status_label = QtWidgets.QLabel()
-        layout.addWidget(self.status_label)
+        outer_layout.addWidget(self.status_label)
 
         self._sync_waterfall()
 
