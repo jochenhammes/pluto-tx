@@ -3,3 +3,6 @@ __pycache__/
 pluto_tx/_silence.wav
 gr-m17/
 rade_c/
+# Local working notes/briefings -- not meant to be synced to GitHub.
+install-improvements.md
+pluto-tx-file-broadcast-briefing.md
