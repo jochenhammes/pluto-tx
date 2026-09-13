@@ -53,8 +53,15 @@ class FftProbe(gr.sync_block):
     # Zoom bound: effective FFT length is fft_size*zoom, so this keeps the
     # worst case (largest FFT_SIZE_PRESETS entry times max zoom) bounded to
     # something still comfortably real-time at FFT_COMPUTE_RATE_HZ on
-    # ordinary hardware, rather than unbounded.
-    MAX_ZOOM = 32
+    # ordinary hardware, rather than unbounded. Raised from 32 to 128 by
+    # explicit request ("mehr gezoomt werden können") -- measured worst
+    # case (fft_size=16384, the largest FFT_SIZE_PRESETS entry) is a
+    # ~155ms numpy FFT, and _compute_stride already throttles how often
+    # that even runs (it needs eff_size=16384*128=2,097,152 fresh samples
+    # between computes, several seconds' worth at any RX_BANDWIDTH_PRESETS
+    # rate), so it stays a small fraction of its own natural cycle time
+    # even at this combination -- not just an unverified guess.
+    MAX_ZOOM = 128
     MAX_AVG = 100
 
     def __init__(self, fft_size, sample_rate, window_type, compute_rate_hz):
