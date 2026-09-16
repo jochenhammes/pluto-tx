@@ -9,6 +9,7 @@ import sys
 
 from PyQt5 import QtCore, QtWidgets, sip
 
+from . import audio_devices
 from . import config
 from . import devices
 from . import digitext
@@ -69,6 +70,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._psk31_ptt_epoch = 0
         self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
+        self._audio_device = ""  # carried across reconnects; updated when source_combo picks a different mic
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -261,11 +263,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mode_row.addWidget(QtWidgets.QLabel("Source:"))
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItem("Microphone", PlutoTxFlowgraph.SRC_MIC)
+        # One entry per real input device (System Default first, so a
+        # fresh install/first launch behaves exactly like before this
+        # device list existed), each tagged SRC_MIC on Qt.UserRole (kept
+        # identical to the old 2-item combo's contract, so findData(source)
+        # below and set_source()'s SRC_MIC/SRC_FILE check both still work
+        # unmodified) plus the actual ALSA device string on a second,
+        # custom role -- see _on_source_changed() for why a second role
+        # instead of just switching on label text.
+        for device_str, label in audio_devices.list_input_devices().items():
+            idx = self.source_combo.count()
+            self.source_combo.addItem(label, PlutoTxFlowgraph.SRC_MIC)
+            self.source_combo.setItemData(idx, device_str, QtCore.Qt.UserRole + 1)
         self.source_combo.addItem("Audio File", PlutoTxFlowgraph.SRC_FILE)
         initial_source_idx = self.source_combo.findData(source)
         if initial_source_idx >= 0:
             self.source_combo.setCurrentIndex(initial_source_idx)
+            if source == PlutoTxFlowgraph.SRC_MIC:
+                self._audio_device = self.source_combo.currentData(QtCore.Qt.UserRole + 1)
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         mode_row.addWidget(self.source_combo)
 
@@ -951,10 +966,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif device_cls.connection_kind == "audio_device":
             self.device_label.setText("Audio Device (blank = system default):")
             self.uri_combo.setToolTip(
-                "ALSA/PortAudio device name, or leave blank to use the system's "
-                "default audio output -- the RADE signal is written there for an "
-                "externally-connected SSB transceiver to transmit. Scan reports 0 "
-                "devices here (no structured enumeration exists for gr-audio)."
+                "ALSA device name, or leave blank to use the system's default "
+                "audio output -- the RADE/Digitext/PSK31 signal is written there "
+                "for an externally-connected SSB transceiver to transmit. Use "
+                "Scan to list available output devices."
             )
         else:
             self.device_label.setText("HackRF Serial (blank = auto):")
@@ -1358,10 +1373,47 @@ class MainWindow(QtWidgets.QMainWindow):
             tb.add_filebroadcast_file(filename, data)
 
     def _on_source_changed(self, idx):
+        """Mic<->File toggling (or reselecting the mic device that's
+        already built into the running flowgraph) stays the existing
+        instant runtime switch via set_source(). Picking a DIFFERENT
+        physical mic device needs a full rebuild -- audio.source()'s
+        device is baked in at construction, same reason _on_pick_file()
+        below already rebuilds for a new WAV file.
+
+        Real bug found on real hardware: rebuilding straight away tears
+        the CURRENT (working) flowgraph down before the new device is
+        even known to work -- picking a busy/unavailable mic (e.g. one
+        PipeWire already holds exclusively) didn't just fail to switch,
+        it silently dropped the otherwise-healthy Pluto connection too
+        (PTT greyed out, RF link gone, status showing a misleading
+        "Could not connect to PlutoSDR" even though the Pluto itself was
+        never the problem). Probe the device FIRST; only rebuild if it's
+        actually usable, and revert the combo selection otherwise so the
+        UI doesn't show a device that was never actually switched to."""
         source = self.source_combo.currentData()
+        self.file_button.setEnabled(source == PlutoTxFlowgraph.SRC_FILE)
+        if source == PlutoTxFlowgraph.SRC_MIC:
+            new_device = self.source_combo.currentData(QtCore.Qt.UserRole + 1)
+            if new_device != self._audio_device:
+                error = audio_devices.probe_device("input", new_device)
+                if error is not None:
+                    self.status_label.setText(f"Could not open audio input device: {error}")
+                    self.source_combo.blockSignals(True)
+                    prev_idx = self.source_combo.findData(PlutoTxFlowgraph.SRC_MIC)
+                    for i in range(self.source_combo.count()):
+                        if (self.source_combo.itemData(i) == PlutoTxFlowgraph.SRC_MIC
+                                and self.source_combo.itemData(i, QtCore.Qt.UserRole + 1) == self._audio_device):
+                            prev_idx = i
+                            break
+                    self.source_combo.setCurrentIndex(prev_idx)
+                    self.source_combo.blockSignals(False)
+                    return
+                self._audio_device = new_device
+                if self.tb is not None:
+                    self._rebuild(self.tb.device.connection, self._wav_path)
+                return
         if self.tb is not None:
             self.tb.set_source(source)
-        self.file_button.setEnabled(source == PlutoTxFlowgraph.SRC_FILE)
 
     def _on_pick_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose Audio File", "", "WAV files (*.wav)")
@@ -1709,6 +1761,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 frequency=self.freq_spin.value() * 1e6,
                 power_ceiling=self._atten_ceiling_db,
                 wav_path=wav_path,
+                audio_device=self._audio_device,
                 mode=self._current_mode,
                 source=self.source_combo.currentData(),
                 enable_waterfall=True,

@@ -143,6 +143,15 @@ class PlutoTxFlowgraph(gr.top_block):
         # Pluto; see each TxDevice subclass for its own backend).
         self.device = devices.build_device(device_type, connection=connection, frequency_hz=self.nominal_freq_hz)
         self.device.prepare_for_start()
+        # Which real output device RADE/Digitext/PSK31's own soundcard-out
+        # sinks should write to -- only meaningful for is_audio_only() (the
+        # Soundcard device type), where `connection` is an ALSA device
+        # string chosen via the GUI's Scan/Connect flow (audio_devices.
+        # list_output_devices()). For Pluto/HackRF, `connection` is an RF
+        # URI/serial -- must NOT be handed to audio.sink() as a device
+        # name, so those sinks stay on "" (system default) exactly as
+        # before this device-selection feature existed.
+        self._soundcard_audio_device = self.device.connection if self.device.is_audio_only() else ""
 
         # --- Sources ---------------------------------------------------
         self.mic_source = audio.source(config.AUDIO_RATE, audio_device, True)
@@ -410,7 +419,7 @@ class PlutoTxFlowgraph(gr.top_block):
             # which unmutes/mutes THIS gate instead of tx_gain/the device.
             self.rade_audio_gain = blocks.multiply_const_ff(0.0)
             self.connect(self.rade_audio_resampler_out, self.rade_audio_gain)
-            self.rade_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
+            self.rade_audio_sink = audio.sink(config.AUDIO_RATE, self._soundcard_audio_device, True)
             self.connect(self.rade_audio_gain, self.rade_audio_sink)
 
         # --- Digitext branch (waterfall-text digimode, pluto_tx/digitext.py):
@@ -481,7 +490,7 @@ class PlutoTxFlowgraph(gr.top_block):
         # rebuilds digitext_source fresh for a new transmission.
         self.digitext_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/rade_audio_gain
         self.connect(self.digitext_source, self.digitext_audio_gain)
-        self.digitext_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
+        self.digitext_audio_sink = audio.sink(config.AUDIO_RATE, self._soundcard_audio_device, True)
         self.connect(self.digitext_audio_gain, self.digitext_audio_sink)
 
         # --- PSK31 branch (BPSK31 keyboard-chat digimode, pluto_tx/psk31.py
@@ -512,7 +521,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.psk31_ssb_mod, self.psk31_ssb_resampler)
         self.psk31_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/digitext_audio_gain
         self.connect(self.psk31_source, self.psk31_audio_gain)
-        self.psk31_audio_sink = audio.sink(config.AUDIO_RATE, "", True)
+        self.psk31_audio_sink = audio.sink(config.AUDIO_RATE, self._soundcard_audio_device, True)
         self.connect(self.psk31_audio_gain, self.psk31_audio_sink)
 
         # --- File Broadcast branch (repetitive file-broadcast mode, 23cm

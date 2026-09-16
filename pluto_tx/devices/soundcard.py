@@ -18,6 +18,7 @@ equivalent added last session) wherever the TxDevice/RxDevice ABCs allow.
 """
 from gnuradio import gr, blocks
 
+from .. import audio_devices
 from .base import PowerStage, TxDevice
 
 
@@ -81,12 +82,23 @@ class SoundcardDevice(TxDevice):
 
     @staticmethod
     def probe_with_timeout(connection, timeout_s=5.0):
-        """A sound card is treated as always available -- no equivalent of
-        libiio's/SoapySDR's reachability check exists for gr-audio."""
-        return None
+        """`timeout_s` unused -- opening/closing a local ALSA device is
+        near-instant, no network/USB round trip like Pluto's/HackRF's own
+        probe needs a timeout for. Real bug found on real hardware: this
+        used to always return None (treating a sound card as always
+        available), so _rebuild() would tear the OLD flowgraph down
+        first and only THEN discover the new output device was busy
+        (e.g. one PipeWire already holds exclusively) -- losing a
+        perfectly good previous connection over a bad new one. Probing
+        here, before _rebuild() ever touches the existing flowgraph, lets
+        _connect() refuse the switch cleanly instead (same fix as the
+        audio INPUT side, see gui.py's _on_source_changed())."""
+        return audio_devices.probe_device("output", connection)
 
     @staticmethod
     def scan_devices_with_timeout(timeout_s=5.0):
-        """No structured device enumeration exists for gnuradio.audio -- the
-        GUI's existing "0 devices found" handling covers this fine."""
-        return {}, None
+        """`timeout_s` unused -- audio_devices.list_output_devices() shells
+        out to `aplay -l`, which reads already-enumerated ALSA state
+        in-process, not a real hardware scan (no network/USB probing like
+        Pluto's/HackRF's own scan needs a timeout for)."""
+        return audio_devices.list_output_devices(), None
