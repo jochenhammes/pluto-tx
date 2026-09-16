@@ -221,6 +221,18 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
         for region in self._psk31_band_regions:
             region.setRegion((lo_hz, hi_hz))
 
+    def set_psk31_visible(self, visible: bool):
+        """PSK31 decodes in parallel regardless of which tab is open (see
+        AdvancedRxFlowgraph's always-on PSK31 branch), but its marker/band
+        should only be ON SCREEN while the operator is actually looking at
+        the Digimodes tab -- gui.py calls this from mode_tab_widget's
+        currentChanged, not tied to demodulation itself continuing to run
+        (or not) in the background."""
+        for marker in self._psk31_marker_lines:
+            marker.setVisible(visible)
+        for region in self._psk31_band_regions:
+            region.setVisible(visible)
+
     def set_fft_size(self, fft_size):
         self._init_image_buffer(fft_size)
 

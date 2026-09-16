@@ -154,7 +154,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_tab_widget.addTab(audio_tab, "Audio")
         digimodes_tab = QtWidgets.QWidget()
         digimodes_tab_layout = QtWidgets.QVBoxLayout(digimodes_tab)
-        self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
+        self._digimodes_tab_index = self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
         # PSK31 (BPSK31 chat) -- the tab's only occupant so far (pluto_tx's
         # own "Waterfall Writer" digimode is TX-only, never lands here --
         # see the plan). Always-on branch (see flowgraph.py), independent
@@ -573,6 +573,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.waterfall.frequency_clicked.connect(self._on_waterfall_clicked)
         self.waterfall.zoom_step_requested.connect(self._on_waterfall_zoom_step)
+        # PSK31's marker/band should only be visible while the operator is
+        # actually on the Digimodes tab -- see set_psk31_visible()'s own
+        # docstring. mode_tab_widget defaults to the "Audio" tab (index 0),
+        # so this starts hidden; _on_mode_tab_changed() keeps it in sync.
+        self.mode_tab_widget.currentChanged.connect(self._on_mode_tab_changed)
+        self.waterfall.set_psk31_visible(self.mode_tab_widget.currentIndex() == self._digimodes_tab_index)
 
         # Floor/Ceiling: vertical sliders stacked to the right of the
         # spectrum+waterfall, since the noise floor varies a lot with
@@ -1080,6 +1086,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._psk31_receiving:
             return
         self._psk31_state.on_char(char)
+
+    def _on_mode_tab_changed(self, index):
+        self.waterfall.set_psk31_visible(index == self._digimodes_tab_index)
 
     def _on_m17_fields(self, fields):
         """Passed to AdvancedRxFlowgraph as on_m17_fields -- called from
