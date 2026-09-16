@@ -22,6 +22,8 @@ import time
 
 from PyQt5 import QtCore, QtWidgets
 
+from pluto_tx import audio_devices
+
 from . import config
 from . import devices
 from . import rade_autotune
@@ -417,6 +419,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nf_gain_label.setMinimumWidth(50)
         nf_row.addWidget(self.nf_gain_label)
         audio_tab_layout.addLayout(nf_row)
+
+        # Where RX's own demodulated audio plays out -- real ALSA devices
+        # (System Default first, from list_output_devices()) plus a
+        # persistent, qpwgraph-visible pw-loopback node
+        # (ensure_persistent_output_node()) so another application can
+        # treat this app's received audio as a stable input source. Exact
+        # same pattern as pluto_tx's Soundcard-mode output combo -- see
+        # pluto_tx/audio_devices.py and pluto_tx/devices/soundcard.py.
+        audio_device_row = QtWidgets.QHBoxLayout()
+        audio_device_row.addWidget(QtWidgets.QLabel("Audio Output:"))
+        self.audio_device_combo = QtWidgets.QComboBox()
+        for device_str, label in audio_devices.list_output_devices().items():
+            self.audio_device_combo.addItem(label, device_str)
+        persistent_device_str = audio_devices.ensure_persistent_output_node(name="pluto-advanced-rx-output")
+        if persistent_device_str is not None:
+            self.audio_device_combo.addItem("pluto-advanced-rx Output (qpwgraph)", persistent_device_str)
+        self._audio_device = self.audio_device_combo.currentData()  # "" (System Default) -- single
+        # source of truth threaded into every AdvancedRxFlowgraph(...) call below, kept in sync by
+        # _on_audio_device_changed() only after a rebuild actually succeeds.
+        self.audio_device_combo.currentIndexChanged.connect(self._on_audio_device_changed)
+        audio_device_row.addWidget(self.audio_device_combo)
+        audio_tab_layout.addLayout(audio_device_row)
+
         audio_tab_layout.addStretch(1)
 
         bandwidth_row = QtWidgets.QHBoxLayout()
@@ -1444,7 +1469,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone,
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=self._audio_device,
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
@@ -1469,6 +1494,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_waterfall()
         self.tb.start()
         self.status_label.setText(f"Switched to {self._format_hz(new_rate)}.")
+
+    def _on_audio_device_changed(self, idx):
+        """Audio Output combo change: gnuradio's audio.sink() has no
+        runtime device-swap API, so this rebuilds the whole flowgraph
+        from scratch, carrying over every other current setting -- exact
+        same shape as _on_bandwidth_changed() above (build the new
+        flowgraph FIRST, only shutdown/swap the old one on success, so a
+        bad/busy device never costs the existing, working RX connection)."""
+        new_device = self.audio_device_combo.currentData()
+        if new_device == self._audio_device:
+            return
+        if self.tb is None:
+            self._audio_device = new_device
+            return
+        self._autotune_cancel()
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        freq = self.tb.nominal_freq_hz
+        fine = self.tb.fine_offset_hz
+        demod_mode = self.demod_combo.currentData()
+        nf_gain = self.nf_gain_slider.value() / 100.0
+        fft_size = self.fft_size_combo.currentData()
+        fm_width = self.tb.fm_demod_width_hz
+        ssb_width = self.tb.ssb_demod_width_hz
+        psk31_tone = self.tb.psk31_tone_hz
+
+        try:
+            new_tb = AdvancedRxFlowgraph(
+                uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
+                demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
+                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
+                device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=new_device,
+                **self._current_gain_kwargs(device_cls),
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not switch audio output: {e}")
+            self.audio_device_combo.blockSignals(True)
+            self.audio_device_combo.setCurrentIndex(self.audio_device_combo.findData(self._audio_device))
+            self.audio_device_combo.blockSignals(False)
+            return
+
+        new_tb.set_fine_offset(fine)
+        new_tb.set_rx_muted(self._rx_muted)  # carry the CURRENT mute state over, same reasoning
+        # as _on_bandwidth_changed() -- this is an in-session rebuild, not a fresh connect.
+        new_tb.set_fft_zoom(self.zoom_slider.value())
+        new_tb.set_fft_avg_count(self.avg_slider.value())
+        self._fft_gen = -1
+        self._filebroadcast_last_attempt_total = 0
+        self._filebroadcast_last_activity_time = 0.0
+        self._psk31_last_chars_decoded = 0
+        self._psk31_last_activity_time = 0.0
+        self.tb.shutdown()
+        self.tb = new_tb
+        self._sync_waterfall()
+        self.tb.start()
+        self._audio_device = new_device
+        self.status_label.setText("Audio output switched.")
 
     def _on_connect_clicked(self):
         if self.tb is not None:
@@ -1581,6 +1663,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()),
+                audio_device=self._audio_device,
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:

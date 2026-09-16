@@ -25,7 +25,9 @@ constructor's signature and behavior are unchanged for existing callers.
 import math
 import sys
 
-from gnuradio import gr, blocks, filter, analog, audio, digital
+from gnuradio import gr, blocks, filter, analog, digital
+
+from pluto_tx import audio_devices
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
@@ -55,7 +57,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
                  gain_values=None, on_filebroadcast_frame=None, on_psk31_char=None,
-                 psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ):
+                 psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ, audio_device=""):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -430,8 +432,11 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.rx_mute = blocks.multiply_const_ff(0.0)
         self.connect(self.nf_gain, self.rx_mute)
 
-        # Standard Linux default audio output (empty device string).
-        self.audio_sink = audio.sink(config.AUDIO_RATE, "", True)
+        # audio_device selects a real ALSA device, a PipeWire sink
+        # monitor, or the persistent qpwgraph loopback node -- "" (system
+        # default) unless the GUI's Audio Output combo picked something
+        # else, see gui.py's audio_device_combo/_on_audio_device_changed().
+        self.audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, audio_device)
         self.connect(self.rx_mute, self.audio_sink)
 
     def _retune(self):

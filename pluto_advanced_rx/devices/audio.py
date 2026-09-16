@@ -2,7 +2,12 @@
 conventional SSB transceiver, e.g. receiving RADE audio-injected over its
 own RF path) feed this app via a sound card, instead of any SDR hardware.
 
-No RF concept applies here at all -- no frequency, no gain, no device scan.
+No RF concept applies here at all -- no frequency, no gain. Device scan/
+probe DO apply, though (see scan_devices_with_timeout()/probe_with_timeout()
+below): real ALSA input devices, PipeWire sink monitors, and a persistent
+qpwgraph loopback node are all selectable, the same "monitor:<node.name>"
+mechanism pluto_tx/audio_devices.py already established.
+
 The one real piece of DSP this backend does: convert the sound card's REAL
 mono audio into the complex64 stream every other RxDevice.build_source()
 already promises, so the REST of AdvancedRxFlowgraph (fft_probe, if_filter,
@@ -20,7 +25,9 @@ mirror image. RADE's OFDM carriers are themselves centered at 1500 Hz
 (rade_ofdm.c, "middle of SSB passband") entirely inside librade.so -- this
 module doesn't need to shift anything to make that true.
 """
-from gnuradio import gr, blocks, audio
+from gnuradio import gr, blocks
+
+from pluto_tx import audio_devices
 
 from .base import RxDevice
 
@@ -47,7 +54,7 @@ class _AudioToComplexSource(gr.hier_block2):
             gr.io_signature(0, 0, 0),
             gr.io_signature(1, 1, gr.sizeof_gr_complex),
         )
-        self.audio_source = audio.source(int(sample_rate_hz), device_name, True)
+        self.audio_source = audio_devices.open_input_device(int(sample_rate_hz), device_name)
         self.gain = blocks.multiply_const_ff(REAL_INPUT_GAIN)
         self.to_complex = blocks.float_to_complex(1)
         self.connect(self.audio_source, self.gain)
@@ -93,12 +100,35 @@ class AudioDevice(RxDevice):
 
     @staticmethod
     def probe_with_timeout(connection, timeout_s=5.0):
-        """A sound card is treated as always available -- no equivalent of
-        libiio's/SoapySDR's reachability check exists for gr-audio."""
-        return None
+        """`timeout_s` unused -- opening/closing a local ALSA/PipeWire device
+        is near-instant, no network/USB round trip like Pluto's/HackRF's own
+        probe needs a timeout for. Real devices are now selectable (see
+        scan_devices_with_timeout() below), so unlike the old
+        always-typed-manually assumption, a genuinely busy/unavailable
+        device is a real possibility -- audio_devices.probe_device() catches
+        it before AdvancedRxFlowgraph construction is even attempted, same
+        as pluto_tx's Soundcard-mode output probe."""
+        return audio_devices.probe_device("input", connection)
 
     @staticmethod
     def scan_devices_with_timeout(timeout_s=5.0):
-        """No structured device enumeration exists for gnuradio.audio --
-        the GUI's existing "0 devices found" handling covers this fine."""
-        return {}, None
+        """`timeout_s` unused -- audio_devices.list_input_devices()/
+        list_monitor_devices() shell out to `arecord -l`/`pw-dump`, which
+        read already-enumerated ALSA/PipeWire state in-process, not a real
+        hardware scan (no network/USB probing like Pluto's/HackRF's own
+        scan needs a timeout for).
+
+        Real ALSA input devices (System Default first), PipeWire sink
+        monitors, and a persistent, qpwgraph-visible pw-loopback node
+        (ensure_persistent_input_node(), created lazily on first scan here)
+        -- so an external application (or qpwgraph) can feed audio INTO
+        this RX app as if it were a real sound card. Exact same enumeration
+        this app's own Source combo uses on the pluto_tx side -- see
+        pluto_tx/audio_devices.py and pluto_tx/gui.py's source_combo
+        construction."""
+        devices = audio_devices.list_input_devices()
+        devices.update(audio_devices.list_monitor_devices())
+        persistent = audio_devices.ensure_persistent_input_node(name="pluto-advanced-rx-input")
+        if persistent is not None:
+            devices[persistent] = "pluto-advanced-rx Input (qpwgraph)"
+        return devices, None
