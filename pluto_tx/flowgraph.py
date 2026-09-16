@@ -148,6 +148,34 @@ class PlutoTxFlowgraph(gr.top_block):
         self.mic_source = audio.source(config.AUDIO_RATE, audio_device, True)
         self.wav_path = wav_path or _default_wav_path()
         file_mono = self._build_file_source(self.wav_path)
+        # blocks.wavfile_source (inside _build_file_source() above) has no
+        # hardware-driven pacing the way mic_source does -- ALSA/PipeWire's
+        # own audio.source() is called by its driver at a steady, hardware-
+        # timed cadence (one period at a time), which naturally trickles
+        # samples into the flowgraph smoothly. A file source instead just
+        # returns however many samples the scheduler asks for (noutput_items)
+        # as fast as disk/page-cache I/O allows, relying ENTIRELY on
+        # downstream buffer-full backpressure to avoid running ahead of real
+        # time -- which means whenever downstream buffer room opens up in a
+        # burst (plausible given M17's own already-documented scheduling
+        # quirks: output_multiple(192) plus a huge downstream expansion
+        # factor, RRC x10 /resampler x~52), the file source can be pulled in
+        # equally bursty chunks instead of a smooth trickle. Confirmed on
+        # real hardware this session: mic source -> zero RF dropouts over a
+        # sustained M17 TX; file source -> reliably reproduces the reported
+        # chopping, REGARDLESS of audio content/loudness (tested quiet vs.
+        # loud) or of whether the downmix/resample stages below even run
+        # (tested a pre-converted mono/48kHz file, skipping both) -- i.e.
+        # audio content and the extra processing stages are both ruled out,
+        # leaving wavfile_source's own delivery pattern as the remaining
+        # variable. This throttle forces it back to a smooth, real-time
+        # trickle, mirroring the identical fix already applied to File
+        # Broadcast's own unthrottled background source above.
+        self.file_throttle = blocks.throttle(
+            gr.sizeof_float, config.AUDIO_RATE, True, config.FILE_THROTTLE_CHUNK_SAMPLES,
+        )
+        self.connect(file_mono, self.file_throttle)
+        file_mono = self.file_throttle
 
         # NOTE: blocks.selector's ninputs is only known once the flowgraph is
         # actually running (its io_signature is unbounded at construction
@@ -518,6 +546,25 @@ class PlutoTxFlowgraph(gr.top_block):
         # waveform).
         self.filebroadcast_planner = filebroadcast.FileBroadcastPlanner()
         self.filebroadcast_source = FileBroadcastSource(self.filebroadcast_planner, config.FILEBROADCAST_CHUNK_SIZE)
+        # filebroadcast_source has NO natural rate limiting (in_sig=None,
+        # a pure gr.sync_block reading from a queue/planner) -- unlike
+        # mic_source/audio_alsa_source, which every other mode's own
+        # always-running background branch ultimately depends on and
+        # which real audio hardware paces to real time regardless of
+        # whether that branch is actually selected. Without this throttle,
+        # this branch free-runs at full CPU speed permanently (confirmed
+        # on real hardware via per-thread pidstat: this branch's resampler
+        # thread sat at 96-99% of one core continuously, even with a
+        # DIFFERENT mode -- M17 -- both selected and actively
+        # transmitting), competing for CPU with whichever mode IS active
+        # and producing intermittent real-time dropouts in that mode's own
+        # output (observed as choppy segments in an M17 transmission's
+        # waterfall). Rate matches the byte stream this source emits:
+        # FILEBROADCAST_SYMBOL_RATE_HZ bits/sec / 8 = bytes/sec (do_unpack=True
+        # below unpacks each byte into 8 one-bit GFSK symbols).
+        self.filebroadcast_throttle = blocks.throttle(
+            gr.sizeof_char, config.FILEBROADCAST_SYMBOL_RATE_HZ / 8,
+        )
         fb_sensitivity = 2 * math.pi * config.FILEBROADCAST_DEVIATION_HZ / config.FILEBROADCAST_WORKING_RATE_HZ
         self.filebroadcast_mod = digital.gfsk_mod(
             samples_per_symbol=config.FILEBROADCAST_SPS, sensitivity=fb_sensitivity,
@@ -539,7 +586,8 @@ class PlutoTxFlowgraph(gr.top_block):
         self.filebroadcast_tx_resampler = filter.rational_resampler_ccf(
             interpolation=fb_interp, decimation=fb_decim, taps=fb_taps,
         )
-        self.connect(self.filebroadcast_source, self.filebroadcast_mod)
+        self.connect(self.filebroadcast_source, self.filebroadcast_throttle)
+        self.connect(self.filebroadcast_throttle, self.filebroadcast_mod)
         self.connect(self.filebroadcast_mod, self.filebroadcast_tx_resampler)
 
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is

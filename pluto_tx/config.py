@@ -29,6 +29,36 @@ MAX_ATTEN = 0.0
 # Audio front end.
 AUDIO_RATE = 48_000
 
+# Caps how many samples blocks.throttle (file_throttle in flowgraph.py)
+# releases per internal wait cycle. The default (0 = unbounded) lets a
+# large accumulated time surplus drain in one big burst whenever
+# downstream buffer room opens up -- confirmed on real M17 hardware this
+# reliably reproduces RF chopping (gr-m17's m17_coder has zero input
+# lookahead: see m17_coder_impl.cc's general_work(), it returns a
+# partial/zero frame when fewer than PAYLOAD_BYTES=16 fresh bytes are
+# available).
+#
+# 960 (not a round "~Nms" number) is deliberately chosen to align with
+# gr-m17's codec2_encoder, which sits directly downstream of this
+# throttle (via m17_audio_resampler, AUDIO_RATE 48000 -> M17_CODEC2_RATE
+# 8000, a clean 6:1 decimation) and has the IDENTICAL all-or-nothing
+# per-call behavior as m17_coder: codec2_encoder_impl.cc's general_work()
+# needs a full CODEC2_SAMPLES_PER_FRAME (160 samples @ 8kHz = 20ms, for
+# the CODEC2_MODE_3200 this project uses) of contiguous input or it
+# returns 0 output for that call, with zero lookahead buffering. 480
+# (the first value tried) yields only 480/6=80 samples @ 8kHz per
+# release -- exactly HALF a codec2 frame -- so codec2_encoder needed two
+# throttle releases to produce anything, alternating empty/full calls;
+# confirmed on real hardware this fixed the earlier full RF-level
+# dropouts (gr-m17's own m17_coder no longer starves) but left a
+# residual, milder stutter audible in the decoded speech. 960 = one full
+# codec2 frame's worth of audio per release (960/6=160 @ 8kHz), so every
+# throttle release should let codec2_encoder produce exactly one frame,
+# every time. If still audibly imperfect, the DOWNSTREAM chain
+# (m17_coder itself, 192-symbol frames) is the next thing to re-check for
+# a similar alignment issue -- see M17_CHOPPING_HANDOFF.md.
+FILE_THROTTLE_CHUNK_SAMPLES = 960
+
 DEFAULT_FREQUENCY = 432_150_000  # Hz, matches today's verified carrier test; valid for every device backend
 FINE_TUNE_RANGE_HZ = 2_000  # +/- range of the fine-tune spinbox
 
