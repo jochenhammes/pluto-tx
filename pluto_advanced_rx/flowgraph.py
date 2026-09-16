@@ -64,6 +64,7 @@ class AdvancedRxFlowgraph(gr.top_block):
     MODE_SSB = 1
     MODE_RADE = 2
     MODE_M17 = 3
+    MODE_BASEBAND = 4
 
     def __init__(self, uri=None, frequency=config.DEFAULT_FREQUENCY,
                  sample_rate=None, gain_mode=config.DEFAULT_GAIN_MODE,
@@ -73,7 +74,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
                  gain_values=None, on_filebroadcast_frame=None, on_psk31_char=None,
                  psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ, audio_device="",
-                 on_m17_fields=None):
+                 on_m17_fields=None, baseband_width_hz=config.BASEBAND_WIDTH_DEFAULT_HZ):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -283,8 +284,34 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.connect(self.if_filter, self.ssb_filter)
         self.connect(self.ssb_filter, self.ssb_to_real)
 
-        # --- Resample both demodulated-audio branches (at the fixed
+        # --- Baseband branch: wide, unprocessed demodulated audio for
+        # digimode software (fldigi etc.) consuming this app's Audio
+        # Output (real device, or the persistent PipeWire loopback node --
+        # see audio_devices.py). Its OWN IF-domain channel filter
+        # (baseband_channel_filter), wider-range than FM's
+        # fm_channel_filter, is kept -- necessary anti-alias/adjacent-
+        # channel-selectivity engineering, not voice-shaping "processing."
+        # What it deliberately has NO equivalent of is fm_audio_filter:
+        # that fixed 3kHz post-demod low-pass would hard-cap exactly the
+        # wide content (RTTY/PSK31/Olivia/MFSK, several kHz) this mode
+        # exists to carry -- straight to the resampler instead.
+        self.baseband_width_hz = baseband_width_hz
+        baseband_channel_taps = firdes.low_pass(1.0, self.if_rate, baseband_width_hz / 2,
+                                                 config.FM_CHANNEL_TRANS_HZ, window.WIN_HAMMING)
+        self.baseband_channel_filter = filter.fir_filter_ccc(1, baseband_channel_taps)
+        baseband_gain = self.if_rate / (2 * math.pi * config.BASEBAND_DEVIATION_HZ)
+        self.baseband_demod = analog.quadrature_demod_cf(baseband_gain)
+        self.connect(self.if_filter, self.baseband_channel_filter)
+        self.connect(self.baseband_channel_filter, self.baseband_demod)
+
+        # --- Resample all three demodulated-audio branches (at the fixed
         # if_rate) up/down to AUDIO_RATE, then pick the active mode.
+        # fractional_bw=0.47 (not the 0.4 FM/SSB use) for Baseband's own
+        # resampler -- Digitext's own precedent for exactly this problem
+        # (its comment nearby): 0.4's passband starts rolling off around
+        # 18-19kHz at AUDIO_RATE=48000; 0.47 stays flat to ~22kHz, needed
+        # since Baseband explicitly wants content wider than typical
+        # 3kHz voice/SSB audio.
         g = math.gcd(int(self.if_rate), config.AUDIO_RATE)
         self.fm_resampler = filter.rational_resampler_fff(
             interpolation=config.AUDIO_RATE // g, decimation=int(self.if_rate) // g,
@@ -294,14 +321,19 @@ class AdvancedRxFlowgraph(gr.top_block):
             interpolation=config.AUDIO_RATE // g, decimation=int(self.if_rate) // g,
             taps=[], fractional_bw=0.4,
         )
+        self.baseband_resampler = filter.rational_resampler_fff(
+            interpolation=config.AUDIO_RATE // g, decimation=int(self.if_rate) // g,
+            taps=[], fractional_bw=0.47,
+        )
         self.connect(self.fm_audio_filter, self.fm_resampler)
         self.connect(self.ssb_to_real, self.ssb_resampler)
+        self.connect(self.baseband_demod, self.baseband_resampler)
 
         # NOTE: blocks.selector's ninputs is only known once the flowgraph is
         # actually running -- the initial index must go through the
         # constructor (see pluto_tx/flowgraph.py for the full explanation of
         # this gotcha). set_demod_mode() below is for RUNTIME switching only.
-        # demod_selector only ever carries FM/SSB (2 inputs) -- RADE and
+        # demod_selector carries FM/SSB/Baseband (3 inputs) -- RADE and
         # M17 are deliberately NOT selector inputs, same scheduler-risk
         # reasoning as pluto_tx's own M17/FreeDV/RADE producers (a
         # frame-quantized block continuously producing output while
@@ -310,15 +342,29 @@ class AdvancedRxFlowgraph(gr.top_block):
         # most extreme case of this, but the multi-stage M17 decode chain
         # is complex/stateful enough to warrant the same proven-safe
         # dedicated-producer pattern rather than risking it as a 3rd
-        # selector input). Its initial index is irrelevant when
-        # demod_mode is MODE_RADE/MODE_M17 (demod_selector's output
-        # drains into a null_sink in that case, see
+        # selector input). Baseband, unlike RADE/M17, IS safe as a
+        # selector input -- structurally identical to FM/SSB (fixed-rate,
+        # stateless, always-continuously-producing float at AUDIO_RATE),
+        # none of the variable-rate/frame-quantized/stateful properties
+        # that ruled RADE/M17 out apply to it. Its initial index is
+        # irrelevant when demod_mode is MODE_RADE/MODE_M17 (demod_selector's
+        # output drains into a null_sink in that case, see
         # _audio_producer_map()/set_demod_mode() below) -- clamp to a
-        # valid FM/SSB index either way.
-        self.demod_selector = blocks.selector(gr.sizeof_float, 1 if demod_mode == self.MODE_SSB else 0, 0)
+        # valid FM/SSB/Baseband index either way.
+        _initial_selector_index = {
+            self.MODE_SSB: 1, self.MODE_BASEBAND: 2,
+        }.get(demod_mode, 0)
+        self.demod_selector = blocks.selector(gr.sizeof_float, _initial_selector_index, 0)
         self.demod_selector.set_enabled(True)
+        # NOTE: MODE_FM=0/MODE_SSB=1 happen to already match their
+        # selector port indices, but MODE_BASEBAND=4 (the demod-mode enum
+        # value, shared with RADE=2/M17=3 which DON'T use this selector)
+        # does NOT -- port index 2 is the correct, explicit 3rd port here,
+        # matching _initial_selector_index/set_demod_mode()'s own
+        # {MODE_SSB: 1, MODE_BASEBAND: 2} port-index maps below.
         self.connect(self.fm_resampler, (self.demod_selector, self.MODE_FM))
         self.connect(self.ssb_resampler, (self.demod_selector, self.MODE_SSB))
+        self.connect(self.baseband_resampler, (self.demod_selector, 2))
 
         # --- RADE V1 branch (optional, only if librade.so + lpcnet_demo are
         # both available -- see RADE_AVAILABLE above). Taps if_filter's
@@ -581,11 +627,14 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.device.set_gain(agc_stage.name, gain_db)
 
     def _audio_producer_map(self):
-        """mode -> the block that should feed nf_gain in that mode. FM/SSB
-        share demod_selector (fast index switch, no reconnect); RADE gets
-        its own dedicated producer (see the comment above demod_selector's
-        construction for why it can't share it)."""
-        producers = {self.MODE_FM: self.demod_selector, self.MODE_SSB: self.demod_selector}
+        """mode -> the block that should feed nf_gain in that mode. FM/SSB/
+        Baseband share demod_selector (fast index switch, no reconnect);
+        RADE/M17 get their own dedicated producer (see the comment above
+        demod_selector's construction for why they can't share it)."""
+        producers = {
+            self.MODE_FM: self.demod_selector, self.MODE_SSB: self.demod_selector,
+            self.MODE_BASEBAND: self.demod_selector,
+        }
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_audio_resampler_up
         if M17_AVAILABLE:
@@ -626,7 +675,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         if mode in (self.MODE_RADE, self.MODE_M17):
             return  # both bypass demod_selector entirely, nothing to retap there
 
-        self.demod_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
+        self.demod_selector.set_input_index({self.MODE_SSB: 1, self.MODE_BASEBAND: 2}.get(mode, 0))
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
@@ -650,6 +699,14 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.fm_demod_width_hz = width_hz
         taps = firdes.low_pass(1.0, self.if_rate, width_hz / 2, config.FM_CHANNEL_TRANS_HZ, window.WIN_HAMMING)
         self.fm_channel_filter.set_taps(taps)
+
+    def set_baseband_width(self, width_hz: float):
+        """Retapes baseband_channel_filter in place -- exact mirror of
+        set_fm_demod_width() above, just a wider default/range (see
+        config.BASEBAND_WIDTH_RANGE_HZ)."""
+        self.baseband_width_hz = width_hz
+        taps = firdes.low_pass(1.0, self.if_rate, width_hz / 2, config.FM_CHANNEL_TRANS_HZ, window.WIN_HAMMING)
+        self.baseband_channel_filter.set_taps(taps)
 
     def set_ssb_demod_width(self, width_hz: float):
         self.ssb_demod_width_hz = width_hz

@@ -249,6 +249,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # "which mode is active" everywhere in this file -- see its own
         # comment above and _activate_mode() below.
         self.mode_combo.addItem("File Broadcast", PlutoTxFlowgraph.MODE_FILEBROADCAST)
+        # Baseband: always available, same reasoning as File Broadcast --
+        # pure GNU Radio blocks, no optional/from-source dependency to gate.
+        self.mode_combo.addItem("Baseband", PlutoTxFlowgraph.MODE_BASEBAND)
         # Sync to the flowgraph's ACTUAL mode before wiring the change
         # signal -- otherwise the combo always shows "FM" regardless of
         # what mode tb was actually constructed with (e.g. --mode ssb, or
@@ -347,6 +350,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m17_row_widget = QtWidgets.QWidget()
         self.m17_row_widget.setLayout(m17_row)
         audio_tab_layout.addWidget(self.m17_row_widget)
+
+        # Baseband deviation -- same "hide the whole row outside its mode"
+        # pattern as M17's row above. No existing adjustable-width control
+        # to reuse on the TX side (nf_filter's width is a fixed preset, not
+        # a slider) -- mirrors RX's own width_slider construction instead.
+        baseband_row = QtWidgets.QHBoxLayout()
+        baseband_row.addWidget(QtWidgets.QLabel("Deviation (Hz):"))
+        self.baseband_deviation_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        bd_lo, bd_hi = config.BASEBAND_DEVIATION_RANGE_HZ
+        self.baseband_deviation_slider.setRange(int(bd_lo), int(bd_hi))
+        self.baseband_deviation_slider.setValue(int(config.BASEBAND_DEVIATION_HZ))
+        self.baseband_deviation_slider.valueChanged.connect(self._on_baseband_deviation_changed)
+        baseband_row.addWidget(self.baseband_deviation_slider)
+        self.baseband_deviation_label = QtWidgets.QLabel(f"{int(config.BASEBAND_DEVIATION_HZ)} Hz")
+        self.baseband_deviation_label.setMinimumWidth(60)
+        baseband_row.addWidget(self.baseband_deviation_label)
+        self.baseband_row_widget = QtWidgets.QWidget()
+        self.baseband_row_widget.setLayout(baseband_row)
+        audio_tab_layout.addWidget(self.baseband_row_widget)
         self._update_m17_controls_enabled()
 
         # --- FreeDV variant + callsign row -- only VISIBLE in FreeDV mode,
@@ -909,6 +931,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_controls_enabled()
         self._filebroadcast_connected = enabled
         self._update_filebroadcast_controls_enabled()
+        self._baseband_connected = enabled
+        self._update_baseband_controls_enabled()
 
     def _update_m17_controls_enabled(self):
         # Visibility follows the selected mode (row hidden entirely outside
@@ -919,6 +943,15 @@ class MainWindow(QtWidgets.QMainWindow):
         connected = getattr(self, "_m17_connected", True)
         self.m17_src_edit.setEnabled(connected)
         self.m17_dst_edit.setEnabled(connected)
+
+    def _update_baseband_controls_enabled(self):
+        # Visibility follows the selected mode (row hidden entirely outside
+        # Baseband); enabled state within a visible row still follows
+        # connection state, same as every other control in the app.
+        is_baseband_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_BASEBAND
+        self.baseband_row_widget.setVisible(is_baseband_mode)
+        connected = getattr(self, "_baseband_connected", True)
+        self.baseband_deviation_slider.setEnabled(connected)
 
     def _update_freedv_controls_enabled(self):
         # Visibility follows the selected mode (row hidden entirely outside
@@ -1198,6 +1231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rade_controls_enabled()
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
+        self._update_baseband_controls_enabled()
 
     def _on_mode_changed(self, idx):
         mode = self.mode_combo.currentData()
@@ -1340,6 +1374,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_m17_dst_callsign_changed(self, text):
         if self.tb is not None:
             self.tb.set_m17_dst_callsign(text)
+
+    def _on_baseband_deviation_changed(self, value):
+        self.baseband_deviation_label.setText(f"{value} Hz")
+        if self.tb is not None:
+            self.tb.set_baseband_deviation(float(value))
 
     def _on_freedv_variant_changed(self, idx):
         if self.tb is not None:
@@ -1819,6 +1858,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.device_type_combo.setEnabled(True)
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
+        new_tb.set_baseband_deviation(float(self.baseband_deviation_slider.value()))
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
         new_tb.set_secondary_power("AMP", self.amp_checkbox.isChecked())

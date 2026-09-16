@@ -361,6 +361,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 m17_item_idx, "gnuradio.m17 not found -- see install-m17.sh / README",
                 QtCore.Qt.ToolTipRole,
             )
+        self.demod_combo.addItem("Baseband", AdvancedRxFlowgraph.MODE_BASEBAND)
+        # Always available, same reasoning as pluto_tx's own Baseband entry
+        # -- pure GNU Radio blocks, no optional/from-source dependency.
         initial_demod_idx = self.demod_combo.findData(demod_mode)
         if initial_demod_idx >= 0:
             self.demod_combo.setCurrentIndex(initial_demod_idx)
@@ -940,6 +943,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # measurement estimate.
             half_bw = config.M17_DEVIATION_HZ + config.M17_SYMBOL_RATE
             self.waterfall.set_demod_band(freq - half_bw, freq + half_bw)
+        elif mode == AdvancedRxFlowgraph.MODE_BASEBAND:
+            half_bw = self.tb.baseband_width_hz / 2
+            self.waterfall.set_demod_band(freq - half_bw, freq + half_bw)
 
     def _poll_fft(self):
         if self.tb is None:
@@ -1266,6 +1272,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if mode == AdvancedRxFlowgraph.MODE_FM:
                 w_lo, w_hi = config.FM_DEMOD_WIDTH_RANGE_HZ
                 width = self.tb.fm_demod_width_hz if self.tb is not None else config.FM_DEMOD_WIDTH_DEFAULT_HZ
+            elif mode == AdvancedRxFlowgraph.MODE_BASEBAND:
+                w_lo, w_hi = config.BASEBAND_WIDTH_RANGE_HZ
+                width = self.tb.baseband_width_hz if self.tb is not None else config.BASEBAND_WIDTH_DEFAULT_HZ
             else:
                 w_lo, w_hi = config.SSB_DEMOD_WIDTH_RANGE_HZ
                 width = self.tb.ssb_demod_width_hz if self.tb is not None else config.SSB_DEMOD_WIDTH_DEFAULT_HZ
@@ -1288,6 +1297,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_fm_demod_width(float(value))
         elif self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_SSB:
             self.tb.set_ssb_demod_width(float(value))
+        elif self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_BASEBAND:
+            self.tb.set_baseband_width(float(value))
         self._sync_waterfall()
 
     def _on_db_range_changed(self, _value=None):
@@ -1632,13 +1643,14 @@ class MainWindow(QtWidgets.QMainWindow):
         fft_size = self.fft_size_combo.currentData()
         fm_width = self.tb.fm_demod_width_hz
         ssb_width = self.tb.ssb_demod_width_hz
+        baseband_width = self.tb.baseband_width_hz
         psk31_tone = self.tb.psk31_tone_hz
 
         try:
             new_tb = AdvancedRxFlowgraph(
                 uri=self.tb.uri, frequency=freq, sample_rate=new_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
+                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
                 **self._current_gain_kwargs(device_cls),
@@ -1688,13 +1700,14 @@ class MainWindow(QtWidgets.QMainWindow):
         fft_size = self.fft_size_combo.currentData()
         fm_width = self.tb.fm_demod_width_hz
         ssb_width = self.tb.ssb_demod_width_hz
+        baseband_width = self.tb.baseband_width_hz
         psk31_tone = self.tb.psk31_tone_hz
 
         try:
             new_tb = AdvancedRxFlowgraph(
                 uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
+                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=new_device, on_m17_fields=self._on_m17_fields,
                 **self._current_gain_kwargs(device_cls),
@@ -1812,12 +1825,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # width from -- the width_slider only ever shows the CURRENTLY
         # selected mode, so that one carries over from it, the other one
         # falls back to its config default.
-        if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_FM:
-            fm_width = float(self.width_slider.value())
-            ssb_width = config.SSB_DEMOD_WIDTH_DEFAULT_HZ
-        else:
-            ssb_width = float(self.width_slider.value())
-            fm_width = config.FM_DEMOD_WIDTH_DEFAULT_HZ
+        current_mode = self.demod_combo.currentData()
+        fm_width = float(self.width_slider.value()) if current_mode == AdvancedRxFlowgraph.MODE_FM \
+            else config.FM_DEMOD_WIDTH_DEFAULT_HZ
+        ssb_width = float(self.width_slider.value()) if current_mode == AdvancedRxFlowgraph.MODE_SSB \
+            else config.SSB_DEMOD_WIDTH_DEFAULT_HZ
+        baseband_width = float(self.width_slider.value()) if current_mode == AdvancedRxFlowgraph.MODE_BASEBAND \
+            else config.BASEBAND_WIDTH_DEFAULT_HZ
         # freq_spin is hidden (not reset) for a frequency-less device like
         # Audio Input -- its value could be a stale RF frequency left over
         # from whatever device was previously selected, so don't trust it
@@ -1831,7 +1845,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=self.demod_combo.currentData(),
                 nf_gain=self.nf_gain_slider.value() / 100.0,
                 fft_size=self.fft_size_combo.currentData(),
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
+                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()), on_m17_fields=self._on_m17_fields,
                 audio_device=self._audio_device,

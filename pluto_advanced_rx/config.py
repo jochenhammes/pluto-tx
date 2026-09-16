@@ -19,6 +19,11 @@ from pluto_tx.config import (  # noqa: F401 (re-exported)
     M17_CODEC2_RATE, M17_SYMBOL_RATE, M17_RRC_ALPHA, M17_RRC_NTAPS, M17_RRC_SPS,
     M17_BASEBAND_RATE, M17_DEVIATION_HZ, M17_DEFAULT_DST_CALLSIGN, M17_CALLSIGN_MAX_LEN,
 )
+# Baseband mode's deviation -- genuinely generic, same reasoning as the M17
+# constants above: the RX demod chain (flowgraph.py's Baseband branch) must
+# use the SAME deviation the TX side modulates with, or a default-settings
+# receiver won't correctly capture a default-settings transmission.
+from pluto_tx.config import BASEBAND_DEVIATION_HZ  # noqa: F401 (re-exported)
 
 # RX baseband ("quadrature") rate presets -- these double as the waterfall's
 # "zoom levels": each is the actual AD9361 RX sample rate (and, in "Auto"
@@ -81,6 +86,14 @@ FM_CHANNEL_TRANS_HZ = 1_000.0
 
 SSB_DEMOD_WIDTH_DEFAULT_HZ = 3_000.0
 SSB_DEMOD_WIDTH_RANGE_HZ = (1_000.0, 5_000.0)
+
+# Baseband mode's own IF channel-filter width -- wider range than FM's
+# (up to the real ceiling: AUDIO_RATE/2 = 24kHz, tighter than
+# DEMOD_IF_RATE/2 = 25kHz -- see flowgraph.py's Baseband branch), since
+# its whole point is carrying content wider than typical 3kHz voice/SSB
+# audio (RTTY/PSK31/Olivia/MFSK etc.).
+BASEBAND_WIDTH_DEFAULT_HZ = 20_000.0
+BASEBAND_WIDTH_RANGE_HZ = (2_500.0, 24_000.0)
 
 # RADE V1's OFDM occupied bandwidth -- NOT operator-adjustable (a fixed
 # protocol constant, unlike FM/SSB's width sliders above), used only to

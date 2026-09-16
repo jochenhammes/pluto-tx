@@ -94,6 +94,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_DIGITEXT = 5
     MODE_FILEBROADCAST = 6
     MODE_PSK31 = 7
+    MODE_BASEBAND = 8
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -600,6 +601,44 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.filebroadcast_throttle, self.filebroadcast_mod)
         self.connect(self.filebroadcast_mod, self.filebroadcast_tx_resampler)
 
+        # --- Baseband branch: raw, unprocessed audio -> wide FM, for
+        # digimode software (fldigi etc.) feeding already-modulated audio
+        # in via the Source combo (mic/file/PipeWire-monitor/persistent-
+        # loopback -- see audio_devices.py) that just needs to be carried
+        # to RF as close to unaltered as possible. Deliberately bypasses
+        # the ENTIRE NF filter/AGC/compressor/limiter dynamics chain above
+        # (nf_filter/gate/agc/nf_gain/compressor/limiter_smooth/limiter),
+        # same reasoning as M17/FreeDV/RADE/Digitext/PSK31/File Broadcast
+        # just above/below -- that chain is voice-shaping (a fixed
+        # 300-3000Hz band-pass, a compressor tuned for speech dynamics),
+        # exactly what would clip/distort a wider, unfamiliar digimode
+        # signal (RTTY/PSK31/Olivia/MFSK can span several kHz). Taps
+        # ptt_mute directly, like those other bypassing modes -- ptt_mute
+        # itself is just the PTT gate (mute when unkeyed), not "processing."
+        #
+        # fractional_bw=0.47 (not the 0.4 used everywhere else in this
+        # file) -- Digitext's own precedent for exactly this problem
+        # (comment near its own resampler): 0.4's passband starts rolling
+        # off around 18-19kHz at AUDIO_RATE=48000, -6dB by 20kHz; 0.47
+        # stays flat to ~22kHz, needed here since Baseband explicitly
+        # wants to carry content wider than typical 3kHz voice/SSB audio.
+        #
+        # config.BASEBAND_DEVIATION_HZ (not FM_DEVIATION_HZ, which is a
+        # fixed narrowband-voice value) -- operator-adjustable via
+        # set_baseband_deviation(), sized via Carson's rule (BW ~=
+        # 2*(deviation+audio_bandwidth)) for whatever content width the
+        # operator is actually feeding in.
+        self.baseband_deviation_hz = config.BASEBAND_DEVIATION_HZ
+        g_baseband = math.gcd(quad_rate, config.AUDIO_RATE)
+        self.baseband_resampler = filter.rational_resampler_fff(
+            interpolation=quad_rate // g_baseband, decimation=config.AUDIO_RATE // g_baseband,
+            taps=[], fractional_bw=0.47,
+        )
+        self.connect(self.ptt_mute, self.baseband_resampler)
+        self.baseband_sensitivity = 2 * math.pi * self.baseband_deviation_hz / quad_rate
+        self.baseband_mod = analog.frequency_modulator_fc(self.baseband_sensitivity)
+        self.connect(self.baseband_resampler, self.baseband_mod)
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -658,6 +697,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
         self._null_sink_psk31 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see PSK31 branch above
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
+        self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -820,6 +860,7 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
         producers[self.MODE_PSK31] = self.psk31_ssb_resampler  # always available, see its branch above
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
+        producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         return producers
 
     def _null_sink_for(self, producer):
@@ -837,6 +878,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_psk31
         if producer is self.filebroadcast_tx_resampler:
             return self._null_sink_filebroadcast
+        if producer is self.baseband_mod:
+            return self._null_sink_baseband
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def set_mode(self, mode: int):
@@ -863,14 +906,24 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.unlock()
 
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
-                    self.MODE_PSK31, self.MODE_FILEBROADCAST):
-            return  # all six bypass the NF filter/dynamics chain entirely, nothing to retap
+                    self.MODE_PSK31, self.MODE_FILEBROADCAST, self.MODE_BASEBAND):
+            return  # all seven bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[preset]
         taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter.set_taps(taps)
+
+    def set_baseband_deviation(self, hz: float):
+        """Retune baseband_mod's FM sensitivity in place -- mirrors
+        AdvancedRxFlowgraph's set_fm_demod_width()/set_baseband_width()
+        pattern (recompute from the stored Hz value, push into the
+        already-built block, no reconnect needed)."""
+        self.baseband_deviation_hz = float(hz)
+        quad_rate = int(self.device.sample_rate_hz)
+        self.baseband_sensitivity = 2 * math.pi * self.baseband_deviation_hz / quad_rate
+        self.baseband_mod.set_sensitivity(self.baseband_sensitivity)
 
     def set_freedv_variant(self, freedv_variant: int):
         """Switch between FreeDV 2020/2020B at runtime. Frame sizes differ

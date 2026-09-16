@@ -79,6 +79,15 @@ NF_FILTER_PRESETS = {
 }
 
 FM_DEVIATION_HZ = 2500.0  # narrowband voice FM default
+# Baseband mode's own deviation -- deliberately separate from
+# FM_DEVIATION_HZ (a fixed narrowband-voice value): operator-adjustable
+# via set_baseband_deviation(), sized via Carson's rule (BW ~=
+# 2*(deviation+audio_bandwidth)) for whatever digimode content width is
+# actually being fed in (RTTY/PSK31/Olivia/MFSK -- can span several kHz,
+# wider than typical 3kHz voice/SSB audio). Default is double FM's value
+# as a deliberately wider starting point, not tied to voice.
+BASEBAND_DEVIATION_HZ = 5000.0
+BASEBAND_DEVIATION_RANGE_HZ = (1_000.0, 15_000.0)
 DEFAULT_NF_GAIN = 1.0  # manual audio drive multiplier, applied after the compressor
 
 # --- NF dynamics processing: noise gate, compressor, smooth limiter -------
