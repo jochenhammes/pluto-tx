@@ -23,6 +23,7 @@ from gnuradio import gr, blocks, filter, analog, audio, qtgui, digital
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
+from . import audio_devices
 from . import config
 from . import devices
 from . import digitext
@@ -154,7 +155,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._soundcard_audio_device = self.device.connection if self.device.is_audio_only() else ""
 
         # --- Sources ---------------------------------------------------
-        self.mic_source = audio.source(config.AUDIO_RATE, audio_device, True)
+        self.mic_source = audio_devices.open_input_device(config.AUDIO_RATE, audio_device)
         self.wav_path = wav_path or _default_wav_path()
         file_mono = self._build_file_source(self.wav_path)
         # blocks.wavfile_source (inside _build_file_source() above) has no

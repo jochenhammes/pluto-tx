@@ -275,6 +275,31 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.source_combo.count()
             self.source_combo.addItem(label, PlutoTxFlowgraph.SRC_MIC)
             self.source_combo.setItemData(idx, device_str, QtCore.Qt.UserRole + 1)
+        # PipeWire sink monitors (capture whatever's PLAYING on a sink,
+        # e.g. another app's audio, as if it were a mic) -- same SRC_MIC/
+        # device-string role scheme as real input devices above; the
+        # "monitor:..." device string is a convention private to
+        # audio_devices.py (see open_input_device()), so nothing here or
+        # in _on_source_changed()/_rebuild() needs to treat it specially.
+        for device_str, label in audio_devices.list_monitor_devices().items():
+            idx = self.source_combo.count()
+            self.source_combo.addItem(label, PlutoTxFlowgraph.SRC_MIC)
+            self.source_combo.setItemData(idx, device_str, QtCore.Qt.UserRole + 1)
+        # A persistent, always-visible PipeWire node (a named pw-loopback
+        # pair, ensure_persistent_input_node() spawns/finds it) -- unlike
+        # the two categories above, this one exists independent of
+        # whether pluto-tx is even running, so it's a stable patch point
+        # in qpwgraph an operator can wire once (e.g. from a softphone or
+        # a voice synth) rather than something ephemeral tied to this
+        # app's own connection lifecycle. Same SRC_MIC/device-string role
+        # scheme -- it's just another "monitor:..." string as far as
+        # _on_source_changed()/_rebuild() are concerned. None (PipeWire
+        # tooling unavailable) simply omits this entry.
+        persistent_device_str = audio_devices.ensure_persistent_input_node()
+        if persistent_device_str is not None:
+            idx = self.source_combo.count()
+            self.source_combo.addItem("pluto-tx Input (qpwgraph)", PlutoTxFlowgraph.SRC_MIC)
+            self.source_combo.setItemData(idx, persistent_device_str, QtCore.Qt.UserRole + 1)
         self.source_combo.addItem("Audio File", PlutoTxFlowgraph.SRC_FILE)
         initial_source_idx = self.source_combo.findData(source)
         if initial_source_idx >= 0:
