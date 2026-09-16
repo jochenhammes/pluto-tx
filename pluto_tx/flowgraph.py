@@ -19,7 +19,7 @@ import os
 import sys
 import wave
 
-from gnuradio import gr, blocks, filter, analog, audio, qtgui, digital
+from gnuradio import gr, blocks, filter, analog, qtgui, digital
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
@@ -420,7 +420,7 @@ class PlutoTxFlowgraph(gr.top_block):
             # which unmutes/mutes THIS gate instead of tx_gain/the device.
             self.rade_audio_gain = blocks.multiply_const_ff(0.0)
             self.connect(self.rade_audio_resampler_out, self.rade_audio_gain)
-            self.rade_audio_sink = audio.sink(config.AUDIO_RATE, self._soundcard_audio_device, True)
+            self.rade_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
             self.connect(self.rade_audio_gain, self.rade_audio_sink)
 
         # --- Digitext branch (waterfall-text digimode, pluto_tx/digitext.py):
@@ -491,7 +491,7 @@ class PlutoTxFlowgraph(gr.top_block):
         # rebuilds digitext_source fresh for a new transmission.
         self.digitext_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/rade_audio_gain
         self.connect(self.digitext_source, self.digitext_audio_gain)
-        self.digitext_audio_sink = audio.sink(config.AUDIO_RATE, self._soundcard_audio_device, True)
+        self.digitext_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
         self.connect(self.digitext_audio_gain, self.digitext_audio_sink)
 
         # --- PSK31 branch (BPSK31 keyboard-chat digimode, pluto_tx/psk31.py
@@ -522,7 +522,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.psk31_ssb_mod, self.psk31_ssb_resampler)
         self.psk31_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/digitext_audio_gain
         self.connect(self.psk31_source, self.psk31_audio_gain)
-        self.psk31_audio_sink = audio.sink(config.AUDIO_RATE, self._soundcard_audio_device, True)
+        self.psk31_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
         self.connect(self.psk31_audio_gain, self.psk31_audio_sink)
 
         # --- File Broadcast branch (repetitive file-broadcast mode, 23cm

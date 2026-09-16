@@ -100,5 +100,16 @@ class SoundcardDevice(TxDevice):
         """`timeout_s` unused -- audio_devices.list_output_devices() shells
         out to `aplay -l`, which reads already-enumerated ALSA state
         in-process, not a real hardware scan (no network/USB probing like
-        Pluto's/HackRF's own scan needs a timeout for)."""
-        return audio_devices.list_output_devices(), None
+        Pluto's/HackRF's own scan needs a timeout for).
+
+        Also offers a persistent, qpwgraph-visible loopback node
+        (ensure_persistent_output_node(), created lazily on first scan
+        here) alongside the real ALSA devices -- lets pluto-tx's own TX
+        audio be routed out to another application via a stable patch
+        point, the output-side counterpart to the Source combo's
+        "pluto-tx Input (qpwgraph)" entry (see gui.py)."""
+        devices = audio_devices.list_output_devices()
+        persistent = audio_devices.ensure_persistent_output_node()
+        if persistent is not None:
+            devices[persistent] = "pluto-tx Output (qpwgraph)"
+        return devices, None

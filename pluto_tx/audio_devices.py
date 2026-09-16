@@ -45,7 +45,8 @@ import time
 
 from gnuradio import audio as _gr_audio
 
-_PERSISTENT_NODE_NAME = "pluto-tx-input"
+_PERSISTENT_INPUT_NODE_NAME = "pluto-tx-input"
+_PERSISTENT_OUTPUT_NODE_NAME = "pluto-tx-output"
 
 _CARD_RE = re.compile(
     r"^card (\d+): (.+?) \[([^\]]+)\], device (\d+): (.+?) \[([^\]]+)\]"
@@ -140,25 +141,25 @@ def _find_persistent_node_links(data, name: str):
     return links
 
 
-def ensure_persistent_input_node(name: str = _PERSISTENT_NODE_NAME):
+def _ensure_persistent_node(name: str) -> bool:
     """Idempotent: ensures a NAMED, PERSISTENT PipeWire loopback pair
     (input.<name>/output.<name>) exists, spawning one via `pw-loopback`
-    if it doesn't yet, and returns its device string in the same
-    "monitor:<node.name>" shape open_input_device()/probe_device()
-    already understand (this is just another node to PIPEWIRE_NODE-
-    target -- see the module docstring's sink-monitor section, the
-    mechanism is identical). Returns None (never raises) if anything
-    here isn't available -- pw-loopback/pw-dump/pw-link missing, a
-    timeout waiting for the node to appear, etc.
+    if it doesn't yet. Returns True on success (already existed, or was
+    just created), False if anything here isn't available --
+    pw-loopback/pw-dump/pw-link missing, a timeout waiting for the node
+    to appear, etc. Shared by ensure_persistent_input_node()/
+    ensure_persistent_output_node() below, which each just pick which
+    side of a (possibly differently-named) pair to hand back as a
+    "monitor:<node.name>" device string.
 
-    Why this exists: a plain audio.source() client only exists in
-    PipeWire's graph while this app is actually connected, so there's
-    nothing stable to pre-wire in a patchbay tool like qpwgraph. A named
-    pw-loopback pair is a real, addressable node regardless of whether
-    this app is currently running -- spawned detached
-    (start_new_session=True, not a child of this process) so it
-    survives this app disconnecting/restarting, satisfying "create on
-    demand, no separate install step, persists across app restarts."
+    Why this exists: a plain audio.source()/audio.sink() client only
+    exists in PipeWire's graph while this app is actually connected, so
+    there's nothing stable to pre-wire in a patchbay tool like
+    qpwgraph. A named pw-loopback pair is a real, addressable node
+    regardless of whether this app is currently running -- spawned
+    detached (start_new_session=True, not a child of this process) so
+    it survives this app disconnecting/restarting, satisfying "create
+    on demand, no separate install step, persists across app restarts."
 
     Real gotcha found on real hardware: WirePlumber auto-links a fresh
     pw-loopback's two ends to the system's default mic/speakers within
@@ -173,45 +174,69 @@ def ensure_persistent_input_node(name: str = _PERSISTENT_NODE_NAME):
     afterward."""
     data = _pw_dump()
     if data is None:
-        return None
+        return False
     target_name = f"output.{name}"
     already_exists = any(
         obj.get("type") == "PipeWire:Interface:Node"
         and obj.get("info", {}).get("props", {}).get("node.name") == target_name
         for obj in data
     )
-    if not already_exists:
+    if already_exists:
+        return True
+    try:
+        subprocess.Popen(
+            ["pw-loopback", "-n", name],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        data = _pw_dump()
+        if data is not None and any(
+            obj.get("type") == "PipeWire:Interface:Node"
+            and obj.get("info", {}).get("props", {}).get("node.name") == target_name
+            for obj in data
+        ):
+            break
+    else:
+        return False  # never appeared -- pw-loopback likely missing/failed silently
+    # WirePlumber auto-links fresh stream nodes to system defaults --
+    # strip whatever formed so this stays an isolated patch point until
+    # the operator (or PlutoTxFlowgraph, once selected) wires it
+    # deliberately. Best-effort per link: a link that's already gone by
+    # the time we get to it isn't a real failure.
+    for link_id, _out, _in in _find_persistent_node_links(data, name):
         try:
-            subprocess.Popen(
-                ["pw-loopback", "-n", name],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError:
-            return None
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            time.sleep(0.1)
-            data = _pw_dump()
-            if data is not None and any(
-                obj.get("type") == "PipeWire:Interface:Node"
-                and obj.get("info", {}).get("props", {}).get("node.name") == target_name
-                for obj in data
-            ):
-                break
-        else:
-            return None  # never appeared -- pw-loopback likely missing/failed silently
-        # WirePlumber auto-links fresh stream nodes to system defaults --
-        # strip whatever formed so this stays an isolated patch point
-        # until the operator (or PlutoTxFlowgraph, once selected) wires
-        # it deliberately. Best-effort per link: a link that's already
-        # gone by the time we get to it isn't a real failure.
-        for link_id, _out, _in in _find_persistent_node_links(data, name):
-            try:
-                subprocess.run(["pw-link", "-d", str(link_id)], capture_output=True, timeout=2.0)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    return f"monitor:{target_name}"
+            subprocess.run(["pw-link", "-d", str(link_id)], capture_output=True, timeout=2.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return True
+
+
+def ensure_persistent_input_node(name: str = _PERSISTENT_INPUT_NODE_NAME):
+    """For the Source combo: pluto-tx reads from output.<name>. Returns
+    a "monitor:<node.name>" device string (see module docstring) or
+    None if the underlying loopback pair couldn't be created/found."""
+    if not _ensure_persistent_node(name):
+        return None
+    return f"monitor:output.{name}"
+
+
+def ensure_persistent_output_node(name: str = _PERSISTENT_OUTPUT_NODE_NAME):
+    """For Soundcard mode's output combo: pluto-tx writes its own TX
+    audio to input.<name>, and any other application reads it back out
+    via output.<name>. A deliberately SEPARATE node pair from
+    ensure_persistent_input_node()'s -- sharing one pair for both
+    directions would be confusing in qpwgraph (a node conceived as "the
+    input" also being pluto-tx's own output target) and would risk a
+    self-loop if a user ever selected the same pair as both Source and
+    Soundcard-output at once."""
+    if not _ensure_persistent_node(name):
+        return None
+    return f"monitor:input.{name}"
 
 
 def _open(ctor, sample_rate: int, device_str: str):
