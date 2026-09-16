@@ -300,6 +300,16 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.source_combo.count()
             self.source_combo.addItem("pluto-tx Input (qpwgraph)", PlutoTxFlowgraph.SRC_MIC)
             self.source_combo.setItemData(idx, persistent_device_str, QtCore.Qt.UserRole + 1)
+        # The OUTPUT-side persistent node (see devices/soundcard.py's
+        # SoundcardDevice.scan_devices_with_timeout()) is normally only
+        # ensured when the operator switches to Soundcard mode and clicks
+        # Scan -- create/verify it here too, unconditionally, so BOTH
+        # persistent nodes are already up and qpwgraph-visible right after
+        # launch (e.g. after a crash took them down) rather than only
+        # after that specific combo is first opened. Idempotent/cheap if
+        # it already exists (see ensure_persistent_output_node()); the
+        # returned string itself isn't needed here.
+        audio_devices.ensure_persistent_output_node()
         self.source_combo.addItem("Audio File", PlutoTxFlowgraph.SRC_FILE)
         initial_source_idx = self.source_combo.findData(source)
         if initial_source_idx >= 0:
