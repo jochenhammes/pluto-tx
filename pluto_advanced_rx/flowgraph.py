@@ -44,11 +44,26 @@ from . import rade_ctypes as _rade_ctypes
 from .rade import RadeDecoder
 RADE_AVAILABLE = _rade_ctypes.RADE_AVAILABLE
 
+# gr-m17 is optional, same reasoning as RADE above and matching
+# pluto_tx/flowgraph.py's own M17_AVAILABLE gate exactly (this app links
+# the same vendored OOT module, see install-m17.sh) -- unlike RADE, no
+# ctypes involved: m17.m17_decoder/m17.codec2_decoder are native
+# gr::block/pybind11 blocks, confirmed already built and importable in
+# this exact toolchain (install-m17.sh's own self-test).
+from .m17_deframer import M17FieldsDeframer
+try:
+    from gnuradio import m17 as _m17
+    M17_AVAILABLE = True
+except ImportError:
+    _m17 = None
+    M17_AVAILABLE = False
+
 
 class AdvancedRxFlowgraph(gr.top_block):
     MODE_FM = 0
     MODE_SSB = 1
     MODE_RADE = 2
+    MODE_M17 = 3
 
     def __init__(self, uri=None, frequency=config.DEFAULT_FREQUENCY,
                  sample_rate=None, gain_mode=config.DEFAULT_GAIN_MODE,
@@ -57,7 +72,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
                  gain_values=None, on_filebroadcast_frame=None, on_psk31_char=None,
-                 psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ, audio_device=""):
+                 psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ, audio_device="",
+                 on_m17_fields=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -94,6 +110,8 @@ class AdvancedRxFlowgraph(gr.top_block):
             # -- see below) -- fall back rather than build a broken
             # flowgraph, same pattern as pluto_tx's MODE_RADE fallback.
             demod_mode = self.MODE_FM
+        if demod_mode == self.MODE_M17 and not M17_AVAILABLE:
+            demod_mode = self.MODE_FM  # same reasoning as MODE_RADE's fallback above
         self.demod_mode = demod_mode  # tracked so set_demod_mode() knows the PREVIOUS producer to swap away from
 
         self.nominal_freq_hz = float(frequency)
@@ -283,15 +301,20 @@ class AdvancedRxFlowgraph(gr.top_block):
         # actually running -- the initial index must go through the
         # constructor (see pluto_tx/flowgraph.py for the full explanation of
         # this gotcha). set_demod_mode() below is for RUNTIME switching only.
-        # demod_selector only ever carries FM/SSB (2 inputs) -- RADE is
-        # deliberately NOT a third selector input, same scheduler-risk
-        # reasoning as pluto_tx's M17/FreeDV/RADE producers (a frame-
-        # quantized block -- RadeDecoder's variable nin()/irregular output
-        # cadence is an even more extreme profile than those TX-side
-        # blocks). Its initial index is irrelevant when demod_mode==MODE_RADE
-        # (demod_selector's output drains into a null_sink in that case, see
-        # _audio_producer_map()/set_demod_mode() below) -- clamp to a valid
-        # FM/SSB index either way, never MODE_RADE.
+        # demod_selector only ever carries FM/SSB (2 inputs) -- RADE and
+        # M17 are deliberately NOT selector inputs, same scheduler-risk
+        # reasoning as pluto_tx's own M17/FreeDV/RADE producers (a
+        # frame-quantized block continuously producing output while
+        # unselected would back up against an unread selector branch --
+        # RadeDecoder's variable nin()/irregular output cadence is the
+        # most extreme case of this, but the multi-stage M17 decode chain
+        # is complex/stateful enough to warrant the same proven-safe
+        # dedicated-producer pattern rather than risking it as a 3rd
+        # selector input). Its initial index is irrelevant when
+        # demod_mode is MODE_RADE/MODE_M17 (demod_selector's output
+        # drains into a null_sink in that case, see
+        # _audio_producer_map()/set_demod_mode() below) -- clamp to a
+        # valid FM/SSB index either way.
         self.demod_selector = blocks.selector(gr.sizeof_float, 1 if demod_mode == self.MODE_SSB else 0, 0)
         self.demod_selector.set_enabled(True)
         self.connect(self.fm_resampler, (self.demod_selector, self.MODE_FM))
@@ -335,6 +358,76 @@ class AdvancedRxFlowgraph(gr.top_block):
                 taps=[], fractional_bw=0.4,
             )
             self.connect(self.rade_short_to_float, self.rade_audio_resampler_up)
+
+        # --- M17 branch (optional, only if gr-m17 is built -- see
+        # M17_AVAILABLE above). Taps if_filter's output, same reasoning as
+        # RADE just above (keeps the resampler ratio small; if_filter's
+        # anti-alias low-pass is transparent to M17's narrow ~9.6kHz
+        # FM-deviation signal). This exact chain (quad demod -> DC-bias
+        # removal -> RRC matched filter -> digital.symbol_sync_ff ->
+        # m17.m17_decoder -> m17.codec2_decoder) was verified against a
+        # real, working TX->RX M17 loopback this session -- gr-m17's own
+        # decoder correctly decoded src/dst callsigns and produced real
+        # audio -- before being wired in here. Mirrors gr-m17's own
+        # shipped example flowgraphs (receiverRTLSDR.grc/
+        # m17_loopback_noisychannel.grc), which use GNU Radio's stock
+        # digital.symbol_sync_ff rather than gr-m17's own m17.symbol_sync
+        # (present in gr-m17's source but not compiled in this checkout --
+        # see the repo README's own M17 RX ToDo entry, now resolved).
+        if M17_AVAILABLE:
+            g_m17 = math.gcd(int(self.if_rate), config.M17_BASEBAND_RATE)
+            self.m17_rx_resampler = filter.rational_resampler_ccf(
+                interpolation=config.M17_BASEBAND_RATE // g_m17,
+                decimation=int(self.if_rate) // g_m17,
+                taps=[], fractional_bw=0.4,
+            )
+            self.connect(self.if_filter, self.m17_rx_resampler)
+            self.m17_quad_demod = analog.quadrature_demod_cf(
+                config.M17_BASEBAND_RATE / (2 * math.pi * config.M17_DEVIATION_HZ)
+            )
+            self.connect(self.m17_rx_resampler, self.m17_quad_demod)
+            # DC-bias removal -- a real FM demod's output isn't perfectly
+            # zero-mean at real-world frequency offsets, which would
+            # otherwise bias the 4-level FSK symbol slicer. Mirrors
+            # gr-m17's own shipped RX examples exactly: a moving-average
+            # estimate of the local DC level, subtracted back out.
+            m17_dc_avg_len = int(0.1 * config.M17_BASEBAND_RATE)
+            self.m17_dc_avg = blocks.moving_average_ff(m17_dc_avg_len, 1.0 / m17_dc_avg_len, 4000)
+            self.m17_dc_sub = blocks.sub_ff()
+            self.connect(self.m17_quad_demod, self.m17_dc_avg)
+            self.connect(self.m17_quad_demod, (self.m17_dc_sub, 0))
+            self.connect(self.m17_dc_avg, (self.m17_dc_sub, 1))
+            m17_rx_rrc_taps = firdes.root_raised_cosine(
+                1.0, config.M17_BASEBAND_RATE, config.M17_SYMBOL_RATE,
+                config.M17_RRC_ALPHA, config.M17_RRC_NTAPS,
+            )
+            self.m17_matched_filter = filter.fir_filter_fff(1, m17_rx_rrc_taps)
+            self.connect(self.m17_dc_sub, self.m17_matched_filter)
+            self.m17_sym_sync = digital.symbol_sync_ff(
+                digital.TED_GARDNER, config.M17_RRC_SPS, 2 * math.pi * 0.0015,
+                1.0, 1.0, 0.05, 1,
+                digital.constellation_bpsk().base(), digital.IR_MMSE_8TAP, 128, [],
+            )
+            self.connect(self.m17_matched_filter, self.m17_sym_sync)
+            # debug_data/debug_ctrl off, sw_threshold/vt_threshold at
+            # gr-m17's own GRC-template defaults (verified working in this
+            # session's loopback test), callsign display on, no
+            # encryption/scrambler.
+            self.m17_decoder = _m17.m17_decoder(False, False, 2.0, 30.0, True, False, 0, "", "")
+            self.connect(self.m17_sym_sync, self.m17_decoder)
+            self.m17_fields_deframer = M17FieldsDeframer(on_m17_fields or (lambda fields: None))
+            self.msg_connect(self.m17_decoder, "fields", self.m17_fields_deframer, "fields")
+            self.m17_codec2_decoder = _m17.codec2_decoder()
+            self.connect(self.m17_decoder, self.m17_codec2_decoder)
+            self.m17_short_to_float = blocks.short_to_float(1, 32767.0)
+            self.connect(self.m17_codec2_decoder, self.m17_short_to_float)
+            g_m17_up = math.gcd(config.M17_CODEC2_RATE, config.AUDIO_RATE)
+            self.m17_audio_resampler_up = filter.rational_resampler_fff(
+                interpolation=config.AUDIO_RATE // g_m17_up,
+                decimation=config.M17_CODEC2_RATE // g_m17_up,
+                taps=[], fractional_bw=0.4,
+            )
+            self.connect(self.m17_short_to_float, self.m17_audio_resampler_up)
 
         # --- PSK31 (BPSK31 keyboard-to-keyboard chat digimode) -- always-on
         # parallel branch, no audio output to select (same "always-on
@@ -431,6 +524,8 @@ class AdvancedRxFlowgraph(gr.top_block):
         self._null_sink_selector = blocks.null_sink(gr.sizeof_float)
         if RADE_AVAILABLE:
             self._null_sink_rade = blocks.null_sink(gr.sizeof_float)
+        if M17_AVAILABLE:
+            self._null_sink_m17 = blocks.null_sink(gr.sizeof_float)
         producers = self._audio_producer_map()
         active_producer = producers[self.demod_mode]
         self.connect(active_producer, self.nf_gain)
@@ -493,6 +588,8 @@ class AdvancedRxFlowgraph(gr.top_block):
         producers = {self.MODE_FM: self.demod_selector, self.MODE_SSB: self.demod_selector}
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_audio_resampler_up
+        if M17_AVAILABLE:
+            producers[self.MODE_M17] = self.m17_audio_resampler_up
         return producers
 
     def _null_sink_for_audio(self, producer):
@@ -500,6 +597,8 @@ class AdvancedRxFlowgraph(gr.top_block):
             return self._null_sink_selector
         if RADE_AVAILABLE and producer is self.rade_audio_resampler_up:
             return self._null_sink_rade
+        if M17_AVAILABLE and producer is self.m17_audio_resampler_up:
+            return self._null_sink_m17
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def set_demod_mode(self, mode: int):
@@ -510,7 +609,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.demod_mode = mode
 
         if new_producer is not prev_producer:
-            # Entering/leaving RADE mode: reroute nf_gain's upstream
+            # Entering/leaving RADE or M17 mode: reroute nf_gain's upstream
             # connection. Brief pause (lock/unlock), same pattern already
             # proven on real hardware for pluto_tx's M17/FreeDV/RADE mode
             # switching. FM<->SSB switching never hits this branch (both
@@ -524,8 +623,8 @@ class AdvancedRxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
 
-        if mode == self.MODE_RADE:
-            return  # bypasses demod_selector entirely, nothing to retap there
+        if mode in (self.MODE_RADE, self.MODE_M17):
+            return  # both bypass demod_selector entirely, nothing to retap there
 
         self.demod_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
 

@@ -18,6 +18,7 @@ cannot happen here, because nothing here is C++-owned.
 """
 import signal
 import sys
+import threading
 import time
 
 from PyQt5 import QtCore, QtWidgets
@@ -29,7 +30,7 @@ from . import devices
 from . import rade_autotune
 from .fft_probe import FftProbe
 from .filebroadcast_state import FileBroadcastState
-from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE
+from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE
 from .psk31_state import Psk31ChatState
 from .waterfall_widget import AdvancedWaterfallWidget
 
@@ -71,6 +72,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._psk31_state = Psk31ChatState()
         self._psk31_receiving = False
         self._psk31_last_afc_poll_time = 0.0
+
+        # M17 RX status -- same "constructed ONCE, survives every flowgraph
+        # rebuild" reasoning as _psk31_state above. Just the most recent
+        # decoded Link Setup Frame's fields, not an accumulating transcript
+        # (see _on_m17_fields()) -- a plain lock-guarded pair is enough,
+        # no dedicated state class needed.
+        self._m17_lock = threading.Lock()
+        self._m17_last_fields = None
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -341,6 +350,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
                 QtCore.Qt.ToolTipRole,
             )
+        self.demod_combo.addItem("M17", AdvancedRxFlowgraph.MODE_M17)
+        if not M17_AVAILABLE:
+            # gr-m17 is an optional, from-source-built OOT module (see
+            # install-m17.sh) -- same grey-out-with-tooltip idiom as RADE.
+            m17_item_idx = self.demod_combo.findData(AdvancedRxFlowgraph.MODE_M17)
+            item = self.demod_combo.model().item(m17_item_idx)
+            item.setEnabled(False)
+            self.demod_combo.setItemData(
+                m17_item_idx, "gnuradio.m17 not found -- see install-m17.sh / README",
+                QtCore.Qt.ToolTipRole,
+            )
         initial_demod_idx = self.demod_combo.findData(demod_mode)
         if initial_demod_idx >= 0:
             self.demod_combo.setCurrentIndex(initial_demod_idx)
@@ -381,6 +401,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rade_row_widget.setLayout(rade_row)
         self.rade_row_widget.setVisible(False)
         audio_tab_layout.addWidget(self.rade_row_widget)
+
+        # M17 status row -- same "hide the whole row" pattern as RADE's
+        # above, showing the decoded src/dst callsign from the most
+        # recently received Link Setup Frame (M17FieldsDeframer's
+        # on_m17_fields callback -- see _on_m17_fields()) rather than a
+        # continuous sync metric like RADE's SNR/freq-offset (M17 has no
+        # equivalent -- it's frame-based, not a continuous-sync modem).
+        m17_row = QtWidgets.QHBoxLayout()
+        self.m17_status_label = QtWidgets.QLabel("No signal")
+        m17_row.addWidget(self.m17_status_label)
+        m17_row.addStretch(1)
+        self.m17_row_widget = QtWidgets.QWidget()
+        self.m17_row_widget.setLayout(m17_row)
+        self.m17_row_widget.setVisible(False)
+        audio_tab_layout.addWidget(self.m17_row_widget)
 
         # Two mutually-exclusive gain panels, switched by device type (only
         # one is ever visible at a time) -- agc_gain_widget for AGC-capable
@@ -891,6 +926,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # drawn, making visual tuning against it meaningless. See
             # config.RADE_OFDM_LOW_HZ/HIGH_HZ's docstring for the derivation.
             self.waterfall.set_demod_band(freq + config.RADE_OFDM_LOW_HZ, freq + config.RADE_OFDM_HIGH_HZ)
+        elif mode == AdvancedRxFlowgraph.MODE_M17:
+            # Not operator-adjustable, same reasoning as RADE above --
+            # M17's 4-level-FSK occupied bandwidth is a fixed protocol
+            # constant derived from its deviation + symbol rate (Carson's
+            # rule: BW ~= 2*(deviation + symbol_rate)), not a real signal-
+            # measurement estimate.
+            half_bw = config.M17_DEVIATION_HZ + config.M17_SYMBOL_RATE
+            self.waterfall.set_demod_band(freq - half_bw, freq + half_bw)
 
     def _poll_fft(self):
         if self.tb is None:
@@ -912,6 +955,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self.rade_status_label.setText("Not synced")
+        if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_M17 and M17_AVAILABLE:
+            with self._m17_lock:
+                fields = self._m17_last_fields
+            if fields is not None:
+                src = fields.get("src", "?")
+                dst = fields.get("dst", "?")
+                self.m17_status_label.setText(f"SRC: {src}   DST: {dst}")
+            else:
+                self.m17_status_label.setText("No signal")
 
     def _on_filebroadcast_receive_toggled(self, checked):
         self._filebroadcast_receiving = checked
@@ -1028,6 +1080,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._psk31_receiving:
             return
         self._psk31_state.on_char(char)
+
+    def _on_m17_fields(self, fields):
+        """Passed to AdvancedRxFlowgraph as on_m17_fields -- called from
+        M17FieldsDeframer's message handler on the GNU Radio message-passing
+        thread, not the Qt thread. Same cross-thread pattern as
+        _on_psk31_char()/_on_filebroadcast_frame(): store under a lock here,
+        read back (snapshot) from _poll_fft() on the Qt thread. Unlike
+        PSK31's accumulating transcript, M17 only needs the MOST RECENT
+        Link Setup Frame's fields for the status row -- no dedicated state
+        class needed for just that."""
+        with self._m17_lock:
+            self._m17_last_fields = fields
 
     def _poll_psk31(self):
         self._update_psk31_signal_label()
@@ -1167,17 +1231,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_demod_changed(self, idx):
         mode = self.demod_combo.currentData()
         is_rade_mode = mode == AdvancedRxFlowgraph.MODE_RADE
+        is_m17_mode = mode == AdvancedRxFlowgraph.MODE_M17
         self._autotune_cancel()  # leaving/re-entering RADE mode invalidates any in-flight run
-        # No operator-adjustable demod width for RADE -- hide the whole
-        # width control rather than leave it interactive-but-meaningless,
-        # same "hide, don't just grey out" reasoning as the RADE status row.
-        self.width_slider.setVisible(not is_rade_mode)
-        self.width_label.setVisible(not is_rade_mode)
+        # No operator-adjustable demod width for RADE or M17 -- hide the
+        # whole width control rather than leave it interactive-but-
+        # meaningless, same "hide, don't just grey out" reasoning as the
+        # RADE/M17 status rows.
+        self.width_slider.setVisible(not is_rade_mode and not is_m17_mode)
+        self.width_label.setVisible(not is_rade_mode and not is_m17_mode)
         self.rade_row_widget.setVisible(is_rade_mode)
         if not is_rade_mode:
             self.rade_status_label.setText("Not synced")
+        self.m17_row_widget.setVisible(is_m17_mode)
+        if not is_m17_mode:
+            self.m17_status_label.setText("No signal")
 
-        if not is_rade_mode:
+        if not is_rade_mode and not is_m17_mode:
             # The width slider always shows/edits whichever mode is now
             # selected -- its range and current value come straight from
             # the flowgraph's own per-mode state (tb.fm_demod_width_hz /
@@ -1562,7 +1631,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=self._audio_device,
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
@@ -1618,7 +1687,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=new_device,
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=new_device, on_m17_fields=self._on_m17_fields,
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
@@ -1755,7 +1824,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fft_size=self.fft_size_combo.currentData(),
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()),
+                on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()), on_m17_fields=self._on_m17_fields,
                 audio_device=self._audio_device,
                 **self._current_gain_kwargs(device_cls),
             )

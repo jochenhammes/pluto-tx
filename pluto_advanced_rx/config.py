@@ -11,6 +11,14 @@ import math
 from gnuradio.fft import window
 
 from pluto_tx.config import DEFAULT_URI, DE_AMATEUR_BANDS_HZ, in_amateur_band, normalize_uri  # noqa: F401 (re-exported)
+# M17 PHY constants -- genuinely generic (not TX-specific): the RX demod
+# chain (flowgraph.py's M17 branch) must use the EXACT same symbol rate/
+# RRC shape/deviation the TX side encodes with, so these are re-exported
+# rather than duplicated, matching the reasoning above.
+from pluto_tx.config import (  # noqa: F401 (re-exported)
+    M17_CODEC2_RATE, M17_SYMBOL_RATE, M17_RRC_ALPHA, M17_RRC_NTAPS, M17_RRC_SPS,
+    M17_BASEBAND_RATE, M17_DEVIATION_HZ, M17_DEFAULT_DST_CALLSIGN, M17_CALLSIGN_MAX_LEN,
+)
 
 # RX baseband ("quadrature") rate presets -- these double as the waterfall's
 # "zoom levels": each is the actual AD9361 RX sample rate (and, in "Auto"

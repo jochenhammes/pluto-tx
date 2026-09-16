@@ -191,13 +191,16 @@ regenerate_launcher() {
 }
 
 regenerate_launcher "pluto-tx" "pluto_tx.app --gui"
-echo "Done -- pluto-tx now finds gr-m17 automatically."
+regenerate_launcher "pluto-advanced-rx" "pluto_advanced_rx.app"
+echo "Done -- pluto-tx and pluto-advanced-rx now find gr-m17 automatically."
 
 echo
 echo "== Done =="
 echo "Start pluto_tx as usual (pluto-tx, or python3 -m pluto_tx.app --gui) --"
 echo "the M17 mode entry should now be selectable instead of greyed out."
+echo "Same for pluto_advanced_rx (pluto-advanced-rx, or python3 -m"
+echo "pluto_advanced_rx.app) -- its M17 RX mode should now be selectable too."
 echo
-echo "If you run pluto_tx some OTHER way (not the pluto-tx launcher), set this"
-echo "in your shell first:"
+echo "If you run either app some OTHER way (not via these launchers), set"
+echo "this in your shell first:"
 echo "    export LD_LIBRARY_PATH=\"$LIBDIR:\$LD_LIBRARY_PATH\""
