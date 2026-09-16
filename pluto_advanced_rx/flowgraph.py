@@ -207,7 +207,25 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.if_filter = filter.rational_resampler_ccf(
             interpolation=1, decimation=decim, taps=[], fractional_bw=0.4,
         )
-        self.connect(self.pluto_source, self.if_filter)
+        if self.device.is_audio_only():
+            # No RF LO to retune, unlike every other backend -- shifts the
+            # chosen audio frequency down to 0 Hz baseband instead, the
+            # same position a real SDR's own LO retune already puts "the
+            # signal" at for every downstream branch (if_filter onward).
+            # rotator_cc multiplies by e^(j*phase_inc*n); shifting a signal
+            # AT +actual Hz DOWN to 0 needs phase_inc = -2*pi*actual/fs.
+            # fft_probe (above) keeps tapping pluto_source directly, BEFORE
+            # this rotator -- see gui.py's _sync_waterfall() for why the
+            # waterfall's displayed axis must stay pinned to that raw,
+            # unrotated spectrum rather than following this shift.
+            self.audio_rotator = blocks.rotator_cc(
+                -2 * math.pi * (self.nominal_freq_hz + self.fine_offset_hz) / self.sample_rate
+            )
+            self.connect(self.pluto_source, self.audio_rotator)
+            self.connect(self.audio_rotator, self.if_filter)
+        else:
+            self.audio_rotator = None
+            self.connect(self.pluto_source, self.if_filter)
 
         # --- FM branch: quadrature demod, then an audio low-pass to clean
         # up demod noise above the voice band. fm_channel_filter is a
@@ -441,7 +459,10 @@ class AdvancedRxFlowgraph(gr.top_block):
 
     def _retune(self):
         actual = self.nominal_freq_hz + self.fine_offset_hz
-        self.device.set_frequency(actual)
+        if self.audio_rotator is not None:
+            self.audio_rotator.set_phase_inc(-2 * math.pi * actual / self.sample_rate)
+        else:
+            self.device.set_frequency(actual)
 
     def set_frequency(self, freq_hz: float):
         self.nominal_freq_hz = freq_hz

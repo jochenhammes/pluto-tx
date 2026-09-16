@@ -146,6 +146,26 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
             plot.addItem(region)
             self._band_regions.append(region)
 
+        # A SECOND, independent marker+band pair, specifically for PSK31 --
+        # a different color (yellow) so it's visually distinct from the
+        # primary marker/band above (which tracks demod_combo's FM/SSB/RADE
+        # selection). PSK31 is an always-on parallel decode branch,
+        # independent of demod_combo, so both can be shown together rather
+        # than one replacing the other -- see gui.py's set_psk31_marker()
+        # caller in _sync_waterfall().
+        self._psk31_marker_lines = []
+        self._psk31_band_regions = []
+        for plot in (self.spectrum_plot, self.waterfall_plot):
+            marker = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color="#ffdd00", width=1))
+            plot.addItem(marker)
+            self._psk31_marker_lines.append(marker)
+
+            region = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(255, 221, 0, 40),
+                                          pen=pg.mkPen(color="#ffdd00", width=0, style=QtCore.Qt.NoPen))
+            region.setZValue(-10)
+            plot.addItem(region)
+            self._psk31_band_regions.append(region)
+
         self._init_image_buffer(fft_size)
 
     # --- internal ------------------------------------------------------
@@ -191,6 +211,14 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
                 region.setRegion((0, 0))
             return
         for region in self._band_regions:
+            region.setRegion((lo_hz, hi_hz))
+
+    def set_psk31_marker(self, freq_hz, lo_hz, hi_hz):
+        """PSK31's own marker/band, independent of set_tuned_frequency()/
+        set_demod_band() above -- see this widget's __init__ for why."""
+        for marker in self._psk31_marker_lines:
+            marker.setPos(freq_hz)
+        for region in self._psk31_band_regions:
             region.setRegion((lo_hz, hi_hz))
 
     def set_fft_size(self, fft_size):

@@ -31,10 +31,17 @@ from pluto_tx import audio_devices
 
 from .base import RxDevice
 
-# Nyquist = 10kHz, matching the requested 0-10kHz spectrum/waterfall display
-# for this backend -- a single fixed choice, not a curated list like the
-# RF backends, since there's no RF-bandwidth-vs-throughput tradeoff here.
-SAMPLE_RATE_HZ = 20_000
+# Nyquist = 24kHz -- a single fixed choice, not a curated list like the RF
+# backends, since there's no RF-bandwidth-vs-throughput tradeoff here. 48000
+# (not e.g. 44100) specifically: psk31_decim's rate math (flowgraph.py,
+# round(if_rate/PSK31_WORKING_RATE_HZ)) stays an EXACT ratio at 48000
+# (48000/24=2000.0) but not at 44100; it's also already proven to work with
+# this exact ALSA/PipeWire audio.source() wrapper -- it's config.AUDIO_RATE
+# elsewhere in this same flowgraph (the audio OUTPUT sink) and
+# audio_devices.py's own default. Was 20_000 (Nyquist 10kHz) until real
+# audio-spectrum tuning made that ceiling too low to reach a real signal
+# sitting anywhere above 10kHz in the incoming audio.
+SAMPLE_RATE_HZ = 48_000
 
 # See the module docstring: real-only input needs roughly double the
 # amplitude a genuine complex IQ stream would, per rade_c's own
@@ -68,7 +75,14 @@ class AudioDevice(RxDevice):
     connection_kind = "audio_device"
     DEFAULT_CONNECTION = ""  # empty device string -- gr-audio picks the system default
 
-    frequency_range_hz = (0.0, 0.0)  # no RF tuning concept -- gui.py hides freq_spin/fine_slider for this backend
+    frequency_range_hz = (0.0, 0.0)  # no RF tuning concept -- gui.py hides freq_spin for this backend
+    # Real baseband tuning DOES apply, though -- a narrowband PSK31/RADE/SSB
+    # signal can sit at any tone within the incoming ~24kHz audio span, so
+    # gui.py shows a dedicated Hz-native tuner (audio_tune_spin) for this
+    # range; AdvancedRxFlowgraph shifts it to 0 Hz baseband with a rotator
+    # (see flowgraph.py's audio_rotator). Half of SAMPLE_RATE_HZ, i.e. the
+    # Nyquist limit of this backend's own sample rate.
+    audio_tuning_range_hz = (0.0, SAMPLE_RATE_HZ / 2)
     sample_rate_hz_choices = (SAMPLE_RATE_HZ,)
     default_sample_rate_hz = SAMPLE_RATE_HZ
     default_bandwidth_hz = None
@@ -76,6 +90,13 @@ class AudioDevice(RxDevice):
     supports_agc_mode = False
     agc_modes = ()
     default_gain_mode = None
+    # FftProbe's zoom is a real zoom-FFT -- fft_size*zoom FRESH samples are
+    # needed per output row (fft_probe.py), so row rate = sample_rate /
+    # (fft_size*zoom). At this backend's 48kHz (vs. RF backends' >=1MHz)
+    # that degrades far faster for the same zoom number -- capped here to
+    # keep the waterfall's row rate above ~5-6 Hz at the default FFT size
+    # (48000/(1024*8) = 5.9 Hz) instead of stuttering badly at higher zoom.
+    max_waterfall_zoom = 8
     supports_dc_iq_correction = False
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):

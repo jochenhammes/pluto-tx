@@ -10,6 +10,8 @@ import abc
 from dataclasses import dataclass
 from typing import Optional, Union
 
+from ..fft_probe import FftProbe
+
 
 @dataclass(frozen=True)
 class GainStage:
@@ -41,6 +43,23 @@ class RxDevice(abc.ABC):
     display_name: str  # GUI label, e.g. "PlutoSDR"
     connection_kind: str  # "uri" | "soapy_args" -- which GUI connection widget to show
     frequency_range_hz: tuple
+    # Audio-domain analogue of frequency_range_hz, for a backend with no RF
+    # LO to retune but a real DSP frequency shift makes sense anyway (e.g.
+    # AudioDevice's incoming sound-card spectrum, where a narrowband
+    # PSK31/RADE/SSB signal can sit at any tone). None (the default) means
+    # no baseband-tuning concept -- kept SEPARATE from frequency_range_hz
+    # rather than repurposing (0.0, 0.0), since is_audio_only() below must
+    # keep meaning "no RF" for its existing consumers (File Broadcast
+    # gating, etc.) regardless of this.
+    audio_tuning_range_hz: Optional[tuple] = None
+    # Upper bound for the waterfall's zoom slider -- FftProbe.MAX_ZOOM by
+    # default. A backend with a much lower sample rate than RF's needs a
+    # tighter cap: zoom is a real zoom-FFT (fft_probe.py), needing
+    # fft_size*zoom FRESH samples per output row, so row rate =
+    # sample_rate/(fft_size*zoom) degrades far faster at a low sample rate
+    # than at RF's multi-MHz ones for the same zoom number -- see
+    # AudioDevice's override for the concrete math.
+    max_waterfall_zoom: int = FftProbe.MAX_ZOOM
     sample_rate_hz_choices: tuple  # flat, curated list -- see PlutoDevice's docstring for why
     default_sample_rate_hz: float
     default_bandwidth_hz: Optional[float]  # None = backend has no exposed concept

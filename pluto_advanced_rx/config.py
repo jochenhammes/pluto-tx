@@ -186,6 +186,12 @@ PSK31_SYMBOL_RATE_HZ = 31.25
 # stale 1500Hz assumption).
 PSK31_DEFAULT_TONE_HZ = 2500.0
 PSK31_TONE_RANGE_HZ = (300.0, 2700.0)
+# Approximate BPSK31 occupied bandwidth, for the waterfall's PSK31 marker
+# overlay ONLY -- not a precise RF bandwidth model. A small multiple of the
+# real 31.25 baud symbol rate, so the overlay is visually proportionate to
+# the actual narrow signal instead of reusing an unrelated, much wider
+# FM/SSB/RADE demod-band constant (see gui.py's _sync_waterfall()).
+PSK31_DISPLAY_BANDWIDTH_HZ = PSK31_SYMBOL_RATE_HZ * 4
 
 # Fixed working rate the demod chain (Costas loop/symbol_sync_ff) runs at,
 # decimated down from DEMOD_IF_RATE via psk31_tone_filter. Raised from the

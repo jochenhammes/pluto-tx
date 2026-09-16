@@ -297,6 +297,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_spin.setFont(freq_font)
         freq_row.addWidget(self.freq_spin)
 
+        # Audio-domain counterpart to freq_spin, for backends with no RF LO
+        # to retune but a real DSP frequency shift makes sense anyway (e.g.
+        # Audio Input's ~10kHz of incoming sound-card spectrum) -- native Hz,
+        # not MHz, since that span is far too small for freq_spin's scale.
+        # Exactly one of the two is ever visible, see
+        # _sync_device_dependent_widgets(). fine_slider/fine_label just
+        # below are SHARED between both -- already Hz-scale, already the
+        # right role for a fine nudge on top of either.
+        self.audio_tune_label = QtWidgets.QLabel("Audio Tune (Hz):")
+        freq_row.addWidget(self.audio_tune_label)
+        self.audio_tune_spin = QtWidgets.QDoubleSpinBox()
+        self.audio_tune_spin.setDecimals(0)
+        self.audio_tune_spin.setSingleStep(10.0)
+        self.audio_tune_spin.valueChanged.connect(self._on_audio_tune_changed)
+        freq_row.addWidget(self.audio_tune_spin)
+
         freq_row.addWidget(QtWidgets.QLabel("Fine tune (Hz):"))
         self.fine_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.fine_slider.setRange(-config.FINE_TUNE_RANGE_HZ, config.FINE_TUNE_RANGE_HZ)
@@ -435,6 +451,15 @@ class MainWindow(QtWidgets.QMainWindow):
         persistent_device_str = audio_devices.ensure_persistent_output_node(name="pluto-advanced-rx-output")
         if persistent_device_str is not None:
             self.audio_device_combo.addItem("pluto-advanced-rx Output (qpwgraph)", persistent_device_str)
+        # The INPUT-side persistent node (see devices/audio.py's
+        # AudioDevice.scan_devices_with_timeout()) is normally only ensured
+        # once the operator switches to the "Audio Input" device type and
+        # clicks Scan -- create/verify it here too, unconditionally, so
+        # BOTH persistent nodes are already up and qpwgraph-visible right
+        # after launch (e.g. after a crash took them down), not only after
+        # that specific combo is first opened. Idempotent/cheap if it
+        # already exists; the returned string itself isn't needed here.
+        audio_devices.ensure_persistent_input_node(name="pluto-advanced-rx-input")
         self._audio_device = self.audio_device_combo.currentData()  # "" (System Default) -- single
         # source of truth threaded into every AdvancedRxFlowgraph(...) call below, kept in sync by
         # _on_audio_device_changed() only after a rebuild actually succeeds.
@@ -594,7 +619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"{hz/1e6:g} MHz" if hz >= 1_000_000 else f"{hz/1e3:g} kHz"
 
     def _set_connected_controls_enabled(self, enabled: bool):
-        for w in (self.freq_spin, self.fine_slider, self.demod_combo, self.width_slider,
+        for w in (self.freq_spin, self.audio_tune_spin, self.fine_slider, self.demod_combo, self.width_slider,
                   self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
                   self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
                   self.receive_button, self.autotune_button, self.filebroadcast_receive_button,
@@ -682,16 +707,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_device_connection_labels()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
 
-        # No RF tuning concept for a sound card -- hide rather than just
-        # grey out (same "hide, don't just grey out" principle already used
-        # for the RADE-mode width slider).
+        # RF tuning (freq_spin) vs. audio-domain tuning (audio_tune_spin) --
+        # mutually exclusive, hide rather than just grey out (same "hide,
+        # don't just grey out" principle already used for the RADE-mode
+        # width slider). fine_slider/fine_label are shared, visible for
+        # either.
         has_frequency = device_cls.frequency_range_hz != (0.0, 0.0)
+        has_audio_tuning = device_cls.audio_tuning_range_hz is not None
         self.freq_spin.setVisible(has_frequency)
-        self.fine_slider.setVisible(has_frequency)
-        self.fine_label.setVisible(has_frequency)
+        self.audio_tune_label.setVisible(has_audio_tuning)
+        self.audio_tune_spin.setVisible(has_audio_tuning)
+        self.fine_slider.setVisible(has_frequency or has_audio_tuning)
+        self.fine_label.setVisible(has_frequency or has_audio_tuning)
         if has_frequency:
             lo_hz, hi_hz = device_cls.frequency_range_hz
             self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
+        if has_audio_tuning:
+            lo_hz, hi_hz = device_cls.audio_tuning_range_hz
+            self.audio_tune_spin.setRange(lo_hz, hi_hz)
+
+        # See RxDevice.max_waterfall_zoom's docstring -- a backend with a
+        # much lower sample rate than RF's needs a tighter zoom cap to keep
+        # the waterfall from stuttering. setMaximum() clamps an
+        # out-of-range current value automatically, so switching FROM a
+        # high RF zoom level needs no separate clamping here.
+        self.zoom_slider.setMaximum(device_cls.max_waterfall_zoom)
 
         self.bandwidth_combo.blockSignals(True)
         self.bandwidth_combo.clear()
@@ -804,9 +844,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is None:
             return
         freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
+        # fft_probe taps pluto_source BEFORE the audio_rotator (see
+        # flowgraph.py), so its data is always centered on real DC = 0 Hz
+        # for Audio Input, regardless of tuning -- unlike RF, where a real
+        # LO retune actually moves the hardware's own capture window, so
+        # the displayed axis correctly follows `freq` there. Audio Input's
+        # axis must stay pinned to what the data actually contains; only
+        # the tuned-frequency marker/demod-band shading below (still
+        # `freq`) show where the rotator now points against that fixed axis.
         zoomed_span = self.tb.sample_rate / self.tb.fft_probe.zoom
-        self.waterfall.set_frequency_range(freq, zoomed_span)
+        if self.tb.device.is_audio_only():
+            # _poll_fft() crops each row to its upper (DC-to-Nyquist) half
+            # for this backend -- the real-to-complex conversion
+            # (AudioDevice's _AudioToComplexSource) produces a spectrum
+            # mirror-symmetric around 0 Hz, and the negative half is
+            # redundant/not meaningful to show. The double-sided
+            # zoomed_span always spans [-zoomed_span/2, +zoomed_span/2]
+            # around real DC; keeping only the upper half of the bins gives
+            # exactly [0, +zoomed_span/2] -- span=zoomed_span/2 centered at
+            # zoomed_span/4.
+            positive_span = zoomed_span / 2
+            self.waterfall.set_frequency_range(positive_span / 2, positive_span)
+        else:
+            self.waterfall.set_frequency_range(freq, zoomed_span)
         self.waterfall.set_tuned_frequency(freq)
+        # PSK31 is an always-on parallel decode branch (independent of
+        # demod_combo below), so its own marker/band is shown unconditionally
+        # -- psk31_tone_center_hz is the LIVE AFC-tracked position
+        # (psk31_afc_step()), not the static nominal psk31_tone_hz, so this
+        # reflects where PSK31 is actually locked, not just where it started.
+        psk31_freq = freq + self.tb.psk31_tone_center_hz
+        psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
+        self.waterfall.set_psk31_marker(psk31_freq, psk31_freq - psk31_half_bw, psk31_freq + psk31_half_bw)
         mode = self.demod_combo.currentData()
         if mode == AdvancedRxFlowgraph.MODE_FM:
             half_bw = self.tb.fm_demod_width_hz / 2
@@ -828,6 +897,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         row, self._fft_gen = self.tb.fft_probe.get_latest_row(self._fft_gen)
         if row is not None:
+            if self.tb.device.is_audio_only():
+                # fftshift'd -> DC sits at len//2; this slice is [0, +Nyquist),
+                # matching _sync_waterfall()'s positive-only span for this
+                # backend -- see its comment for the full reasoning.
+                row = row[len(row) // 2:]
             self.waterfall.push_fft_row(row)
         if (self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_RADE and RADE_AVAILABLE
                 and self._autotune_token is None):  # suppressed while an autotune run owns the status label
@@ -981,6 +1055,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._psk31_last_afc_poll_time = now
         self.tb.psk31_afc_step()
+        # Refresh just the PSK31 marker/band (not the full _sync_waterfall(),
+        # which also recomputes the axis/FM-SSB-RADE band every call) so it
+        # visibly tracks psk31_afc_step()'s live corrections to
+        # psk31_tone_center_hz, at this same throttled cadence.
+        freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
+        psk31_freq = freq + self.tb.psk31_tone_center_hz
+        psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
+        self.waterfall.set_psk31_marker(psk31_freq, psk31_freq - psk31_half_bw, psk31_freq + psk31_half_bw)
 
     _FB_COL_FILENAME, _FB_COL_SIZE, _FB_COL_RECEIVED, _FB_COL_RECORD = range(4)
 
@@ -1066,6 +1148,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is None:
             return
         self.tb.set_frequency(mhz * 1e6)
+        self._sync_waterfall()
+
+    def _on_audio_tune_changed(self, hz):
+        """audio_tune_spin's counterpart to _on_freq_changed() above --
+        already native Hz, no unit conversion needed."""
+        if self.tb is None:
+            return
+        self.tb.set_frequency(hz)
         self._sync_waterfall()
 
     def _on_fine_changed(self, value):
@@ -1441,7 +1531,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Route through the spin box rather than calling tb.set_frequency()
         # directly, so a click reuses the exact same retune/marker-update
         # path as manual entry, including the spin box's own range clamping.
-        self.freq_spin.setValue(freq_hz / 1e6)
+        if self.tb.device.is_audio_only():
+            self.audio_tune_spin.setValue(freq_hz)
+        else:
+            self.freq_spin.setValue(freq_hz / 1e6)
 
     def _on_bandwidth_changed(self, idx):
         """RX bandwidth ("zoom") change: GNU Radio's FIR/resampler blocks
