@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs everything the pluto_tx / pluto_rx / pluto_advanced_rx apps need
+# Installs everything the pluto_tx / pluto_advanced_rx apps need
 # on a Debian/Ubuntu Linux machine: GNU Radio (which pulls in gr-iio and
 # PyQt5 as hard dependencies of its own "gnuradio" package), raw
 # python3-libiio (used directly by safety.py/netutil.py for the TX
@@ -46,7 +46,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "== pluto-tx / pluto-rx / pluto-advanced-rx installer =="
+echo "== pluto-tx / pluto-advanced-rx installer =="
 echo "Repo directory: $SCRIPT_DIR"
 echo
 
@@ -195,19 +195,13 @@ cd "$SCRIPT_DIR" && exec python3 -m pluto_tx.app --gui "\$@"
 EOF
 chmod +x "$HOME/.local/bin/pluto-tx"
 
-cat > "$HOME/.local/bin/pluto-rx" <<EOF
-#!/usr/bin/env bash
-cd "$SCRIPT_DIR" && exec python3 -m pluto_rx.app "\$@"
-EOF
-chmod +x "$HOME/.local/bin/pluto-rx"
-
 cat > "$HOME/.local/bin/pluto-advanced-rx" <<EOF
 #!/usr/bin/env bash
 cd "$SCRIPT_DIR" && exec python3 -m pluto_advanced_rx.app "\$@"
 EOF
 chmod +x "$HOME/.local/bin/pluto-advanced-rx"
 
-echo "Created $HOME/.local/bin/pluto-tx, pluto-rx, and pluto-advanced-rx"
+echo "Created $HOME/.local/bin/pluto-tx and pluto-advanced-rx"
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
@@ -231,10 +225,8 @@ echo
 echo "== Done =="
 echo "Start the apps with:"
 echo "    pluto-tx"
-echo "    pluto-rx"
 echo "    pluto-advanced-rx"
-echo "(all accept --uri/--freq/etc. -- see e.g. 'pluto-tx --help'."
+echo "(both accept --uri/--freq/etc. -- see e.g. 'pluto-tx --help'."
 echo " Without a launcher on PATH, run them directly from $SCRIPT_DIR instead:"
 echo "    python3 -m pluto_tx.app --gui"
-echo "    python3 -m pluto_rx.app"
 echo "    python3 -m pluto_advanced_rx.app)"

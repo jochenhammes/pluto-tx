@@ -1,12 +1,13 @@
 """GNU Radio flowgraph for the PlutoSDR advanced RX app: FM and SSB(USB)
-demodulators (a straight copy of pluto_rx/flowgraph.py's demod chain) plus a
-FftProbe tap feeding the interactive pyqtgraph waterfall widget, instead of
-pluto_rx's opaque qtgui.waterfall_sink_c.
+demodulators plus a FftProbe tap feeding the interactive pyqtgraph waterfall
+widget (instead of GNU Radio's opaque qtgui.waterfall_sink_c, which has no
+data-out port a Python-side widget could read).
 
-Deliberately a SELF-CONTAINED COPY of pluto_rx's flowgraph, not an import of
-PlutoRxFlowgraph -- see pluto_advanced_rx/config.py's module docstring for
-why. Independent of pluto_tx: RX can't radiate, so none of pluto_tx's
-attenuation/LO-powerdown safety machinery applies here.
+Independent of pluto_tx: RX can't radiate, so none of pluto_tx's
+attenuation/LO-powerdown safety machinery applies here. (This app started
+as a self-contained copy of a simpler predecessor, `pluto_rx`, which has
+since been removed as fully superseded -- see git history if that lineage
+is ever relevant.)
 
 Signal path: device source (RX_BANDWIDTH, "zoom" span) --> IF decimation
 filter (real-tap low-pass, complex in/out) down to a FIXED DEMOD_IF_RATE -->
@@ -135,10 +136,9 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.device.set_gain(stage_name, value)
 
         # --- FFT probe for the interactive waterfall widget: taps the full
-        # RX_BANDWIDTH span directly off pluto_source, same point pluto_rx's
-        # qtgui.waterfall_sink_c attaches at. Always on -- cheap enough
-        # (throttled compute rate, see fft_probe.py) that there's no need
-        # for pluto_rx's enable_waterfall toggle.
+        # RX_BANDWIDTH span directly off pluto_source. Always on -- cheap
+        # enough (throttled compute rate, see fft_probe.py) that no
+        # enable/disable toggle is needed.
         self.fft_probe = FftProbe(fft_size, self.sample_rate, config.WATERFALL_WINDOW, config.FFT_COMPUTE_RATE_HZ)
         self.connect(self.pluto_source, self.fft_probe)
 
@@ -217,10 +217,9 @@ class AdvancedRxFlowgraph(gr.top_block):
 
         # --- IF stage: decimate from the RX bandwidth preset down to the
         # fixed DEMOD_IF_RATE. rational_resampler_ccf (interpolation=1, i.e.
-        # pure decimation) with auto-designed taps -- see pluto_rx's
-        # identical comment for why this beats a firdes.low_pass'd filter
-        # with a fixed absolute-Hz transition width (thousands of taps at
-        # wider presets for no accuracy benefit).
+        # pure decimation) with auto-designed taps -- beats a
+        # firdes.low_pass'd filter with a fixed absolute-Hz transition
+        # width (thousands of taps at wider presets for no accuracy benefit).
         decim = max(1, round(self.sample_rate / config.DEMOD_IF_RATE))
         self.if_rate = self.sample_rate / decim
         self.if_filter = filter.rational_resampler_ccf(

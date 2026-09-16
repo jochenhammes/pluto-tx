@@ -1,10 +1,10 @@
 """A pure Python/numpy gr.sync_block that exposes the latest FFT magnitude
 row of a complex stream to a polling GUI thread.
 
-Why this exists: GNU Radio's own qtgui blocks (qtgui.waterfall_sink_c etc.,
-what pluto_rx uses) render into an opaque C++/Qt widget with no data-out
-port at all (confirmed by introspecting qtgui.sink_c: only qwidget()/
-set_fft_size(), no pmt output). To build a custom interactive waterfall
+Why this exists: GNU Radio's own qtgui blocks (qtgui.waterfall_sink_c etc.)
+render into an opaque C++/Qt widget with no data-out port at all (confirmed
+by introspecting qtgui.sink_c: only qwidget()/set_fft_size(), no pmt
+output). To build a custom interactive waterfall
 (pyqtgraph-based, see waterfall_widget.py) the raw spectrum data has to come
 out of the flowgraph some other way -- this block computes it in Python.
 

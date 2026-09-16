@@ -1,10 +1,10 @@
 """Shared constants for the PlutoSDR advanced RX app.
 
-Deliberately a SELF-CONTAINED COPY of pluto_rx/config.py's RX-tuning values
-(not an import) -- pluto_advanced_rx is a separate, independent app that
-should be free to diverge from pluto_rx without risking the stable app, the
-same relationship pluto_rx itself has to pluto_tx. Only genuinely generic,
-non-RX-specific constants/helpers are still re-exported from pluto_tx.config.
+Deliberately its own, independent set of RX-tuning values -- free to diverge
+from pluto_tx's own TX-tuning values without risking that app. Only
+genuinely generic, non-RX-specific constants/helpers are re-exported from
+pluto_tx.config (bandplan/URI helpers, M17 PHY constants that the RX demod
+chain must match exactly).
 """
 import math
 
@@ -33,14 +33,13 @@ from pluto_tx.config import BASEBAND_DEVIATION_HZ  # noqa: F401 (re-exported)
 # flowgraph rebuild (GNU Radio FIR/resampler blocks can't change their
 # decimation ratio at runtime) -- see gui.py's _on_bandwidth_changed.
 #
-# Extended beyond pluto_rx's [1M, 2.5M] on request, up to what actually
-# produces data on real hardware -- each preset here was re-verified.
-# 5M/8M/10M DO work but show real buffer overruns ("O" printed by GNU Radio)
-# and audio underruns: the CURRENT ip:plutoplus.local / IIOD-network-protocol
-# connection has a measured throughput ceiling around ~4.7-4.9 Msps (same
-# finding pluto_rx/README already documents) -- expect choppy audio/gaps in
-# the waterfall at these presets until a native USB backend is used instead
-# (see README ToDo).
+# Extended on request up to what actually produces data on real hardware --
+# each preset here was re-verified. 5M/8M/10M DO work but show real buffer
+# overruns ("O" printed by GNU Radio) and audio underruns: the CURRENT
+# ip:plutoplus.local / IIOD-network-protocol connection has a measured
+# throughput ceiling around ~4.7-4.9 Msps (see README) -- expect choppy
+# audio/gaps in the waterfall at these presets until a native USB backend
+# is used instead (see README ToDo).
 #
 # 15M/20M were tried and are NOT included: at that decimation ratio (400:1
 # down to DEMOD_IF_RATE) the auto-designed IF filter grows to >13,000 taps,
@@ -124,7 +123,7 @@ DEFAULT_FFT_SIZE = 1024
 WATERFALL_HISTORY_ROWS = 200  # rolling time-history depth of the waterfall image
 WATERFALL_POLL_INTERVAL_MS = 33  # ~30 Hz GUI-side poll of fft_probe's latest row
 FFT_COMPUTE_RATE_HZ = 30  # fft_probe's own compute throttle, independent of poll rate/sample rate
-WATERFALL_WINDOW = window.WIN_BLACKMAN_hARRIS  # matches pluto_rx's qtgui.waterfall_sink_c window
+WATERFALL_WINDOW = window.WIN_BLACKMAN_hARRIS  # matches GNU Radio's own qtgui.waterfall_sink_c default window
 WATERFALL_COLORMAP = "viridis"
 WATERFALL_DB_RANGE = (-80.0, 0.0)  # fixed color/Y-axis levels (no per-frame autoscale)
 

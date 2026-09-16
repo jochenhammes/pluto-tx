@@ -1,20 +1,20 @@
-"""PyQt5 GUI for the PlutoSDR advanced RX app -- same controls as pluto_rx
-(FM/SSB demod, gain, NF volume, RX bandwidth/zoom, device connect/disconnect
-/scan) plus the interactive pyqtgraph waterfall (AdvancedWaterfallWidget):
+"""PyQt5 GUI for the PlutoSDR advanced RX app -- FM/SSB/RADE/M17/Baseband
+demod, gain, NF volume, RX bandwidth/zoom, device connect/disconnect/scan,
+plus the interactive pyqtgraph waterfall (AdvancedWaterfallWidget):
 tuned-frequency marker, click-to-tune, demod-bandwidth shading, and a live
 frequency axis above the waterfall. Deliberately PyQt5, not PyQt6: see
 pluto_tx/gui.py's docstring (libgnuradio-qtgui is linked against Qt5; mixing
 Qt runtimes is a crash risk) -- pyqtgraph itself doesn't care, but the rest
 of this codebase does.
 
-Unlike pluto_rx/gui.py, there is no _embed_waterfall swap-out dance: the
-waterfall widget here is a plain Python/PyQt-owned QWidget (not a
+The waterfall widget here is a plain Python/PyQt-owned QWidget (not a
 sip.wrapinstance()-wrapped C++ object owned by a gr-qtgui sink block), so it
 is built ONCE and simply persists across every device reconnect and RX
-bandwidth rebuild -- the whole class of bug pluto_rx/gui.py's
-"never call deleteLater(), only setParent(None)" rule works around (a real
-SIGSEGV, from the old widget racing its owning flowgraph's C++ teardown)
-cannot happen here, because nothing here is C++-owned.
+bandwidth rebuild -- deliberately avoiding a whole class of SIGSEGV
+(a C++-owned widget racing its owning flowgraph's teardown) that a
+gr-qtgui-based widget would need careful `deleteLater()`-vs-`setParent(None)`
+discipline to avoid. Nothing here is C++-owned, so that risk doesn't exist
+at all.
 """
 import signal
 import sys
@@ -1629,8 +1629,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """RX bandwidth ("zoom") change: GNU Radio's FIR/resampler blocks
         can't change their decimation ratio at runtime, so this rebuilds the
         whole flowgraph from scratch, carrying over every other current
-        setting. Unlike pluto_rx, the waterfall widget itself is NOT
-        swapped -- it persists, just gets a new frequency range."""
+        setting. The waterfall widget itself is NOT swapped -- it persists,
+        just gets a new frequency range (see this module's own docstring
+        for why that's possible here)."""
         if self.tb is None:
             return
         self._autotune_cancel()  # a rebuild replaces self.tb -- any in-flight run's captured state is now stale

@@ -828,9 +828,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # (enabled, "Disconnect"-labelled) construction defaults, which only
         # makes sense once actually connected. Put it into the disconnected
         # default presentation first (redundant with what _rebuild()'s own
-        # failure branches already do, but matches pluto_rx/
-        # pluto_advanced_rx's identical setup and doesn't rely on that),
-        # then attempt the actual initial connection through the exact same
+        # failure branches already do, but matches pluto_advanced_rx's
+        # identical setup and doesn't rely on that), then attempt the
+        # actual initial connection through the exact same
         # bounded-timeout, exception-safe path a later Connect/reconnect
         # uses. If the device isn't reachable, these defaults are what's
         # left on screen, with an explanatory status message, instead of
@@ -895,7 +895,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # underlying Qt widget is owned by its gr-qtgui sink block (part of
         # the OLD flowgraph object), not by this sip.wrapinstance() wrapper --
         # deleteLater() here would race the old flowgraph's own C++ teardown
-        # (see pluto_rx/gui.py's identical note, verified by a real crash there).
+        # (a real SIGSEGV verified this way once in a predecessor app --
+        # never call deleteLater() on this widget, only setParent(None)).
         while self.waterfall_container.count():
             item = self.waterfall_container.takeAt(0)
             widget = item.widget()

@@ -1,6 +1,6 @@
 # pluto-tx
 
-Eigene FM/SSB(USB)-Sendesoftware für den ADALM-PLUTO (Pluto+, Tezuka-Firmware) und HackRF One, gebaut mit GNU Radio. Dazu `pluto_rx`/`pluto_advanced_rx` als Empfänger-Apps.
+Eigene FM/SSB(USB)-Sendesoftware für den ADALM-PLUTO (Pluto+, Tezuka-Firmware) und HackRF One, gebaut mit GNU Radio. Dazu `pluto_advanced_rx` als Empfänger-App.
 
 Sendebetrieb nur mit gültiger Amateurfunklizenz. Verantwortung für Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 
@@ -21,7 +21,7 @@ Für Debian/Ubuntu (`apt-get`). Installiert:
 - `soapysdr-module-rtlsdr`, `rtl-sdr` — für RTL-SDR-Unterstützung in `pluto_advanced_rx`
 - `git`
 
-Prüft danach per echtem Python-Import, ob alles verfügbar ist, und legt `~/.local/bin/pluto-tx`, `pluto-rx`, `pluto-advanced-rx` an. Beliebig oft wiederholbar.
+Prüft danach per echtem Python-Import, ob alles verfügbar ist, und legt `~/.local/bin/pluto-tx`, `pluto-advanced-rx` an. Beliebig oft wiederholbar.
 
 Der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:...`) erreichbar sein — für USB ist nichts weiter nötig (`libiio0`s eigene udev-Regel ist `MODE=666`, weltweit lesbar/schreibbar, verifiziert). Für HackRF/RTL-SDR richtet das Skript zusätzlich zwei Dinge ein, die es nicht ohne Weiteres automatisch abschließen kann:
 
@@ -71,15 +71,14 @@ pluto_tx/
 ├── rade_ctypes.py / lpcnet_subprocess.py / rade.py   # RADE-Anbindung (RadeEncoder)
 ├── gui.py / app.py
 └── da2jh-test.wav       # Standard-Testaufnahme
-pluto_rx/                # einfacher RX (Frequenz, Gain, Wasserfall)
-pluto_advanced_rx/        # RX mit interaktivem SDR++-artigem Wasserfall (eigenständige Kopie von pluto_rx)
+pluto_advanced_rx/        # RX mit interaktivem SDR++-artigem Wasserfall
 ├── devices/           # RX-Geräte-Abstraktionsschicht: PlutoDevice/HackRFDevice/RtlSdrDevice
 ├── rade_ctypes.py / lpcnet_subprocess.py / rade.py   # RADE-Anbindung (RadeDecoder) -- eigene Kopie, kein Import aus pluto_tx
 └── ...
 pluto_tx_carrier.py        # Carrier-Test-Skript (Fallback/Referenz)
 ```
 
-`pluto_rx`/`pluto_advanced_rx` sind unabhängig von `pluto_tx` (RX kann nicht senden, braucht keine TX-Sicherheitsschicht), teilen sich aber Bandplan/URI-Konstanten. `pluto_advanced_rx` ist eine eigenständige Kopie von `pluto_rx`, nicht dessen Ersatz — kann frei weiterentwickelt werden, ohne die stabile `pluto_rx`-App zu berühren.
+`pluto_advanced_rx` ist unabhängig von `pluto_tx` (RX kann nicht senden, braucht keine TX-Sicherheitsschicht), teilt sich aber Bandplan/URI-Konstanten und M17-PHY-Konstanten mit ihm (siehe `config.py`s Re-Exports).
 
 ### `pluto_advanced_rx`: interaktiver Wasserfall
 
@@ -91,11 +90,10 @@ RX-Bandbreiten-Presets bis 10 MHz (`1/2,5/5/8/10 MHz`); 15/20 MHz sind bewusst n
 
 ```
 pluto-tx
-pluto-rx
 pluto-advanced-rx
 ```
 
-Oder direkt: `python3 -m pluto_tx.app --freq 432150000 --gui` (analog für `pluto_rx`/`pluto_advanced_rx`). TX ohne `--gui`: headless CLI-Test.
+Oder direkt: `python3 -m pluto_tx.app --freq 432150000 --gui` (analog für `pluto_advanced_rx`). TX ohne `--gui`: headless CLI-Test.
 
 **M17 direkt gestartet (nicht über den `pluto-tx`-Starter) bleibt ausgegraut** — `LD_LIBRARY_PATH` wird nur vom generierten Starter gesetzt:
 
@@ -373,8 +371,8 @@ aber nicht).
 - **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere Unterbrechung.
 - Audiodatei loopt unabhängig von PTT weiter, Position wird bei PTT nicht zurückgesetzt.
 - **`plutoplus.local` kann nach einem Verbindungswechsel (Ethernet↔USB) kurzzeitig noch auf die alte IP zeigen**, bis `avahi-daemon` nachzieht (paar Sekunden). Zur Kontrolle: `iio_info -u ip:plutoplus.local` oder der GUI-Scan-Button; notfalls IP direkt eintragen.
-- **Der AD9361 teilt sich einen Takt zwischen RX und TX**: läuft `pluto_rx` gleichzeitig mit `pluto_tx` und ändert seine RX-Bandbreite, verschiebt das messbar den tatsächlich gesendeten Takt. `pluto_rx` allein ist nicht betroffen. Ungelöst (siehe ToDo) — bis dahin: RX-Bandbreite nicht während aktiver Sendung ändern.
-- `pluto_rx`s SSB-Demod (komplexer Bandpass + `complex_to_real`) filtert immer auf eine feste Zwischenfrequenz (`DEMOD_IF_RATE=50kHz`) herunter — ein Bandbreitenwechsel baut daher den Flowgraph neu. 5/10 MHz sind nicht verfügbar: die aktuelle `ip:plutoplus.local`-Verbindung (IIOD-Netzwerkprotokoll) schafft nur ~4,7-4,9 MSa/s, darüber gibt es Overruns/abgehacktes Audio.
+- **Der AD9361 teilt sich einen Takt zwischen RX und TX**: läuft eine RX-App (`pluto_advanced_rx`) gleichzeitig mit `pluto_tx` und ändert ihre RX-Bandbreite, verschiebt das messbar den tatsächlich gesendeten Takt. RX allein ist nicht betroffen. Ungelöst (siehe ToDo) — bis dahin: RX-Bandbreite nicht während aktiver Sendung ändern. (Ursprünglich mit dem inzwischen entfernten, einfacheren `pluto_rx` gefunden; `pluto_advanced_rx` nutzt denselben AD9361-Anschluss und ist vermutlich gleichermaßen betroffen, aber nicht eigens nachgetestet.)
+- `pluto_advanced_rx`s SSB-Demod (komplexer Bandpass + `complex_to_real`) filtert immer auf eine feste Zwischenfrequenz (`DEMOD_IF_RATE=50kHz`) herunter — ein Bandbreitenwechsel baut daher den Flowgraph neu. 5/10 MHz sind nicht verfügbar: die aktuelle `ip:plutoplus.local`-Verbindung (IIOD-Netzwerkprotokoll) schafft nur ~4,7-4,9 MSa/s, darüber gibt es Overruns/abgehacktes Audio.
 
 ## Gerätewahl (Netzwerk/USB)
 
@@ -398,7 +396,7 @@ Editierbares Dropdown ("Device") plus Scan- und Connect/Disconnect-Buttons; Star
 - **RADE über Soundkarte nicht mit echtem externem SSB-Funkgerät getestet** — TX/RX-Pfad ist real auf Pluto-Hardware sicherheitsverifiziert und der Audio-DSP-Rundlauf offline über eine echte WAV-Datei bestätigt (Sync, SNR 35,7dB), aber ein Test mit echtem Audio-Interface + Transceiver steht noch aus (kein solches Gerät verfügbar).
 - **FreeDV `reliable_text` beim gepackten libcodec2 (1.2.0-4) melden/reparieren** — echter, per `gdb` bestätigter SIGFPE-Absturz (siehe oben). Nächste Schritte: Bug bei drowe67/codec2 melden, oder neuere libcodec2-Version testen.
 - **Vermutete AD9361-IQ-Imbalance untersuchen/kalibrieren** (siehe FreeDV-Abschnitt oben) — braucht einen realen Hardware-Loopback-Test zur Quantifizierung, bevor über eine Korrektur entschieden wird.
-- **Geteilter AD9361-Takt zwischen `pluto_rx`/`pluto_tx` beheben** — ein erster Versuch (Takt vor jedem Senden zurückholen) hat das Problem nicht gelöst und wurde wieder entfernt. Nötig: Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+.
+- **Geteilter AD9361-Takt zwischen `pluto_advanced_rx`/`pluto_tx` beheben** — ein erster Versuch (Takt vor jedem Senden zurückholen) hat das Problem nicht gelöst und wurde wieder entfernt. Nötig: Recherche zu unabhängigem RX/TX-Takt auf dem AD9361/Pluto+.
 - **Nativer USB-Backend ungetestet** — könnte den RX-Durchsatz über die aktuellen ~4,7-4,9 MSa/s hinaus verbessern. Die udev-Berechtigungsfrage ist inzwischen geklärt (diese Session verifiziert): `libiio0`s eigene Regel ist `MODE=666`, kein Gruppenzwang nötig — der Vorbehalt hier betraf nur die Durchsatzmessung selbst, nicht mehr die Zugriffsrechte.
 - **GUI besser/cooler aussehen lassen** — aktuell rein funktional (Standard-Qt-Widgets).
 - **`pluto_advanced_rx`: mehrstufige IF-Dezimation für 15/20-MHz-Presets** — aktuell ein einzelner `rational_resampler_ccf`-Schritt, der bei diesem Verhältnis einen zu langen Filter für den Scheduler erzeugt. Lösung: kaskadierte Dezimation statt einer Stufe.
