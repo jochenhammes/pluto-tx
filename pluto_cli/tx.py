@@ -1,0 +1,285 @@
+"""`pluto-cli tx <mode>` -- one function per PlutoTxFlowgraph mode.
+
+Each mode function only builds a PlutoTxFlowgraph with the right kwargs
+and hands off to runtime.run_tx_session() -- no TX logic lives here that
+doesn't already exist in pluto_tx/flowgraph.py itself. See pluto_cli/
+README.md for the full command reference and examples.
+"""
+import sys
+
+from pluto_tx.flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE
+from pluto_tx import config as tx_config
+from pluto_tx import devices as tx_devices
+
+from . import runtime
+
+MODES = ("fm", "ssb", "m17", "freedv", "rade", "digitext", "psk31", "filebroadcast", "baseband")
+
+
+def add_common_args(parser):
+    parser.add_argument(
+        "--device", choices=sorted(tx_devices.DEVICE_REGISTRY), default="pluto",
+        help="TX hardware backend (default: pluto)",
+    )
+    parser.add_argument(
+        "--uri", default=None,
+        help="Device connection string (libiio URI for pluto, serial for hackrf, blank for "
+             "soundcard's system default). Omit to use that backend's own default.",
+    )
+    parser.add_argument(
+        "--freq", type=float, default=tx_config.DEFAULT_FREQUENCY,
+        help=f"Transmit frequency in Hz (default: {tx_config.DEFAULT_FREQUENCY:.0f})",
+    )
+    parser.add_argument(
+        "--power-ceiling", type=float, default=None,
+        help="Maximum TX power/attenuation in dB (device-specific meaning -- e.g. Pluto's "
+             "attenuation, negative dB). Omit for the device's own safe default.",
+    )
+    parser.add_argument(
+        "--power", type=float, default=None,
+        help="Target TX power within --power-ceiling (default: equal to the ceiling, i.e. max "
+             "power allowed)",
+    )
+    parser.add_argument(
+        "--source", choices=["mic", "file"], default="mic",
+        help="Audio source for modes that transmit live/file audio (default: mic; ignored for "
+             "text-based/file-based modes: digitext, psk31, filebroadcast)",
+    )
+    parser.add_argument("--wav-file", default=None, help="WAV file path, when --source file")
+    parser.add_argument(
+        "--audio-device", default="",
+        help="Mic device string, from 'pluto-cli devices list-audio-inputs' (real ALSA device, "
+             "a 'monitor:...' PipeWire sink monitor, or the persistent qpwgraph loopback node). "
+             "Empty (default) = system default microphone.",
+    )
+    parser.add_argument(
+        "--duration", type=float, default=3.0,
+        help="Seconds to stay keyed (default: 3.0). Ignored for digitext/psk31, which transmit "
+             "their text exactly once and compute their own duration; ignored with --interactive.",
+    )
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="Enter to key up, Enter again to unkey, repeatedly; Ctrl-C to quit. Ignores --duration.",
+    )
+    parser.add_argument("--yes", action="store_true", help='Skip the "Type YES to key up" confirmation prompt')
+    parser.add_argument("--json", action="store_true", help="Emit one JSON object per line instead of plain text")
+
+
+def _build(args, mode, connection, **mode_kwargs):
+    source = PlutoTxFlowgraph.SRC_FILE if args.source == "file" else PlutoTxFlowgraph.SRC_MIC
+    return PlutoTxFlowgraph(
+        device_type=args.device, connection=connection, frequency=args.freq,
+        power_ceiling=args.power_ceiling, audio_device=args.audio_device,
+        wav_path=args.wav_file, mode=mode, source=source,
+        **mode_kwargs,
+    )
+
+
+def _run(args, mode, emitter, post_construct=None, **mode_kwargs):
+    device_cls = tx_devices.DEVICE_REGISTRY[args.device]
+    connection = runtime.resolve_connection(device_cls, args.uri)
+    runtime.probe_or_exit(device_cls, connection, emitter)
+    tb = runtime.build_or_exit(lambda: _build(args, mode, connection, **mode_kwargs), device_cls, connection, emitter)
+    runtime.install_safety_handlers(tb, emitter)
+    if post_construct is not None:
+        post_construct(tb)
+    if args.power is not None:
+        tb.set_target_power(args.power)
+    tb.start()
+    runtime.confirm_or_exit(args.yes, emitter)
+    runtime.run_tx_session(tb, mode, args, emitter)
+    return 0
+
+
+# --- mode subparsers -------------------------------------------------
+
+def add_fm_subparser(subparsers):
+    p = subparsers.add_parser("fm", help="Narrowband FM voice", description=__doc__)
+    add_common_args(p)
+    p.set_defaults(func=run_fm)
+
+
+def run_fm(args):
+    return _run(args, PlutoTxFlowgraph.MODE_FM, runtime.Emitter(args.json))
+
+
+def add_ssb_subparser(subparsers):
+    p = subparsers.add_parser("ssb", help="SSB (USB) voice", description=__doc__)
+    add_common_args(p)
+    p.set_defaults(func=run_ssb)
+
+
+def run_ssb(args):
+    return _run(args, PlutoTxFlowgraph.MODE_SSB, runtime.Emitter(args.json))
+
+
+def add_m17_subparser(subparsers):
+    p = subparsers.add_parser(
+        "m17", help="M17 digital voice (requires gr-m17, see install-m17.sh)", description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--src-callsign", default="", help="Source callsign (max 9 chars)")
+    p.add_argument("--dst-callsign", default=tx_config.M17_DEFAULT_DST_CALLSIGN,
+                   help=f"Destination callsign (default: {tx_config.M17_DEFAULT_DST_CALLSIGN})")
+    p.set_defaults(func=run_m17)
+
+
+def run_m17(args):
+    emitter = runtime.Emitter(args.json)
+    if not M17_AVAILABLE:
+        emitter.error("M17 is not available -- gr-m17 is not installed, see install-m17.sh")
+        return 1
+    return _run(
+        args, PlutoTxFlowgraph.MODE_M17, emitter,
+        m17_src_callsign=args.src_callsign, m17_dst_callsign=args.dst_callsign,
+    )
+
+
+def add_freedv_subparser(subparsers):
+    p = subparsers.add_parser(
+        "freedv", help="FreeDV 2020/2020B digital voice", description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--variant", choices=["2020", "2020b"], default="2020", help="FreeDV variant (default: 2020)")
+    p.add_argument("--callsign", default="", help="Callsign embedded in the FreeDV frame")
+    p.set_defaults(func=run_freedv)
+
+
+def run_freedv(args):
+    from pluto_tx import freedv_ctypes
+
+    emitter = runtime.Emitter(args.json)
+    if not FREEDV_AVAILABLE:
+        emitter.error("FreeDV is not available -- libcodec2 on this system lacks 2020/2020B support")
+        return 1
+    variant = freedv_ctypes.FREEDV_MODE_2020B if args.variant == "2020b" else freedv_ctypes.FREEDV_MODE_2020
+    return _run(
+        args, PlutoTxFlowgraph.MODE_FREEDV, emitter,
+        freedv_variant=variant, freedv_callsign=args.callsign,
+    )
+
+
+def add_rade_subparser(subparsers):
+    p = subparsers.add_parser(
+        "rade", help="RADE (radio autoencoder) digital voice (requires librade.so, see install-rade.sh)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument(
+        "--eoo", action="store_true",
+        help="Send an End-Of-Over marker after unkeying and wait for it to finish before shutting down",
+    )
+    p.set_defaults(func=run_rade)
+
+
+def run_rade(args):
+    emitter = runtime.Emitter(args.json)
+    if not RADE_AVAILABLE:
+        emitter.error("RADE is not available -- librade.so/lpcnet_demo not found, see install-rade.sh")
+        return 1
+
+    def post_construct(tb):
+        if args.eoo:
+            tb.set_rade_eoo_enabled(True)
+
+    return _run(args, PlutoTxFlowgraph.MODE_RADE, emitter, post_construct=post_construct)
+
+
+def add_digitext_subparser(subparsers):
+    p = subparsers.add_parser("digitext", help="Waterfall Writer text digimode", description=__doc__)
+    add_common_args(p)
+    p.add_argument("--text", required=True, help="Text to draw into the waterfall")
+    p.add_argument("--layout", choices=["horizontal", "vertical"], default="horizontal")
+    p.add_argument("--zoom", type=int, default=1)
+    p.add_argument("--min-freq-hz", type=float, default=tx_config.DIGITEXT_MIN_FREQ_HZ)
+    p.set_defaults(func=run_digitext)
+
+
+def run_digitext(args):
+    from pluto_tx import digitext
+    layout = digitext.LAYOUT_VERTICAL if args.layout == "vertical" else digitext.LAYOUT_HORIZONTAL
+    return _run(
+        args, PlutoTxFlowgraph.MODE_DIGITEXT, runtime.Emitter(args.json),
+        digitext_text=args.text, digitext_layout=layout, digitext_zoom=args.zoom,
+        digitext_min_freq_hz=args.min_freq_hz,
+    )
+
+
+def add_psk31_subparser(subparsers):
+    p = subparsers.add_parser("psk31", help="BPSK31 keyboard-chat digimode", description=__doc__)
+    add_common_args(p)
+    p.add_argument("--text", required=True, help="Text to send")
+    p.add_argument("--tone-hz", type=float, default=tx_config.PSK31_DEFAULT_TONE_HZ,
+                   help=f"Audio tone frequency in Hz (default: {tx_config.PSK31_DEFAULT_TONE_HZ:.0f})")
+    p.set_defaults(func=run_psk31)
+
+
+def run_psk31(args):
+    return _run(
+        args, PlutoTxFlowgraph.MODE_PSK31, runtime.Emitter(args.json),
+        psk31_text=args.text, psk31_tone_hz=args.tone_hz,
+    )
+
+
+def add_filebroadcast_subparser(subparsers):
+    p = subparsers.add_parser(
+        "filebroadcast", help="Repetitive file broadcast (round-robin, gap-fill)", description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument(
+        "--file", dest="files", action="append", required=True, metavar="PATH",
+        help="File to broadcast; repeat --file for multiple files (round-robin rotation)",
+    )
+    p.set_defaults(func=run_filebroadcast)
+
+
+def run_filebroadcast(args):
+    import os
+
+    emitter = runtime.Emitter(args.json)
+
+    def post_construct(tb):
+        for path in args.files:
+            with open(path, "rb") as f:
+                data = f.read()
+            file_id = tb.add_filebroadcast_file(os.path.basename(path), data)
+            emitter.emit("filebroadcast_added", file_id=file_id, filename=os.path.basename(path), bytes=len(data))
+
+    return _run(args, PlutoTxFlowgraph.MODE_FILEBROADCAST, emitter, post_construct=post_construct)
+
+
+def add_baseband_subparser(subparsers):
+    p = subparsers.add_parser(
+        "baseband", help="Raw, wideband, unprocessed audio passthrough (for digimode software)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    lo, hi = tx_config.BASEBAND_DEVIATION_RANGE_HZ
+    p.add_argument(
+        "--deviation-hz", type=float, default=tx_config.BASEBAND_DEVIATION_HZ,
+        help=f"FM deviation in Hz, sized via Carson's rule for your audio content's bandwidth "
+             f"(default: {tx_config.BASEBAND_DEVIATION_HZ:.0f}, range {lo:.0f}-{hi:.0f})",
+    )
+    p.set_defaults(func=run_baseband)
+
+
+def run_baseband(args):
+    def post_construct(tb):
+        if args.deviation_hz != tx_config.BASEBAND_DEVIATION_HZ:
+            tb.set_baseband_deviation(args.deviation_hz)
+
+    return _run(
+        args, PlutoTxFlowgraph.MODE_BASEBAND, runtime.Emitter(args.json), post_construct=post_construct,
+    )
+
+
+def add_subparsers(tx_subparsers):
+    add_fm_subparser(tx_subparsers)
+    add_ssb_subparser(tx_subparsers)
+    add_m17_subparser(tx_subparsers)
+    add_freedv_subparser(tx_subparsers)
+    add_rade_subparser(tx_subparsers)
+    add_digitext_subparser(tx_subparsers)
+    add_psk31_subparser(tx_subparsers)
+    add_filebroadcast_subparser(tx_subparsers)
+    add_baseband_subparser(tx_subparsers)

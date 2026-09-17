@@ -192,7 +192,8 @@ regenerate_launcher() {
 
 regenerate_launcher "pluto-tx" "pluto_tx.app --gui"
 regenerate_launcher "pluto-advanced-rx" "pluto_advanced_rx.app"
-echo "Done -- pluto-tx and pluto-advanced-rx now find gr-m17 automatically."
+regenerate_launcher "pluto-cli" "pluto_cli.app"
+echo "Done -- pluto-tx, pluto-advanced-rx and pluto-cli now find gr-m17 automatically."
 
 echo
 echo "== Done =="

@@ -208,9 +208,10 @@ EOF
 }
 
 echo
-echo "Updating the pluto-tx and pluto-advanced-rx launchers..."
+echo "Updating the pluto-tx, pluto-advanced-rx and pluto-cli launchers..."
 regenerate_launcher "pluto-tx" "pluto_tx.app --gui"
 regenerate_launcher "pluto-advanced-rx" "pluto_advanced_rx.app"
+regenerate_launcher "pluto-cli" "pluto_cli.app"
 
 echo
 echo "== Done =="

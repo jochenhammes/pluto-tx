@@ -75,6 +75,7 @@ pluto_advanced_rx/        # RX mit interaktivem SDR++-artigem Wasserfall
 ├── devices/           # RX-Geräte-Abstraktionsschicht: PlutoDevice/HackRFDevice/RtlSdrDevice
 ├── rade_ctypes.py / lpcnet_subprocess.py / rade.py   # RADE-Anbindung (RadeDecoder) -- eigene Kopie, kein Import aus pluto_tx
 └── ...
+pluto_cli/        # Headless CLI, importiert pluto_tx/pluto_advanced_rx statt sie zu kopieren -- siehe pluto_cli/README.md
 pluto_tx_carrier.py        # Carrier-Test-Skript (Fallback/Referenz)
 ```
 
@@ -91,6 +92,7 @@ RX-Bandbreiten-Presets bis 10 MHz (`1/2,5/5/8/10 MHz`); 15/20 MHz sind bewusst n
 ```
 pluto-tx
 pluto-advanced-rx
+pluto-cli          # headless CLI, siehe unten
 ```
 
 Oder direkt: `python3 -m pluto_tx.app --freq 432150000 --gui` (analog für `pluto_advanced_rx`). TX ohne `--gui`: headless CLI-Test.
@@ -99,6 +101,22 @@ Oder direkt: `python3 -m pluto_tx.app --freq 432150000 --gui` (analog für `plut
 
 ```
 export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+```
+
+## Headless CLI (`pluto_cli`)
+
+Die wichtigsten Funktionen beider Apps sind auch ohne GUI nutzbar, für
+Skripte/Automatisierung:
+
+```
+pluto-cli tx fm --freq 432150000 --yes
+pluto-cli rx m17 --freq 432150000 --json
+pluto-cli devices scan --tx --device pluto
+```
+
+Eigener Prozess, importiert `pluto_tx`/`pluto_advanced_rx` statt sie zu
+kopieren — vollständige Referenz (alle Modi/Flags, JSON-Schema, Sicherheits-
+modell, Rezepte für fldigi/File-Broadcast/M17) in `pluto_cli/README.md`.
 python3 -m pluto_tx.app --freq 432150000 --gui
 ```
 

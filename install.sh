@@ -201,7 +201,13 @@ cd "$SCRIPT_DIR" && exec python3 -m pluto_advanced_rx.app "\$@"
 EOF
 chmod +x "$HOME/.local/bin/pluto-advanced-rx"
 
-echo "Created $HOME/.local/bin/pluto-tx and pluto-advanced-rx"
+cat > "$HOME/.local/bin/pluto-cli" <<EOF
+#!/usr/bin/env bash
+cd "$SCRIPT_DIR" && exec python3 -m pluto_cli.app "\$@"
+EOF
+chmod +x "$HOME/.local/bin/pluto-cli"
+
+echo "Created $HOME/.local/bin/pluto-tx, pluto-advanced-rx and pluto-cli"
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
@@ -226,7 +232,9 @@ echo "== Done =="
 echo "Start the apps with:"
 echo "    pluto-tx"
 echo "    pluto-advanced-rx"
-echo "(both accept --uri/--freq/etc. -- see e.g. 'pluto-tx --help'."
+echo "    pluto-cli          (headless CLI -- see pluto_cli/README.md)"
+echo "(all accept --uri/--freq/etc. -- see e.g. 'pluto-tx --help'/'pluto-cli --help'."
 echo " Without a launcher on PATH, run them directly from $SCRIPT_DIR instead:"
 echo "    python3 -m pluto_tx.app --gui"
-echo "    python3 -m pluto_advanced_rx.app)"
+echo "    python3 -m pluto_advanced_rx.app"
+echo "    python3 -m pluto_cli.app)"
