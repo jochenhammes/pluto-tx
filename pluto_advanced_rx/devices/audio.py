@@ -99,8 +99,8 @@ class AudioDevice(RxDevice):
     max_waterfall_zoom = 8
     supports_dc_iq_correction = False
 
-    def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):
-        super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz)
+    def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
+        super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)
         self._source = None
 
     def build_source(self):

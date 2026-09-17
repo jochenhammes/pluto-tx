@@ -119,6 +119,25 @@ DEFAULT_NF_GAIN = 1.0  # audio volume multiplier, applied after the demodulator
 FFT_SIZE_PRESETS = [1024, 2048, 4096, 8192, 16384]
 DEFAULT_FFT_SIZE = 1024
 
+# --- Pluto RX libiio buffer size -- an OPTIONAL, RX-app-only tuning knob.
+# Real throughput testing this session (direct-Ethernet-cabled Pluto+,
+# Z7010 SoC) found the achievable clean sample rate is capped not by link
+# speed (both ends confirmed Gigabit) but by this client-side libiio
+# buffer size (iio.fmcomms2_source_fc32()'s 3rd arg): the app's original
+# hardcoded 32768 (0x8000) plateaus around ~9-10 Msps, while 262144 (8x)
+# reliably reached ~11-12 Msps -- a real ~20-25% gain, matching a
+# documented LibreSDR-project tuning tip. Larger still (1M/2M) measured
+# WORSE, confirming a real sweet spot, not "bigger is always better".
+#
+# Deliberately NOT changed as the default, and deliberately NOT exposed
+# in pluto_tx at all: a larger buffer trades throughput for latency
+# (more samples held before the flowgraph sees them), which is fine for
+# passive RX (audio/waterfall) but was never measured against pluto_tx's
+# own safety-critical PTT/E-STOP/M17-EOT-tail timing -- left untouched
+# there by explicit request.
+PLUTO_RX_BUFFER_SIZE_PRESETS = [32768, 65536, 131072, 262144, 524288]
+PLUTO_RX_BUFFER_SIZE_DEFAULT = 32768  # == today's hardcoded 0x8000, unchanged -- opt-in only
+
 # --- Waterfall widget (pyqtgraph) -------------------------------------------
 WATERFALL_HISTORY_ROWS = 200  # rolling time-history depth of the waterfall image
 WATERFALL_POLL_INTERVAL_MS = 33  # ~30 Hz GUI-side poll of fft_probe's latest row

@@ -72,13 +72,23 @@ class RxDevice(abc.ABC):
     # HackRF's SoapyHackRF driver this session -- no has_dc_offset_mode/
     # has_iq_balance_mode).
     supports_dc_iq_correction: bool = False
+    # True only for backends with a client-side libiio buffer-size knob
+    # worth exposing (currently just Pluto -- see PlutoDevice/config.py's
+    # PLUTO_RX_BUFFER_SIZE_* for the real-hardware throughput story).
+    # gui.py gates the "Buffer Size" combo's visibility on this, mirroring
+    # supports_agc_mode's own capability-flag idiom rather than a
+    # hardcoded device_type == "pluto" check.
+    supports_buffer_size: bool = False
 
     def __init__(self, connection: str, frequency_hz: float, sample_rate_hz: float,
-                 bandwidth_hz: Optional[float]):
+                 bandwidth_hz: Optional[float], buffer_size: Optional[int] = None):
         self.connection = connection
         self.frequency_hz = frequency_hz
         self.sample_rate_hz = sample_rate_hz
         self.bandwidth_hz = bandwidth_hz
+        # Harmless no-op for backends with supports_buffer_size=False --
+        # only PlutoDevice.build_source() actually reads this.
+        self.buffer_size = buffer_size
 
     @classmethod
     def is_audio_only(cls) -> bool:

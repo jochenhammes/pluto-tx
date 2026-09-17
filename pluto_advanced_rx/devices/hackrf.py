@@ -66,8 +66,8 @@ class HackRFDevice(RxDevice):
     default_gain_mode = None
     supports_dc_iq_correction = False  # confirmed: has_dc_offset_mode/has_iq_balance_mode both False
 
-    def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):
-        super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz)
+    def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
+        super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)
         self._source = None
 
     def _device_arg(self):

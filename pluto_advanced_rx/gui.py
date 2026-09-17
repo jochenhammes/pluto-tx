@@ -611,6 +611,37 @@ class MainWindow(QtWidgets.QMainWindow):
         bandwidth_row.addStretch(1)
         device_group_layout.addLayout(bandwidth_row)
 
+        # Pluto-only libiio buffer size (see RxDevice.supports_buffer_size/
+        # config.py's PLUTO_RX_BUFFER_SIZE_* for the real-hardware
+        # throughput story). Row visibility gated on the current device's
+        # supports_buffer_size in _sync_device_dependent_widgets(), same
+        # capability-flag idiom already used for agc_gain_widget/
+        # manual_gain_widget. Always populated with the same preset list
+        # regardless of device (nothing depends on device_cls here, unlike
+        # bandwidth_combo) -- harmless when hidden/ignored by a non-Pluto
+        # backend.
+        buffer_size_row = QtWidgets.QHBoxLayout()
+        self.buffer_size_label = QtWidgets.QLabel("RX Buffer Size:")
+        buffer_size_row.addWidget(self.buffer_size_label)
+        self.buffer_size_combo = QtWidgets.QComboBox()
+        for bs in config.PLUTO_RX_BUFFER_SIZE_PRESETS:
+            self.buffer_size_combo.addItem(str(bs), bs)
+        self.buffer_size_combo.setCurrentIndex(
+            config.PLUTO_RX_BUFFER_SIZE_PRESETS.index(config.PLUTO_RX_BUFFER_SIZE_DEFAULT))
+        self.buffer_size_combo.currentIndexChanged.connect(self._on_buffer_size_changed)
+        buffer_size_row.addWidget(self.buffer_size_combo)
+        # Real-hardware-measured hint (see config.py's PLUTO_RX_BUFFER_SIZE_*
+        # docstring): 262144 was the actual verified throughput sweet spot,
+        # both over direct Ethernet (~9-10 -> ~11-12 Msps) and, more
+        # modestly, over the USB-Ethernet-gadget path (~4.7 -> ~5.1 Msps) --
+        # larger values were NOT re-verified and 1M/2M measured WORSE, so
+        # this points at a specific preset, not just "bigger is better".
+        self.buffer_size_hint_label = QtWidgets.QLabel("262144 recommended for highest throughput")
+        self.buffer_size_hint_label.setStyleSheet("color: gray; font-style: italic;")
+        buffer_size_row.addWidget(self.buffer_size_hint_label)
+        buffer_size_row.addStretch(1)
+        device_group_layout.addLayout(buffer_size_row)
+
         left_column.addWidget(mode_group)
         left_column.addStretch(1)  # keeps device_group/mode_group at natural height instead of
         # stretching to fill the (likely taller) right column's height -- see the column-layout comment above
@@ -882,6 +913,15 @@ class MainWindow(QtWidgets.QMainWindow):
         default_idx = device_cls.sample_rate_hz_choices.index(device_cls.default_sample_rate_hz)
         self.bandwidth_combo.setCurrentIndex(default_idx)
         self.bandwidth_combo.blockSignals(False)
+
+        self.buffer_size_label.setVisible(device_cls.supports_buffer_size)
+        self.buffer_size_combo.setVisible(device_cls.supports_buffer_size)
+        self.buffer_size_hint_label.setVisible(device_cls.supports_buffer_size)
+        if device_cls.supports_buffer_size:
+            self.buffer_size_combo.blockSignals(True)
+            self.buffer_size_combo.setCurrentIndex(
+                config.PLUTO_RX_BUFFER_SIZE_PRESETS.index(config.PLUTO_RX_BUFFER_SIZE_DEFAULT))
+            self.buffer_size_combo.blockSignals(False)
 
         if device_cls.supports_agc_mode:
             self.agc_gain_widget.setVisible(True)
@@ -1867,6 +1907,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
+                buffer_size=self.buffer_size_combo.currentData(),
                 **self._digimode_kwargs(self.tb.active_digimode),
                 **self._current_gain_kwargs(device_cls),
             )
@@ -1894,6 +1935,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_waterfall()
         self.tb.start()
         self.status_label.setText(f"Switched to {self._format_hz(new_rate)}.")
+
+    def _on_buffer_size_changed(self, idx):
+        """Pluto-only libiio buffer size change -- exact same "construction-
+        time-only, not runtime-retunable" shape as _on_bandwidth_changed()
+        above (the buffer size is fixed for the life of the
+        fmcomms2_source_fc32 block, see PlutoDevice.build_source()), so this
+        rebuilds the whole flowgraph from scratch too, carrying over every
+        other current setting."""
+        if self.tb is None:
+            return
+        self._autotune_cancel()
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        new_buffer_size = self.buffer_size_combo.currentData()
+        freq = self.tb.nominal_freq_hz
+        fine = self.tb.fine_offset_hz
+        demod_mode = self.demod_combo.currentData()
+        nf_gain = self.nf_gain_slider.value() / 100.0
+        fft_size = self.fft_size_combo.currentData()
+        fm_width = self.tb.fm_demod_width_hz
+        ssb_width = self.tb.ssb_demod_width_hz
+        baseband_width = self.tb.baseband_width_hz
+
+        try:
+            new_tb = AdvancedRxFlowgraph(
+                uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
+                demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
+                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
+                buffer_size=new_buffer_size,
+                **self._digimode_kwargs(self.tb.active_digimode),
+                **self._current_gain_kwargs(device_cls),
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not switch buffer size: {e}")
+            self.buffer_size_combo.blockSignals(True)
+            self.buffer_size_combo.setCurrentIndex(
+                config.PLUTO_RX_BUFFER_SIZE_PRESETS.index(int(self.tb.device.buffer_size
+                                                                or config.PLUTO_RX_BUFFER_SIZE_DEFAULT)))
+            self.buffer_size_combo.blockSignals(False)
+            return
+
+        new_tb.set_fine_offset(fine)
+        new_tb.set_rx_muted(self._rx_muted)
+        new_tb.set_fft_zoom(self.zoom_slider.value())
+        new_tb.set_fft_avg_count(self.avg_slider.value())
+        self._fft_gen = -1
+        self._filebroadcast_last_attempt_total = 0
+        self._filebroadcast_last_activity_time = 0.0
+        self._psk31_last_chars_decoded = 0
+        self._psk31_last_activity_time = 0.0
+        self._rtty_last_chars_decoded = 0
+        self._rtty_last_activity_time = 0.0
+        self.tb.shutdown()
+        self.tb = new_tb
+        self._sync_waterfall()
+        self.tb.start()
+        self.status_label.setText(f"Switched RX buffer size to {new_buffer_size}.")
 
     def _rebuild_for_digimode(self, new_digimode):
         """Rebuilds self.tb with a different active_digimode -- see
@@ -1933,6 +2032,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
+                buffer_size=self.buffer_size_combo.currentData(),
                 **self._digimode_kwargs(new_digimode),
                 **self._current_gain_kwargs(device_cls),
             )
@@ -1988,6 +2088,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=new_device, on_m17_fields=self._on_m17_fields,
+                buffer_size=self.buffer_size_combo.currentData(),
                 **self._digimode_kwargs(self.tb.active_digimode),
                 **self._current_gain_kwargs(device_cls),
             )
@@ -2123,6 +2224,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 uri=connection,
                 frequency=frequency_hz,
                 sample_rate=self.bandwidth_combo.currentData(),
+                buffer_size=self.buffer_size_combo.currentData(),
                 demod_mode=self.demod_combo.currentData(),
                 nf_gain=self.nf_gain_slider.value() / 100.0,
                 fft_size=self.fft_size_combo.currentData(),

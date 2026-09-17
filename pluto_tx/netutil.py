@@ -22,6 +22,9 @@ construction's own connection attempt is expected to complete quickly too
 (same server, same network path) -- the probe is a cheap way to fail fast
 without ever touching Qt off the main thread.
 """
+import ipaddress
+import json
+import subprocess
 import threading
 
 import iio
@@ -33,6 +36,12 @@ CONNECT_TIMEOUT_S = 5.0
 # should resolve near-instantly if reachable at all. See
 # _augment_with_pluto_usb_ip()'s own docstring below.
 PLUTO_USB_IP_PROBE_TIMEOUT_S = 2.0
+# Short: `ip addr`/`ip neigh` read local kernel state only, no network
+# round-trip -- this is a generous safety backstop, not an expected wait.
+# The final IIO probe below is the only part that actually talks to the
+# network, and is bounded by this same timeout. See
+# _augment_with_direct_ethernet_pluto()'s own docstring below.
+DIRECT_ETH_TIMEOUT_S = 2.0
 
 
 def probe_uri_with_timeout(uri, timeout_s=CONNECT_TIMEOUT_S):
@@ -71,6 +80,7 @@ def scan_devices_with_timeout(timeout_s=CONNECT_TIMEOUT_S):
     if error is not None:
         return None, error
     _augment_with_pluto_usb_ip(devices)
+    _augment_with_direct_ethernet_pluto(devices)
     return devices, None
 
 
@@ -125,3 +135,69 @@ def _augment_with_pluto_usb_ip(devices):
         return
     if probe_uri_with_timeout(ip_uri, PLUTO_USB_IP_PROBE_TIMEOUT_S) is None:
         devices[ip_uri] = f"{config.PLUTO_USB_DEFAULT_IP} (Pluto via USB-Ethernet-Gadget, default IP)"
+
+
+def _augment_with_direct_ethernet_pluto(devices):
+    """A Pluto directly cabled to this machine's Ethernet port (no router/
+    switch/DHCP server in between) self-assigns an RFC 3927 link-local
+    address (169.254.0.0/16) via avahi, and so does this machine's own NIC
+    on the same link -- confirmed real, working, zero-configuration
+    end-to-end on real hardware this session (a genuine iio_info/libiio
+    session over ip:169.254.x.x, no config.txt changes needed at all).
+
+    Deliberately NOT discovered via mDNS (ip:plutoplus.local): reproduced
+    real, live mDNS resolution failures this same session, moments after an
+    identical lookup had succeeded, simply because more simultaneously-
+    reachable interfaces (USB-gadget, WiFi, and now direct Ethernet) make
+    which address a hostname resolves to ambiguous/flaky. Instead: find
+    this machine's own interface(s) that are up, have a carrier, and have
+    ONLY a link-local IPv4 address (no DHCP/static one too) -- the
+    distinctive signature of "cable plugged in, nothing else configured".
+    A genuine point-to-point cable can have at most one other host on that
+    L2 segment, so any 169.254.x.x entry in that interface's own ARP/
+    neighbor table is almost certainly the Pluto -- confirmed live this
+    session (`ip -j neigh show dev eno1` correctly returned exactly the
+    Pluto's own address, no extra provocation needed).
+
+    Same best-effort/bounded/mutate-in-place contract as
+    _augment_with_pluto_usb_ip() above, and the same real-IIO-connection
+    rigor before adding an entry -- a neighbor-table hit only means
+    SOMETHING answered ARP on that link, not that it's actually a Pluto."""
+    try:
+        addr_json = subprocess.run(
+            ["ip", "-j", "addr", "show"],
+            capture_output=True, timeout=DIRECT_ETH_TIMEOUT_S, text=True, check=True,
+        ).stdout
+        interfaces = json.loads(addr_json)
+    except Exception:
+        return  # best-effort -- no `ip` binary, timeout, unexpected output, etc.
+
+    link_local_net = ipaddress.ip_network("169.254.0.0/16")
+    for iface in interfaces:
+        if "LOWER_UP" not in iface.get("flags", []):
+            continue
+        inet_addrs = [a for a in iface.get("addr_info", []) if a.get("family") == "inet"]
+        if not inet_addrs or any(a.get("scope") != "link" for a in inet_addrs):
+            continue  # no IPv4 at all, or has a real (DHCP/static) one too -- not our direct-cable case
+        try:
+            neigh_json = subprocess.run(
+                ["ip", "-j", "neigh", "show", "dev", iface["ifname"]],
+                capture_output=True, timeout=DIRECT_ETH_TIMEOUT_S, text=True, check=True,
+            ).stdout
+            neighbors = json.loads(neigh_json)
+        except Exception:
+            continue
+        for n in neighbors:
+            if n.get("state") in (["FAILED"], ["INCOMPLETE"]):
+                continue
+            dst = n.get("dst", "")
+            try:
+                if ipaddress.ip_address(dst) not in link_local_net:
+                    continue
+            except ValueError:
+                continue
+            ip_uri = f"ip:{dst}"
+            if ip_uri in devices:
+                continue
+            if probe_uri_with_timeout(ip_uri, DIRECT_ETH_TIMEOUT_S) is None:
+                devices[ip_uri] = f"{dst} (Pluto via direct Ethernet cable, no router/DHCP)"

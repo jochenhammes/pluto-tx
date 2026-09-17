@@ -43,13 +43,15 @@ class PlutoDevice(RxDevice):
     agc_modes = tuple(config.GAIN_MODES)
     default_gain_mode = config.DEFAULT_GAIN_MODE
     supports_dc_iq_correction = True
+    supports_buffer_size = True
 
-    def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):
-        super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz)
+    def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
+        super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)
         self._source = None
 
     def build_source(self):
-        self._source = iio.fmcomms2_source_fc32(self.connection, [True, True], 0x8000)
+        buffer_size = self.buffer_size or config.PLUTO_RX_BUFFER_SIZE_DEFAULT
+        self._source = iio.fmcomms2_source_fc32(self.connection, [True, True], buffer_size)
         self._source.set_frequency(int(self.frequency_hz))
         self._source.set_samplerate(int(self.sample_rate_hz))
         self._source.set_quadrature(True)

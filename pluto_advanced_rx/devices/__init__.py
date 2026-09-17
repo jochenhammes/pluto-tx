@@ -14,7 +14,8 @@ DEVICE_REGISTRY = {
 }
 
 
-def build_device(device_type, connection=None, frequency_hz=None, sample_rate_hz=None, bandwidth_hz=None):
+def build_device(device_type, connection=None, frequency_hz=None, sample_rate_hz=None, bandwidth_hz=None,
+                  buffer_size=None):
     device_cls = DEVICE_REGISTRY[device_type]
     if connection is None:
         connection = device_cls.DEFAULT_CONNECTION
@@ -22,4 +23,4 @@ def build_device(device_type, connection=None, frequency_hz=None, sample_rate_hz
         sample_rate_hz = device_cls.default_sample_rate_hz
     if bandwidth_hz is None:
         bandwidth_hz = device_cls.default_bandwidth_hz
-    return device_cls(connection, frequency_hz, sample_rate_hz, bandwidth_hz)
+    return device_cls(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)

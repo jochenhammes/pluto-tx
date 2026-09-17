@@ -79,7 +79,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_m17_fields=None, baseband_width_hz=config.BASEBAND_WIDTH_DEFAULT_HZ,
                  on_rtty_char=None, rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
-                 rtty_reverse=False, active_digimode=None):
+                 rtty_reverse=False, active_digimode=None, buffer_size=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -107,7 +107,13 @@ class AdvancedRxFlowgraph(gr.top_block):
         stage at all (HackRF: LNA/AMP/VGA, all independently manual) --
         unset stages keep build_source()'s own defaults. The two are
         independent: a device could in principle have both an AGC stage and
-        further manual-only stages, though none implemented so far do."""
+        further manual-only stages, though none implemented so far do.
+
+        buffer_size is Pluto-only (RxDevice.supports_buffer_size gates it,
+        harmless no-op on other backends) -- the client-side libiio buffer
+        size passed to fmcomms2_source_fc32(), see config.py's
+        PLUTO_RX_BUFFER_SIZE_* for the real-hardware throughput story
+        behind it. None keeps today's default (32768) unchanged."""
         super().__init__("AdvancedRxFlowgraph")
 
         if demod_mode == self.MODE_RADE and not RADE_AVAILABLE:
@@ -125,7 +131,7 @@ class AdvancedRxFlowgraph(gr.top_block):
 
         self.device = devices.build_device(
             device_type, connection=uri, frequency_hz=self.nominal_freq_hz,
-            sample_rate_hz=sample_rate, bandwidth_hz=None,
+            sample_rate_hz=sample_rate, bandwidth_hz=None, buffer_size=buffer_size,
         )
         self.uri = self.device.connection  # the actual (possibly defaulted) connection string
         self.sample_rate = self.device.sample_rate_hz  # the actual (possibly defaulted) sample rate

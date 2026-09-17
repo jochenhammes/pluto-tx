@@ -44,6 +44,12 @@ def add_common_args(parser):
         help="RX bandwidth/\"zoom\" span in Hz (device sample rate). Omit for the device's own default.",
     )
     parser.add_argument(
+        "--buffer-size", type=int, choices=rx_config.PLUTO_RX_BUFFER_SIZE_PRESETS, default=None,
+        help="Pluto-only: client-side libiio buffer size (samples). Larger can raise achievable "
+             f"throughput at the cost of latency (default: {rx_config.PLUTO_RX_BUFFER_SIZE_DEFAULT}). "
+             "Ignored (harmless) on other --device backends.",
+    )
+    parser.add_argument(
         "--gain-mode", choices=rx_config.GAIN_MODES, default=rx_config.DEFAULT_GAIN_MODE,
         help=f"AGC mode for AGC-capable devices (default: {rx_config.DEFAULT_GAIN_MODE})",
     )
@@ -134,7 +140,8 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     def _build():
         return AdvancedRxFlowgraph(
             device_type=args.device, uri=connection, frequency=args.freq,
-            sample_rate=args.bandwidth, gain_mode=args.gain_mode, manual_gain_db=args.gain,
+            sample_rate=args.bandwidth, buffer_size=args.buffer_size,
+            gain_mode=args.gain_mode, manual_gain_db=args.gain,
             demod_mode=mode, audio_device=args.audio_out,
             active_digimode=args.digimode,
             psk31_tone_hz=args.psk31_tone_hz,
