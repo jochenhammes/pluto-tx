@@ -2,6 +2,12 @@
 
 DEFAULT_URI = "ip:plutoplus.local"
 
+# ADI's documented, fixed default IP for the Pluto's own USB-Ethernet-
+# gadget network interface -- also the IP repeatedly confirmed working
+# on this project's real hardware whenever ip:plutoplus.local's mDNS
+# resolution goes stale/wrong (see netutil.py's scan augmentation).
+PLUTO_USB_DEFAULT_IP = "192.168.2.1"
+
 _URI_SCHEMES = ("ip:", "usb:", "local:", "xml:")
 
 
