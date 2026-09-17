@@ -149,10 +149,9 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
         # A SECOND, independent marker+band pair, specifically for PSK31 --
         # a different color (yellow) so it's visually distinct from the
         # primary marker/band above (which tracks demod_combo's FM/SSB/RADE
-        # selection). PSK31 is an always-on parallel decode branch,
-        # independent of demod_combo, so both can be shown together rather
-        # than one replacing the other -- see gui.py's set_psk31_marker()
-        # caller in _sync_waterfall().
+        # selection). Only shown while PSK31 is the currently-selected
+        # digimode AND the Digimodes tab is visible -- see gui.py's
+        # set_psk31_marker()/set_psk31_visible() call sites.
         self._psk31_marker_lines = []
         self._psk31_band_regions = []
         for plot in (self.spectrum_plot, self.waterfall_plot):
@@ -165,6 +164,32 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
             region.setZValue(-10)
             plot.addItem(region)
             self._psk31_band_regions.append(region)
+
+        # A THIRD, independent marker+band set for RTTY -- own color
+        # (orange) and TWO marker lines per plot (Mark + Space, RTTY's two
+        # tones) sharing one combined band region, unlike PSK31's single
+        # marker. Never shown at the same time as the PSK31 pair above
+        # (only one digimode is ever the active one, see
+        # AdvancedRxFlowgraph.active_digimode) -- a separate pair rather
+        # than a shared/recolored one purely for code simplicity (no
+        # shape-shifting between "1 marker" and "2 markers" needed).
+        self._rtty_mark_lines = []
+        self._rtty_space_lines = []
+        self._rtty_band_regions = []
+        for plot in (self.spectrum_plot, self.waterfall_plot):
+            mark_marker = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color="#ff9900", width=1))
+            plot.addItem(mark_marker)
+            self._rtty_mark_lines.append(mark_marker)
+
+            space_marker = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color="#ff9900", width=1))
+            plot.addItem(space_marker)
+            self._rtty_space_lines.append(space_marker)
+
+            region = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(255, 153, 0, 40),
+                                          pen=pg.mkPen(color="#ff9900", width=0, style=QtCore.Qt.NoPen))
+            region.setZValue(-10)
+            plot.addItem(region)
+            self._rtty_band_regions.append(region)
 
         self._init_image_buffer(fft_size)
 
@@ -222,15 +247,34 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
             region.setRegion((lo_hz, hi_hz))
 
     def set_psk31_visible(self, visible: bool):
-        """PSK31 decodes in parallel regardless of which tab is open (see
-        AdvancedRxFlowgraph's always-on PSK31 branch), but its marker/band
-        should only be ON SCREEN while the operator is actually looking at
-        the Digimodes tab -- gui.py calls this from mode_tab_widget's
-        currentChanged, not tied to demodulation itself continuing to run
-        (or not) in the background."""
+        """PSK31 only decodes at all while it's the active digimode (see
+        AdvancedRxFlowgraph.active_digimode) -- gui.py passes True here
+        exactly when that's the case (selected AND the Digimodes tab is
+        visible), False otherwise."""
         for marker in self._psk31_marker_lines:
             marker.setVisible(visible)
         for region in self._psk31_band_regions:
+            region.setVisible(visible)
+
+    def set_rtty_marker(self, mark_hz, space_hz, lo_hz, hi_hz):
+        """RTTY's own marker pair (Mark + Space tones)/band, independent
+        of set_tuned_frequency()/set_demod_band() and of PSK31's own
+        marker above -- see this widget's __init__ for why."""
+        for marker in self._rtty_mark_lines:
+            marker.setPos(mark_hz)
+        for marker in self._rtty_space_lines:
+            marker.setPos(space_hz)
+        for region in self._rtty_band_regions:
+            region.setRegion((lo_hz, hi_hz))
+
+    def set_rtty_visible(self, visible: bool):
+        """Structural mirror of set_psk31_visible() -- see its own
+        docstring."""
+        for marker in self._rtty_mark_lines:
+            marker.setVisible(visible)
+        for marker in self._rtty_space_lines:
+            marker.setVisible(visible)
+        for region in self._rtty_band_regions:
             region.setVisible(visible)
 
     def set_fft_size(self, fft_size):

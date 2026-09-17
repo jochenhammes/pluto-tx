@@ -27,7 +27,10 @@ class MainWindow(QtWidgets.QMainWindow):
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
                  digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
                  digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ,
-                 psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ):
+                 psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ,
+                 rtty_text="", rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
+                 rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
+                 rtty_reverse=False):
         """Builds the window in a disconnected/default state using the given
         initial settings (mirrors PlutoTxFlowgraph's own constructor
         defaults), then immediately attempts one real connection via
@@ -58,7 +61,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # started directly in File Broadcast or a Digimodes-tab mode.
         self._last_audio_mode = (
             mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
-                                  PlutoTxFlowgraph.MODE_PSK31)
+                                  PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -68,6 +71,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Same per-press staleness guard as Digitext's, for PSK31's own
         # auto-unkey timers (see _schedule_psk31_auto_unkey()).
         self._psk31_ptt_epoch = 0
+        # Same per-press staleness guard, for RTTY's own auto-unkey timers
+        # (see _schedule_rtty_auto_unkey()).
+        self._rtty_ptt_epoch = 0
         self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
         self._audio_device = ""  # carried across reconnects; updated when source_combo picks a different mic
@@ -450,6 +456,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo = QtWidgets.QComboBox()
         self.digimode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
+        self.digimode_combo.addItem("RTTY", PlutoTxFlowgraph.MODE_RTTY)
         # Sync to the flowgraph's actual mode BEFORE wiring the change
         # signal, same reasoning/ordering as mode_combo's own identical
         # comment above -- avoids firing _on_digimode_changed() ->
@@ -606,10 +613,84 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(psk31_group)
         self.psk31_group_widget = psk31_group
 
+        # --- RTTY controls -- own group widget, same pattern as psk31_group
+        # above. Unlike PSK31 (fixed 31.25 baud, single tone), RTTY exposes
+        # mark frequency, shift, baud rate and Normal/Reverse -- all real,
+        # user-adjustable settings (per explicit request).
+        rtty_group = QtWidgets.QWidget()
+        rtty_group_layout = QtWidgets.QVBoxLayout(rtty_group)
+        rtty_group_layout.setContentsMargins(0, 0, 0, 0)
+        rtty_text_row = QtWidgets.QHBoxLayout()
+        rtty_text_row.addWidget(QtWidgets.QLabel("Text:"))
+        self.rtty_text_edit = QtWidgets.QLineEdit(rtty_text)
+        self.rtty_text_edit.setMaxLength(config.RTTY_MAX_TEXT_LEN)
+        self.rtty_text_edit.setPlaceholderText("Type a line, then press PTT to send it")
+        self.rtty_text_edit.textChanged.connect(self._on_rtty_text_changed)
+        self.rtty_text_edit.setMinimumWidth(420)
+        self.rtty_text_edit.setStyleSheet("font-size: 13pt;")
+        rtty_text_row.addWidget(self.rtty_text_edit)
+        rtty_group_layout.addLayout(rtty_text_row)
+
+        rtty_settings_row = QtWidgets.QHBoxLayout()
+        rtty_settings_row.addWidget(QtWidgets.QLabel("Mark (Hz):"))
+        self.rtty_mark_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.rtty_mark_slider.setRange(int(config.RTTY_MARK_HZ_RANGE[0]), int(config.RTTY_MARK_HZ_RANGE[1]))
+        self.rtty_mark_slider.setSingleStep(5)
+        self.rtty_mark_slider.setPageStep(50)
+        self.rtty_mark_slider.setValue(int(rtty_mark_hz))
+        self.rtty_mark_slider.valueChanged.connect(self._on_rtty_mark_changed)
+        rtty_settings_row.addWidget(self.rtty_mark_slider)
+        self.rtty_mark_label = QtWidgets.QLabel(f"{int(rtty_mark_hz)} Hz")
+        self.rtty_mark_label.setMinimumWidth(60)
+        rtty_settings_row.addWidget(self.rtty_mark_label)
+
+        rtty_settings_row.addWidget(QtWidgets.QLabel("Shift:"))
+        self.rtty_shift_combo = QtWidgets.QComboBox()
+        for shift in config.RTTY_SHIFT_HZ_PRESETS:
+            self.rtty_shift_combo.addItem(f"{shift:g} Hz", shift)
+        initial_shift_idx = self.rtty_shift_combo.findData(rtty_shift_hz)
+        self.rtty_shift_combo.setCurrentIndex(initial_shift_idx if initial_shift_idx >= 0 else 0)
+        self.rtty_shift_combo.currentIndexChanged.connect(self._on_rtty_shift_changed)
+        rtty_settings_row.addWidget(self.rtty_shift_combo)
+
+        rtty_settings_row.addWidget(QtWidgets.QLabel("Baud:"))
+        self.rtty_baud_combo = QtWidgets.QComboBox()
+        for baud in config.RTTY_BAUD_RATE_PRESETS:
+            self.rtty_baud_combo.addItem(f"{baud:g}", baud)
+        initial_baud_idx = self.rtty_baud_combo.findData(rtty_baud_rate)
+        self.rtty_baud_combo.setCurrentIndex(initial_baud_idx if initial_baud_idx >= 0 else 0)
+        self.rtty_baud_combo.currentIndexChanged.connect(self._on_rtty_baud_changed)
+        rtty_settings_row.addWidget(self.rtty_baud_combo)
+
+        self.rtty_reverse_checkbox = QtWidgets.QCheckBox("Reverse")
+        self.rtty_reverse_checkbox.setChecked(rtty_reverse)
+        self.rtty_reverse_checkbox.setToolTip(
+            "Swaps which audio tone plays Mark vs. Space -- use this if a "
+            "counterpart station/rig's tone assignment is flipped relative "
+            "to this one, not a change to which frequency is higher."
+        )
+        self.rtty_reverse_checkbox.toggled.connect(self._on_rtty_reverse_changed)
+        rtty_settings_row.addWidget(self.rtty_reverse_checkbox)
+        rtty_settings_row.addStretch(1)
+        rtty_group_layout.addLayout(rtty_settings_row)
+
+        self.rtty_sent_log = QtWidgets.QTextEdit()
+        self.rtty_sent_log.setReadOnly(True)
+        self.rtty_sent_log.setMaximumHeight(120)
+        self.rtty_sent_log.setToolTip(
+            "Local echo of what THIS station has sent -- pluto_tx has no receive "
+            "capability at all, so this can never show what was received; that "
+            "only ever appears in a separately-running pluto_advanced_rx instance."
+        )
+        rtty_group_layout.addWidget(self.rtty_sent_log)
+        digimodes_tab_layout.addWidget(rtty_group)
+        self.rtty_group_widget = rtty_group
+
         digimodes_tab_layout.addStretch(1)
         self._update_digitext_estimate()
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
+        self._update_rtty_controls_enabled()
 
         # --- File Broadcast rotation list -- lives in the "File-Transfer"
         # tab, same "own tab" convention as Digitext's Digimodes tab.
@@ -808,7 +889,7 @@ class MainWindow(QtWidgets.QMainWindow):
         section1.addWidget(self.hw_status_label)
 
         layout.addWidget(self._hline())
-        layout.addWidget(self._section_title("Waterfall / Spectrum"))
+        layout.addWidget(self._section_title("TX Baseband"))
 
         # --- Live TX waterfall (own sub-layout so it can be swapped out on
         # a device reconnect, which rebuilds the flowgraph) -----------------
@@ -999,6 +1080,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_text_edit.setEnabled(connected)
         self.psk31_tone_slider.setEnabled(connected)
 
+    def _update_rtty_controls_enabled(self):
+        # Structural mirror of _update_psk31_controls_enabled() above.
+        is_rtty_mode = self._current_mode == PlutoTxFlowgraph.MODE_RTTY
+        self.rtty_group_widget.setVisible(is_rtty_mode)
+        connected = getattr(self, "_rtty_connected", True)
+        self.rtty_text_edit.setEnabled(connected)
+        self.rtty_mark_slider.setEnabled(connected)
+        self.rtty_shift_combo.setEnabled(connected)
+        self.rtty_baud_combo.setEnabled(connected)
+        self.rtty_reverse_checkbox.setEnabled(connected)
+
     def _update_filebroadcast_controls_enabled(self):
         # No visibility toggle -- lives in its own "File-Transfer" tab
         # (mirrors _update_digitext_controls_enabled()'s reasoning exactly).
@@ -1104,9 +1196,12 @@ class MainWindow(QtWidgets.QMainWindow):
     # sense with an audio-only (Soundcard) device -- RADE's raw IQ real part
     # (see devices/soundcard.py), Digitext's own audio (already sits in the
     # normal SSB voice band from DIGITEXT_MIN_FREQ_HZ upward, see
-    # digitext.py), and PSK31's own audio (likewise already a plain SSB-
-    # injectable tone, see psk31.py) -- no extra shifting needed for either.
-    _AUDIO_ONLY_CAPABLE_MODES = (PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31)
+    # digitext.py), and PSK31's/RTTY's own audio (likewise already a plain
+    # SSB-injectable tone, see psk31.py/rtty.py) -- no extra shifting needed.
+    _AUDIO_ONLY_CAPABLE_MODES = (
+        PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
+        PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
+    )
 
     def _sync_mode_combo_availability(self):
         """Greys out every mode_combo entry except RADE (the only
@@ -1232,6 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rade_controls_enabled()
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
+        self._update_rtty_controls_enabled()
         self._update_baseband_controls_enabled()
 
     def _on_mode_changed(self, idx):
@@ -1337,6 +1433,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_tone_label.setText(f"{value} Hz")
         if self.tb is not None:
             self.tb.set_psk31_tone_hz(float(value))
+
+    def _on_rtty_text_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_rtty_text(text)
+
+    def _on_rtty_mark_changed(self, value):
+        self.rtty_mark_label.setText(f"{value} Hz")
+        if self.tb is not None:
+            self.tb.set_rtty_mark_hz(float(value))
+
+    def _on_rtty_shift_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_rtty_shift_hz(float(self.rtty_shift_combo.currentData()))
+
+    def _on_rtty_baud_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_rtty_baud_rate(float(self.rtty_baud_combo.currentData()))
+
+    def _on_rtty_reverse_changed(self, checked):
+        if self.tb is not None:
+            self.tb.set_rtty_reverse(checked)
 
     def _update_digitext_estimate(self):
         text = self.digitext_text_edit.text()
@@ -1562,6 +1679,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._schedule_digitext_auto_unkey()
             self._schedule_psk31_auto_unkey()
             self._log_psk31_sent()
+            self._schedule_rtty_auto_unkey()
+            self._log_rtty_sent()
         else:
             self.ptt_button.setText("PTT (click to send)")
             self._release_ptt()
@@ -1574,6 +1693,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._schedule_digitext_auto_unkey()
         self._schedule_psk31_auto_unkey()
         self._log_psk31_sent()
+        self._schedule_rtty_auto_unkey()
+        self._log_rtty_sent()
 
     def _on_ptt_released(self):
         if self.tb is None or not self.tb.keyed:
@@ -1723,6 +1844,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_digitext_ptt_visual()
             self._release_ptt()
 
+    def _log_rtty_sent(self):
+        # Local echo only -- mirrors _log_psk31_sent()'s own reasoning.
+        if self._current_mode != PlutoTxFlowgraph.MODE_RTTY:
+            return
+        text = self.rtty_text_edit.text()
+        if text:
+            self.rtty_sent_log.append(text)
+
+    def _schedule_rtty_auto_unkey(self):
+        """Structural mirror of _schedule_psk31_auto_unkey()/
+        _schedule_digitext_auto_unkey() -- see those methods' docstrings
+        for the real per-press-epoch bug this same pattern was built to
+        fix."""
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_RTTY:
+            return
+        token = self.tb
+        self._rtty_ptt_epoch += 1
+        epoch = self._rtty_ptt_epoch
+        QtCore.QTimer.singleShot(
+            int(self.tb.rtty_duration_s * 1000),
+            lambda: self._finish_rtty_auto_unkey(token, epoch),
+        )
+        QtCore.QTimer.singleShot(
+            int((self.tb.rtty_duration_s + config.RTTY_AUTO_UNKEY_WATCHDOG_S) * 1000),
+            lambda: self._rtty_watchdog_unkey(token, epoch),
+        )
+
+    def _finish_rtty_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._rtty_ptt_epoch or not self.tb.keyed:
+            return
+        self._reset_digitext_ptt_visual()
+        self._release_ptt()
+
+    def _rtty_watchdog_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._rtty_ptt_epoch:
+            return
+        if self.tb.keyed:
+            self._reset_digitext_ptt_visual()
+            self._release_ptt()
+
     def _reset_digitext_ptt_visual(self):
         if self._ptt_hold_mode:
             self._reset_ptt_button_visual()
@@ -1850,6 +2011,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 digitext_min_freq_hz=float(self.digitext_offset_slider.value()),
                 psk31_text=self.psk31_text_edit.text(),
                 psk31_tone_hz=float(self.psk31_tone_slider.value()),
+                rtty_text=self.rtty_text_edit.text(),
+                rtty_mark_hz=float(self.rtty_mark_slider.value()),
+                rtty_shift_hz=float(self.rtty_shift_combo.currentData()),
+                rtty_baud_rate=float(self.rtty_baud_combo.currentData()),
+                rtty_reverse=self.rtty_reverse_checkbox.isChecked(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")

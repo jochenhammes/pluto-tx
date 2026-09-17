@@ -38,14 +38,15 @@ class Emitter:
     def error(self, message: str, **fields):
         self.emit("error", message=message, **fields)
 
-    def emit_char(self, char: str):
-        """PSK31's decoded-character stream -- text mode writes a raw,
+    def emit_char(self, char: str, event: str = "psk31_char"):
+        """A digimode's decoded-character stream (PSK31's "psk31_char" by
+        default, or RTTY's "rtty_char") -- text mode writes a raw,
         unframed character stream (reads like a live chat feed, matching
         what the GUI's transcript box shows growing); JSON mode emits one
         structured event per character instead, matching every other
         event type's shape."""
         if self.json_mode:
-            self.emit("psk31_char", char=char)
+            self.emit(event, char=char)
         else:
             sys.stdout.write(char)
             sys.stdout.flush()
@@ -182,9 +183,10 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
     error. Mirrors pluto_tx/app.py's exact key_ptt()->sleep()->
     unkey_ptt() shape, generalized across every mode's different
     "how long does this transmission actually take" semantics --
-    Digitext/PSK31 render fresh audio inside key_ptt() itself and only
-    reveal their real duration afterward (tb.digitext_duration_s/
-    tb.psk31_duration_s), so --duration is ignored for those two."""
+    Digitext/PSK31/RTTY render fresh audio inside key_ptt() itself and
+    only reveal their real duration afterward (tb.digitext_duration_s/
+    tb.psk31_duration_s/tb.rtty_duration_s), so --duration is ignored
+    for those three."""
     from pluto_tx.flowgraph import PlutoTxFlowgraph
     from pluto_tx import config as tx_config
 
@@ -207,6 +209,8 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                 time.sleep(tb.digitext_duration_s)
             elif mode == PlutoTxFlowgraph.MODE_PSK31:
                 time.sleep(tb.psk31_duration_s)
+            elif mode == PlutoTxFlowgraph.MODE_RTTY:
+                time.sleep(tb.rtty_duration_s)
             else:
                 time.sleep(args.duration)
             tb.unkey_ptt()
@@ -231,11 +235,12 @@ def _tail_wait_tx(tb, mode):
 
 def run_rx_session(tb, args, emitter: Emitter, filebroadcast_state=None):
     """tb.start() -> unmute -> a plain time.sleep() tick loop (NOT a Qt
-    timer) replacing gui.py's QTimer-driven _poll_psk31()/
-    _poll_filebroadcast() -- ticks psk31_afc_step() (PSK31 AFC never
-    advances otherwise -- confirmed nothing inside AdvancedRxFlowgraph
-    calls it automatically) and watches FileBroadcastState for newly-
-    complete files to save -> tb.shutdown() in finally, always."""
+    timer) replacing gui.py's QTimer-driven _poll_digimode()/
+    _poll_filebroadcast() -- ticks whichever digimode's AFC step matches
+    tb.active_digimode (AFC never advances otherwise -- confirmed nothing
+    inside AdvancedRxFlowgraph calls it automatically) and watches
+    FileBroadcastState for newly-complete files to save -> tb.shutdown()
+    in finally, always."""
     from pluto_advanced_rx import config as rx_config
 
     tb.start()
@@ -254,9 +259,12 @@ def run_rx_session(tb, args, emitter: Emitter, filebroadcast_state=None):
             time.sleep(tick_s)
             now = time.monotonic()
 
-            if args.psk31_monitor and now - last_afc >= rx_config.PSK31_AFC_POLL_INTERVAL_S:
+            if tb.active_digimode == "psk31" and now - last_afc >= rx_config.PSK31_AFC_POLL_INTERVAL_S:
                 last_afc = now
                 tb.psk31_afc_step()
+            elif tb.active_digimode == "rtty" and now - last_afc >= rx_config.RTTY_AFC_POLL_INTERVAL_S:
+                last_afc = now
+                tb.rtty_afc_step()
 
             if filebroadcast_state is not None:
                 for entry in filebroadcast_state.get_snapshot():

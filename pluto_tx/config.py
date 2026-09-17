@@ -394,6 +394,34 @@ PSK31_AUTO_UNKEY_WATCHDOG_S = 2.0
 # that shaped it, including two earlier designs that were tried and
 # rejected.
 
+# --- RTTY (2-tone FSK, Baudot/ITA2 US-commercial-variant digimode) --
+# see pluto_tx/rtty.py. Unlike PSK31's fixed 31.25 baud, both baud rate
+# and shift (mark/space tone separation) are real, user-adjustable
+# settings here -- matching real RTTY practice where different bands/
+# eras/services use different combinations.
+RTTY_BAUD_RATE_DEFAULT = 45.45  # the classic ham-RTTY "60wpm" rate
+RTTY_BAUD_RATE_PRESETS = (45.45, 50.0, 75.0, 100.0)
+RTTY_SHIFT_HZ_DEFAULT = 170.0  # the standard narrow-shift ham RTTY convention
+RTTY_SHIFT_HZ_PRESETS = (170.0, 425.0, 850.0)
+# Mark=2125Hz/Shift=170Hz (Space=2295Hz) is the conventional HF-RTTY
+# audio tone pair used by countless real rigs/software (fldigi, MMTTY,
+# etc.) -- picked as this project's default for the same interop reason
+# PSK31_DEFAULT_TONE_HZ was picked to sit inside the normal SSB voice
+# passband.
+RTTY_MARK_HZ_DEFAULT = 2125.0
+RTTY_MARK_HZ_RANGE = (300.0, 2700.0)  # mirrors PSK31_TONE_RANGE_HZ's own SSB-passband rationale
+RTTY_STOP_BITS = 1.5  # standard for ham RTTY regardless of baud rate; not exposed as a separate setting
+RTTY_MAX_TEXT_LEN = 120  # mirrors PSK31_MAX_TEXT_LEN
+# Continuous idle-mark preamble duration, letting the RX chain's filters/
+# AGC settle before real content starts -- deliberately NOT an
+# alternating "RY diddle" pattern, which would generate spurious
+# mark->space edges against this project's open-loop, edge-triggered RX
+# deframer (see pluto_tx/rtty.py's module docstring for the real
+# encode/decode round-trip test that caught this).
+RTTY_PREAMBLE_S = 1.0
+RTTY_TAIL_S = 0.2  # mirrors PSK31_TAIL_S's own real-hardware-motivated rationale
+RTTY_AUTO_UNKEY_WATCHDOG_S = 2.0  # mirrors PSK31_AUTO_UNKEY_WATCHDOG_S
+
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [

@@ -38,6 +38,7 @@ from . import rade_autotune
 from .fft_probe import FftProbe
 from .filebroadcast_deframer import FileBroadcastDeframer
 from .psk31_deframer import PSK31VaricodeDeframer
+from .rtty_deframer import RTTYBaudotDeframer
 
 # RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
 # install-rade.sh), not something every user has.
@@ -75,7 +76,10 @@ class AdvancedRxFlowgraph(gr.top_block):
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
                  gain_values=None, on_filebroadcast_frame=None, on_psk31_char=None,
                  psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ, audio_device="",
-                 on_m17_fields=None, baseband_width_hz=config.BASEBAND_WIDTH_DEFAULT_HZ):
+                 on_m17_fields=None, baseband_width_hz=config.BASEBAND_WIDTH_DEFAULT_HZ,
+                 on_rtty_char=None, rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
+                 rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
+                 rtty_reverse=False, active_digimode=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -474,22 +478,51 @@ class AdvancedRxFlowgraph(gr.top_block):
             )
             self.connect(self.m17_short_to_float, self.m17_audio_resampler_up)
 
-        # --- PSK31 (BPSK31 keyboard-to-keyboard chat digimode) -- always-on
-        # parallel branch, no audio output to select (same "always-on
-        # parallel branch" pattern as fft_probe/File Broadcast above, not
-        # the demod_selector-registered pattern FM/SSB/RADE use). Taps
+        # --- Digimodes (PSK31, RTTY -- more may be added later). `self.
+        # active_digimode` (None/"psk31"/"rtty") selects which ONE
+        # digimode's decode chain is actually connected to if_filter (+
+        # its own AFC probe) -- per explicit user request, there's no
+        # good reason for a digimode decoder to keep consuming real CPU
+        # when it isn't the one currently selected/visible, and this
+        # scales to more digimodes being added later without each new one
+        # silently costing cycles by default. Both digimodes' blocks are
+        # still always CONSTRUCTED here regardless of active_digimode
+        # (cheap -- plain object construction, no connections means no
+        # scheduling/CPU cost, confirmed empirically: a GNU Radio block
+        # with zero connect() calls touching it anywhere is never part of
+        # the running flowgraph at all), so e.g. gui.py's status/signal-
+        # label code can always read tb.psk31_deframer.chars_decoded /
+        # tb.rtty_deframer.chars_decoded regardless of which one is
+        # currently active (an inactive one simply never advances past 0,
+        # which is exactly correct).
+        #
+        # IMPORTANT GNU Radio constraint this design works around, found
+        # empirically while building this: a block with a REQUIRED input
+        # port (min 1) cannot be left with zero connections while the
+        # flowgraph is unlocked/running -- confirmed via a direct test,
+        # both at the initial start() and via a live lock()/disconnect()/
+        # unlock() cycle on an already-running flowgraph (both raise the
+        # identical "insufficient connected input ports" RuntimeError).
+        # This rules out the originally-planned lighter-weight design (one
+        # persistent flowgraph, a runtime set_active_digimode() method
+        # cheaply reconnecting if_filter's tap on demand, mirroring
+        # set_demod_mode()'s own already-proven pattern) -- that pattern
+        # only ever SWAPS which of several producers feeds one shared
+        # sink (always exactly one connected), never truly disconnects a
+        # required input to zero. Switching which digimode is active
+        # therefore rebuilds the whole AdvancedRxFlowgraph instance (see
+        # gui.py's _on_digimode_changed()/_on_mode_tab_changed()) --
+        # mirrors the already-established rebuild pattern
+        # _on_bandwidth_changed()/_on_audio_device_changed() use for their
+        # own "can't reconfigure this live" GNU Radio limitations, not a
+        # new mechanism.
+
+        # --- PSK31 (BPSK31 keyboard-to-keyboard chat digimode). Taps
         # if_filter's output (NOT pluto_source directly, unlike File
         # Broadcast) -- PSK31's ~50-60Hz occupied bandwidth is tiny, the
         # same if_filter tap point RADE already uses above is more than
         # enough, avoiding the documented real scheduler-crash risk of
         # decimating straight off a multi-Msps pluto_source in one stage.
-        # Built UNCONDITIONALLY, no is_audio_only() gate (unlike File
-        # Broadcast) -- if_filter's own decimation-ratio math degrades
-        # gracefully for AudioDevice's ~20kHz rate (confirmed via a
-        # headless construction test with device_type="audio" before this
-        # was considered done), the same reason FM/SSB/RADE already work
-        # uniformly across real SDR and Soundcard backends with zero
-        # special-casing.
         #
         # AFC (frequency drift compensation): real over-the-air testing
         # during this mode's own Phase 0 PHY work found a substantial,
@@ -528,37 +561,117 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.psk31_tone_filter = filter.freq_xlating_fir_filter_ccf(
             psk31_decim, psk31_xlate_taps, self.psk31_tone_center_hz, self.if_rate,
         )
-        self.connect(self.if_filter, self.psk31_tone_filter)
         self.psk31_costas_loop = digital.costas_loop_cc(config.PSK31_LOOP_BW, 2, False)
-        self.connect(self.psk31_tone_filter, self.psk31_costas_loop)
         self.psk31_complex_to_real = blocks.complex_to_real()
-        self.connect(self.psk31_costas_loop, self.psk31_complex_to_real)
         psk31_sps = self.psk31_working_rate / config.PSK31_SYMBOL_RATE_HZ
         self.psk31_symbol_sync = digital.symbol_sync_ff(
             digital.TED_MUELLER_AND_MULLER, psk31_sps, config.PSK31_LOOP_BW, 1.0, 1.0, 0.05, 1,
             digital.constellation_bpsk().base(), digital.IR_MMSE_8TAP, 128, [],
         )
-        self.connect(self.psk31_complex_to_real, self.psk31_symbol_sync)
         self.psk31_slicer = digital.binary_slicer_fb()
-        self.connect(self.psk31_symbol_sync, self.psk31_slicer)
         self.psk31_diff_decoder = digital.diff_decoder_bb(2)
-        self.connect(self.psk31_slicer, self.psk31_diff_decoder)
         # Inverter: digital.diff_decoder_bb's standard convention
         # (decoded[n] = encoded[n] XOR encoded[n-1], 1=transition) is the
         # OPPOSITE of PSK31's own (0=phase reversal, 1=no change) --
         # determined empirically during Phase 0 PHY testing, see pluto_tx/
         # psk31.py's own docstring.
         self.psk31_inverter = blocks.not_bb()
-        self.connect(self.psk31_diff_decoder, self.psk31_inverter)
         self.psk31_deframer = PSK31VaricodeDeframer(on_psk31_char or (lambda ch: None))
-        self.connect(self.psk31_inverter, self.psk31_deframer)
-
         # Dedicated AFC search probe -- see the AFC comment above.
         self.psk31_afc_probe = FftProbe(
             config.PSK31_AFC_FFT_SIZE, self.if_rate, config.WATERFALL_WINDOW, config.PSK31_AFC_COMPUTE_RATE_HZ,
         )
-        self.connect(self.if_filter, self.psk31_afc_probe)
         self._psk31_afc_gen = -1
+        if active_digimode == "psk31":
+            # The ENTIRE chain is wired here, all at once, only for the
+            # active digimode -- a GNU Radio block with a required input
+            # left with zero connect() calls touching it anywhere (not
+            # just its OWN input disconnected, but literally never
+            # mentioned in any connect() call at all, including as a
+            # SOURCE further downstream) is simply never part of the
+            # running flowgraph and costs nothing -- confirmed
+            # empirically. Wiring only part of an inactive chain (e.g.
+            # just skipping the if_filter tap but still connecting
+            # psk31_tone_filter->psk31_costas_loop) does NOT work: it
+            # still makes psk31_tone_filter part of the graph (as a
+            # connect() source), so its own required input is still
+            # validated and found lacking -- confirmed the hard way while
+            # building this.
+            self.connect(self.if_filter, self.psk31_tone_filter)
+            self.connect(self.psk31_tone_filter, self.psk31_costas_loop)
+            self.connect(self.psk31_costas_loop, self.psk31_complex_to_real)
+            self.connect(self.psk31_complex_to_real, self.psk31_symbol_sync)
+            self.connect(self.psk31_symbol_sync, self.psk31_slicer)
+            self.connect(self.psk31_slicer, self.psk31_diff_decoder)
+            self.connect(self.psk31_diff_decoder, self.psk31_inverter)
+            self.connect(self.psk31_inverter, self.psk31_deframer)
+            self.connect(self.if_filter, self.psk31_afc_probe)
+
+        # --- RTTY (2-tone FSK Baudot digimode). Same if_filter tap point
+        # as PSK31, same "not connected until selected" deferral (see the
+        # Digimodes intro comment above). Unlike PSK31 (fixed 31.25 baud,
+        # Costas-loop phase-tracked), mark/shift/baud/reverse are all
+        # real runtime-adjustable settings here -- see
+        # set_rtty_mark_hz()/set_rtty_shift_hz()/set_rtty_baud_rate()/
+        # set_rtty_reverse() and rtty_deframer.py's own docstring for why
+        # this chain uses a quadrature-FM-discriminator + open-loop UART
+        # framing instead of PSK31's Costas-loop/symbol_sync_ff approach
+        # (Baudot's genuinely-asynchronous idle gaps rule that out).
+        #
+        # rtty_mark_hz/rtty_shift_hz below are the STABLE, operator-set
+        # NOMINAL values (what set_rtty_mark_hz()/set_rtty_shift_hz()
+        # change, what rtty_afc_step()'s search is anchored at) --
+        # rtty_mark_center_hz/rtty_shift_center_hz are the AFC-tracked
+        # CURRENTLY-APPLIED values the filter/demod are actually tuned
+        # to, exactly mirroring psk31_tone_hz vs. psk31_tone_center_hz's
+        # own nominal-vs-tracked split above (same rationale: a manual
+        # retune should restart the drift search from the new nominal,
+        # not keep whatever the AFC had already accumulated against the
+        # old one).
+        self.rtty_mark_hz = float(rtty_mark_hz)
+        self.rtty_shift_hz = float(rtty_shift_hz)
+        self.rtty_mark_center_hz = self.rtty_mark_hz
+        self.rtty_shift_center_hz = self.rtty_shift_hz
+        self.rtty_baud_rate = float(rtty_baud_rate)
+        self.rtty_reverse = bool(rtty_reverse)
+        rtty_decim = max(1, round(self.if_rate / config.RTTY_WORKING_RATE_HZ))
+        self.rtty_working_rate = self.if_rate / rtty_decim
+        self.rtty_band_filter = filter.freq_xlating_fir_filter_ccf(
+            rtty_decim, self._rtty_filter_taps(), self._rtty_center_hz(), self.if_rate,
+        )
+        self.rtty_demod = analog.quadrature_demod_cf(self._rtty_demod_gain())
+        rtty_lowpass_taps = firdes.low_pass(
+            1.0, self.rtty_working_rate, config.RTTY_LOWPASS_CUTOFF_HZ, config.RTTY_LOWPASS_TRANS_HZ,
+            window.WIN_HAMMING,
+        )
+        self.rtty_lowpass = filter.fir_filter_fff(1, rtty_lowpass_taps)
+        self.rtty_slicer = digital.binary_slicer_fb()
+        self.rtty_deframer = RTTYBaudotDeframer(
+            on_rtty_char or (lambda ch: None), self.rtty_working_rate, self.rtty_baud_rate,
+            stop_bits=config.RTTY_STOP_BITS, reverse=self.rtty_reverse,
+        )
+        self.rtty_afc_probe = FftProbe(
+            config.RTTY_AFC_FFT_SIZE, self.if_rate, config.WATERFALL_WINDOW, config.RTTY_AFC_COMPUTE_RATE_HZ,
+        )
+        self._rtty_afc_gen = -1
+        if active_digimode == "rtty":
+            # See the PSK31 branch's identical comment above for why the
+            # WHOLE chain must be wired here, all at once, only when this
+            # digimode is the active one.
+            self.connect(self.if_filter, self.rtty_band_filter)
+            self.connect(self.rtty_band_filter, self.rtty_demod)
+            self.connect(self.rtty_demod, self.rtty_lowpass)
+            self.connect(self.rtty_lowpass, self.rtty_slicer)
+            self.connect(self.rtty_slicer, self.rtty_deframer)
+            self.connect(self.if_filter, self.rtty_afc_probe)
+
+        if active_digimode not in (None, "psk31", "rtty"):
+            raise ValueError(f"unknown active_digimode {active_digimode!r}")
+        # Which digimode (None/"psk31"/"rtty") has its branch connected to
+        # if_filter -- fixed for this instance's lifetime (see the
+        # Digimodes intro comment above for why switching rebuilds the
+        # whole flowgraph instead of changing this at runtime).
+        self.active_digimode = active_digimode
 
         self.nf_gain = blocks.multiply_const_ff(nf_gain)
         # Exactly one of {demod_selector, rade_audio_resampler_up} feeds
@@ -804,6 +917,91 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.psk31_tone_center_hz = est
             self.psk31_tone_filter.set_center_freq(est)
         return est
+
+    def _rtty_center_hz(self):
+        return self.rtty_mark_center_hz + self.rtty_shift_center_hz / 2.0
+
+    def _rtty_filter_taps(self):
+        cutoff = self.rtty_shift_center_hz / 2.0 + config.RTTY_FILTER_GUARD_HZ
+        return firdes.low_pass(1.0, self.if_rate, cutoff, config.RTTY_FILTER_GUARD_HZ, window.WIN_HAMMING)
+
+    def _rtty_demod_gain(self):
+        return self.rtty_working_rate / (2 * math.pi * (self.rtty_shift_center_hz / 2.0))
+
+    def set_rtty_mark_hz(self, mark_hz: float):
+        """Retunes rtty_band_filter's center in place -- cheap, mirrors
+        set_psk31_tone_hz(). Resets the AFC-tracked center back to this
+        new nominal, same rationale as set_psk31_tone_hz()'s own reset."""
+        self.rtty_mark_hz = float(mark_hz)
+        self.rtty_mark_center_hz = self.rtty_mark_hz
+        self.rtty_band_filter.set_center_freq(self._rtty_center_hz())
+
+    def set_rtty_shift_hz(self, shift_hz: float):
+        """Retapes rtty_band_filter's taps AND rtty_demod's gain in place
+        -- unlike set_psk31_tone_hz()'s cheap center-only retune, a shift
+        change alters the filter's required WIDTH (not just its center)
+        and the discriminator gain needed to map the (now different)
+        tone separation to a clean bipolar output. Both are live,
+        already-proven-safe operations in this codebase (set_taps()/
+        set_gain() at runtime -- same technique set_fm_demod_width()/
+        set_baseband_width() already rely on), not new ground. Also
+        resets the AFC-tracked center, same rationale as
+        set_rtty_mark_hz()."""
+        self.rtty_shift_hz = float(shift_hz)
+        self.rtty_shift_center_hz = self.rtty_shift_hz
+        self.rtty_band_filter.set_center_freq(self._rtty_center_hz())
+        self.rtty_band_filter.set_taps(self._rtty_filter_taps())
+        self.rtty_demod.set_gain(self._rtty_demod_gain())
+
+    def set_rtty_baud_rate(self, baud_rate: float):
+        """No GNU Radio reconfiguration needed at all -- rtty_deframer's
+        own baud_rate is a cheap arithmetic parameter (see
+        rtty_deframer.py's set_baud_rate()), and rtty_lowpass's fixed,
+        baud-independent passband already comfortably covers every baud
+        preset (see config.RTTY_LOWPASS_CUTOFF_HZ's own comment)."""
+        self.rtty_baud_rate = float(baud_rate)
+        self.rtty_deframer.set_baud_rate(self.rtty_baud_rate)
+
+    def set_rtty_reverse(self, reverse: bool):
+        self.rtty_reverse = bool(reverse)
+        self.rtty_deframer.set_reverse(self.rtty_reverse)
+
+    def rtty_afc_step(self):
+        """Structural mirror of psk31_afc_step() -- see its own docstring
+        for the shared parts of this design (fixed-nominal search anchor,
+        large deadband, safe/cheap to call often). Two real differences
+        (see config.py's RTTY_AFC section comment for the why): searches
+        for the mark and space peaks SEPARATELY and averages the results
+        into a fresh (mark, shift) pair, instead of one wide centroid
+        search across both tones; search radius scales with the
+        configured (nominal) shift instead of a static constant."""
+        row, self._rtty_afc_gen = self.rtty_afc_probe.get_latest_row(self._rtty_afc_gen)
+        if row is None:
+            return None
+        radius = self.rtty_shift_hz / 2.0 + config.RTTY_AFC_SEARCH_MARGIN_HZ
+        space_nominal_hz = self.rtty_mark_hz + self.rtty_shift_hz
+        mark_est = rade_autotune.estimate_signal_center(
+            row, center_hz=0.0, span_hz=self.if_rate, freq_hz=self.rtty_mark_hz,
+            radius_hz=radius, threshold_db=config.RTTY_AFC_THRESHOLD_DB,
+        )
+        space_est = rade_autotune.estimate_signal_center(
+            row, center_hz=0.0, span_hz=self.if_rate, freq_hz=space_nominal_hz,
+            radius_hz=radius, threshold_db=config.RTTY_AFC_THRESHOLD_DB,
+        )
+        if mark_est is None or space_est is None:
+            return None
+        est_shift = space_est - mark_est
+        if est_shift <= 0:
+            return None  # nonsensical (space below mark) -- a bad estimate, ignore
+        center_est = (mark_est + space_est) / 2.0
+        current_center = self.rtty_mark_center_hz + self.rtty_shift_center_hz / 2.0
+        if abs(center_est - current_center) > config.RTTY_AFC_DEADBAND_HZ:
+            self.rtty_mark_center_hz = mark_est
+            self.rtty_shift_center_hz = est_shift
+            self.rtty_band_filter.set_center_freq(self._rtty_center_hz())
+            self.rtty_band_filter.set_taps(self._rtty_filter_taps())
+            self.rtty_demod.set_gain(self._rtty_demod_gain())
+        return center_est
 
     def shutdown(self):
         """Stop the flowgraph. Safe to call more than once."""

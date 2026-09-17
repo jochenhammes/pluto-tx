@@ -31,6 +31,7 @@ from . import dynamics
 from . import filebroadcast
 from .filebroadcast_source import FileBroadcastSource
 from . import psk31
+from . import rtty
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
 # install-m17.sh), not something every pluto_tx user necessarily has. The
@@ -95,6 +96,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_FILEBROADCAST = 6
     MODE_PSK31 = 7
     MODE_BASEBAND = 8
+    MODE_RTTY = 9
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -103,7 +105,10 @@ class PlutoTxFlowgraph(gr.top_block):
                  freedv_variant=config.FREEDV_DEFAULT_MODE, freedv_callsign="",
                  digitext_text=config.DIGITEXT_DEFAULT_TEXT, digitext_layout=digitext.LAYOUT_HORIZONTAL,
                  digitext_zoom=1, digitext_min_freq_hz=config.DIGITEXT_MIN_FREQ_HZ,
-                 psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ):
+                 psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ,
+                 rtty_text="", rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
+                 rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
+                 rtty_reverse=False):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -526,6 +531,37 @@ class PlutoTxFlowgraph(gr.top_block):
         self.psk31_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
         self.connect(self.psk31_audio_gain, self.psk31_audio_sink)
 
+        # --- RTTY branch (2-tone FSK Baudot digimode, pluto_tx/rtty.py --
+        # see the plan). Exact structural mirror of the PSK31 branch above
+        # (one-shot rebuilt-per-press vector_source_f, same Hilbert-based
+        # USB modulation chain, same Soundcard-output alternative) --
+        # unlike PSK31, mark/shift/baud-rate are all real runtime-
+        # adjustable settings, cached the same lazy/dirty way.
+        self.rtty_text = rtty_text
+        self.rtty_mark_hz = rtty_mark_hz
+        self.rtty_shift_hz = rtty_shift_hz
+        self.rtty_baud_rate = rtty_baud_rate
+        self.rtty_reverse = rtty_reverse
+        self._rtty_audio = None
+        self._rtty_audio_dirty = True
+        self.rtty_duration_s = 0.0
+        self.rtty_source = blocks.vector_source_f([0.0], repeat=False)
+        self.rtty_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+        # fractional_bw=0.4 -- same default as PSK31's resampler, not
+        # Digitext's special-cased 0.47: even RTTY's widest preset
+        # (850Hz shift, mark up to 2700Hz) stays well under the ~18kHz
+        # onset of 0.4's rolloff at 48kHz audio rate.
+        self.rtty_ssb_resampler = filter.rational_resampler_ccf(
+            interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
+            taps=[], fractional_bw=0.4,
+        )
+        self.connect(self.rtty_source, self.rtty_ssb_mod)
+        self.connect(self.rtty_ssb_mod, self.rtty_ssb_resampler)
+        self.rtty_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/psk31_audio_gain
+        self.connect(self.rtty_source, self.rtty_audio_gain)
+        self.rtty_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
+        self.connect(self.rtty_audio_gain, self.rtty_audio_sink)
+
         # --- File Broadcast branch (repetitive file-broadcast mode, 23cm
         # broadband GFSK -- see pluto_tx/filebroadcast.py and the plan).
         # IQ-native like M17/RADE (gfsk_mod produces complex baseband
@@ -696,6 +732,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self._null_sink_rade = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
         self._null_sink_psk31 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see PSK31 branch above
+        self._null_sink_rtty = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see RTTY branch above
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
 
@@ -722,7 +759,7 @@ class PlutoTxFlowgraph(gr.top_block):
             )
             self.waterfall = qtgui.waterfall_sink_c(
                 1024, window.WIN_BLACKMAN_hARRIS, 0, config.WATERFALL_ZOOM_BANDWIDTH_HZ,
-                "TX Basisband (vor Geraete-Sink)", 1
+                "", 1
             )
 
         # --- Device sink: build_sink() ALWAYS constructs at the device's
@@ -859,6 +896,7 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_RADE] = self.rade_tx_resampler
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
         producers[self.MODE_PSK31] = self.psk31_ssb_resampler  # always available, see its branch above
+        producers[self.MODE_RTTY] = self.rtty_ssb_resampler  # always available, see its branch above
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         return producers
@@ -876,6 +914,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_digitext
         if producer is self.psk31_ssb_resampler:
             return self._null_sink_psk31
+        if producer is self.rtty_ssb_resampler:
+            return self._null_sink_rtty
         if producer is self.filebroadcast_tx_resampler:
             return self._null_sink_filebroadcast
         if producer is self.baseband_mod:
@@ -906,8 +946,8 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.unlock()
 
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
-                    self.MODE_PSK31, self.MODE_FILEBROADCAST, self.MODE_BASEBAND):
-            return  # all seven bypass the NF filter/dynamics chain entirely, nothing to retap
+                    self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND):
+            return  # all eight bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
@@ -1023,6 +1063,40 @@ class PlutoTxFlowgraph(gr.top_block):
                 tail_s=config.PSK31_TAIL_S, preamble_chars=config.PSK31_PREAMBLE_CHARS,
             )
             self._psk31_audio_dirty = False
+
+    def set_rtty_text(self, text: str):
+        """Mirrors set_psk31_text() exactly."""
+        self.rtty_text = text
+        self._rtty_audio_dirty = True
+
+    def set_rtty_mark_hz(self, mark_hz: float):
+        self.rtty_mark_hz = float(mark_hz)
+        self._rtty_audio_dirty = True
+
+    def set_rtty_shift_hz(self, shift_hz: float):
+        self.rtty_shift_hz = float(shift_hz)
+        self._rtty_audio_dirty = True
+
+    def set_rtty_baud_rate(self, baud_rate: float):
+        self.rtty_baud_rate = float(baud_rate)
+        self._rtty_audio_dirty = True
+
+    def set_rtty_reverse(self, reverse: bool):
+        self.rtty_reverse = bool(reverse)
+        self._rtty_audio_dirty = True
+
+    def _ensure_rtty_audio(self):
+        """Mirrors _ensure_psk31_audio() exactly -- the dirty flag covers
+        all five operator-adjustable RTTY parameters (text/mark/shift/
+        baud/reverse), any of which requires a fresh synthesis pass."""
+        if self._rtty_audio_dirty or self._rtty_audio is None:
+            self._rtty_audio, self.rtty_duration_s = rtty.encode_text(
+                self.rtty_text, config.AUDIO_RATE, self.rtty_mark_hz, self.rtty_shift_hz,
+                self.rtty_baud_rate, reverse=self.rtty_reverse,
+                tail_s=config.RTTY_TAIL_S, preamble_s=config.RTTY_PREAMBLE_S,
+                stop_bits=config.RTTY_STOP_BITS,
+            )
+            self._rtty_audio_dirty = False
 
     def add_filebroadcast_file(self, filename: str, data: bytes):
         """Adds a file to the rotation -- can be called at ANY time,
@@ -1215,6 +1289,23 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.psk31_audio_gain.set_k(1.0)
                 self._keyed = True
                 return
+        if self.mode == self.MODE_RTTY:
+            # Exact structural mirror of the MODE_PSK31 branch just above.
+            self._ensure_rtty_audio()
+            self.lock()
+            try:
+                self.disconnect(self.rtty_source, self.rtty_ssb_mod)
+                self.disconnect(self.rtty_source, self.rtty_audio_gain)
+                self.rtty_source = blocks.vector_source_f(self._rtty_audio.tolist(), repeat=False)
+                self.connect(self.rtty_source, self.rtty_ssb_mod)
+                self.connect(self.rtty_source, self.rtty_audio_gain)
+            finally:
+                self.unlock()
+            if self.device.is_audio_only():
+                self.tx_gain.set_k(1.0 + 0j)
+                self.rtty_audio_gain.set_k(1.0)
+                self._keyed = True
+                return
         self.device.pre_key()
         if self.mode == self.MODE_M17:
             self.m17_coder.post(_pmt.intern("transmission_control"), _pmt.intern("SOT"))
@@ -1291,6 +1382,11 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.mode == self.MODE_PSK31 and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.psk31_audio_gain.set_k(0.0)
+            self._keyed = False
+            return
+        if self.mode == self.MODE_RTTY and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.rtty_audio_gain.set_k(0.0)
             self._keyed = False
             return
         if self.mode == self.MODE_M17:

@@ -390,3 +390,123 @@ Hostnamens verwenden, z.B. `--uri ip:192.168.2.1`.
   verifiziert, noch kein echter fldigi-Rundlauftest über RF.
 - GUI besser/cooler aussehen lassen — aktuell rein funktionale
   Standard-Qt-Widgets.
+
+---
+
+## RTTY-Digimode (TX+RX, 2026-09-17) + RX-Digimode-Selector-Refactor
+
+Neuer Digimode (2-Ton-FSK, Baudot/ITA2) neben PSK31/Waterfall Writer,
+TX+RX, mit einstellbarer Baudrate/Shift/Mark-Frequenz und
+Normal/Reverse. Auf Nutzerwunsch außerdem ein grundlegendes Redesign
+der RX-Digimode-Architektur: PSK31 lief bisher unbedingt im Hintergrund
+mit (`pluto_advanced_rx/flowgraph.py`, seit dessen Einführung) — jetzt
+sind PSK31 und RTTY gegenseitig exklusiv (`AdvancedRxFlowgraph.
+active_digimode`), gesteuert über ein neues RX-seitiges
+`digimode_combo` (spiegelt das TX-seitige).
+
+**Baudot-Tabelle korrekt aus einer echten Referenz übernommen**
+(dl-fldigi/`rtty.cxx`, US/commercial-FIGS-Variante, nicht reine
+ITU-ITA2), nach demselben Prinzip wie PSK31s Varicode-Tabelle aus
+fldigis `pskvaricode.cxx`. Ein eigener, aus dem Gedächtnis
+rekonstruierter Tabellenentwurf während der Planungsphase erwies sich
+bei der Verifikation als teilweise falsch (u.a. T statt E bei Code 1) —
+genau der Grund, warum eine zitierbare Quelle Pflicht war.
+
+**Echter Bug beim ersten Offline-Rundlauftest gefunden: TX/RX-USOS-
+Assymetrie.** RTTYs "Unshift On Space"-Konvention (Space setzt den
+Empfänger-Shift-Zustand auf LTRS zurück) war nur im RX-Deframer
+implementiert, nicht im TX-Encoder — TX behielt den FIGS-Zustand über
+ein Leerzeichen hinweg bei (kein Shift-Code nötig, da Space in beiden
+Tabellen denselben Code hat), RX setzte aber unabhängig davon nach
+jedem Space auf LTRS zurück. Ergebnis: Zeichen nach "... : " wurden mit
+dem falschen Tabellen-Satz dekodiert (`DGBXC` statt `$&?/:`). Fix:
+TX-Encoder setzt `shift_state` jetzt ebenfalls nach jedem echten
+Space-Zeichen zurück — beide Seiten folgen jetzt derselben Konvention.
+32/32 Offline-Rundlauftests (4 Texte × 2 Baudraten × 2 Shifts ×
+Normal/Reverse) bestehen seither.
+
+**Präambel-Design geändert, ebenfalls durch einen Offline-Test
+gefunden.** Ursprünglich wie eine klassische "RY-Diddle"-Präambel
+geplant (alternierend Mark/Space) — funktionierte nicht mit dem
+letztlich gewählten RX-Deframer-Design (offener UART-Stil statt
+`symbol_sync_ff`, siehe unten): jede Mark→Space-Flanke der
+alternierenden Präambel löste einen (meist fehlschlagenden, aber nicht
+immer) Frame-Versuch aus, was das erste echte Zeichen der Nachricht
+verschluckte. Fix: Präambel ist jetzt durchgehendes Idle-Mark (kein
+Wechsel, keine Flanken) — genau der reale Ruhezustand einer
+unbetätigten RTTY-Sendung.
+
+**RX-Demod-Kette bewusst ohne `symbol_sync_ff`** (anders als PSK31):
+Baudot-Framing ist echt asynchron (beliebig lange Idle-Mark-Lücken
+zwischen Zeichen, keine Flanken) — ein kontinuierlich mitlaufender
+Mueller-&-Mueller-Loop würde in solchen Lücken driften, genau dort wo
+es beim nächsten Startbit am meisten schadet. Stattdessen: oversampled
+Bitstrom (`RTTY_WORKING_RATE_HZ=5000`, ~40-110 Samples/Bit je nach
+Baudrate) + eigener `RTTYBaudotDeframer` (`gr.sync_block`), der
+Mark→Space-Flanken selbst erkennt und die 5 Datenbits + Stoppbit an
+festen, aus `working_rate/baud_rate` berechneten Offsets abtastet
+(klassisches Open-Loop-UART-Verfahren). Vorteil nebenbei: Baudraten-
+Wechsel braucht dadurch keine GNU-Radio-Rekonfiguration, nur eine
+billige Neuberechnung im Deframer selbst.
+
+**Echte, hart erarbeitete GNU-Radio-Einschränkung gefunden: ein Block
+mit Pflicht-Eingang kann nicht dauerhaft unverbunden bleiben, auch
+nicht zur Laufzeit.** Der ursprünglich geplante Ansatz (ein einziger
+laufender Flowgraph, `if_filter` wird per `lock()/connect()/
+disconnect()/unlock()` je nach gewähltem Digimode nur zum aktiven
+Zweig verbunden, nach dem Vorbild von `set_demod_mode()`) scheiterte
+direkt an einem Minimalbeispiel: `unlock()` wirft `RuntimeError:
+insufficient connected input ports`, sobald ein Block mit
+Pflicht-Eingang (z.B. `freq_xlating_fir_filter_ccf`) komplett
+unverbunden ist — nicht nur beim initialen `start()`, sondern bei jedem
+späteren `lock()/unlock()`-Zyklus auf einem bereits laufenden
+Flowgraph. `set_demod_mode()`s eigenes Muster funktioniert nur, weil es
+NIE einen Pflicht-Eingang auf null Verbindungen bringt (es tauscht nur,
+welcher von mehreren Producern einen gemeinsamen Sink speist — der
+Sink hat immer genau einen). Konsequenz: Digimode-Wechsel (PSK31↔RTTY,
+und Tab-Betreten/-Verlassen) bauen jetzt den kompletten
+`AdvancedRxFlowgraph` neu auf (`gui.py`s `_rebuild_for_digimode()`,
+exakt nach dem Vorbild von `_on_bandwidth_changed()`/
+`_on_audio_device_changed()`), inkl. kurzer Audio-Unterbrechung beim
+Wechsel — vom Nutzer nach Rückfrage explizit als akzeptabler
+Trade-off bestätigt (Digimode-Wechsel ist eine gelegentliche,
+bewusste Aktion, kein Dauerbetrieb).
+
+Zweiter, damit verwandter Fund: das bloße Weglassen des
+`if_filter`-Connects am EINGANG eines Zweigs reicht nicht — wenn der
+Block trotzdem an ANDERER Stelle (z.B. als Quelle für den nächsten
+Block) in einem `connect()`-Aufruf vorkommt, zählt er als Teil des
+Flowgraphs und sein eigener Pflicht-Eingang wird trotzdem validiert.
+Nötig war, für den inaktiven Digimode-Zweig ALLE `connect()`-Aufrufe
+der gesamten Kette wegzulassen, nicht nur den ersten — ein Block, der
+buchstäblich in KEINEM `connect()`-Aufruf vorkommt, ist dagegen
+nachweislich komplett aus dem laufenden Flowgraph ausgenommen (per
+direktem Test bestätigt) und kostet nichts.
+
+**AFC für RTTY bewusst anders als PSK31s Design**: PSK31 sucht mit
+einer einzigen breiten, leistungsgewichteten Centroid-Suche um den
+Nominalwert. Für RTTY mit zwei separaten Tönen ungeeignet (Mark/Space-
+Energieverhältnis ist inhaltsabhängig — LTRS-lastiger vs.
+FIGS/Ziffern-lastiger Verkehr verschiebt, welcher Ton gerade
+dominiert), deshalb zwei getrennte schmale Suchen (eine um Mark, eine
+um die aktuelle Space-Position) mit anschließender Mittelung; die
+Suchradius skaliert mit der konfigurierten Shift statt eines festen
+Werts wie bei PSK31 (RTTYs belegte Bandbreite variiert 3× zwischen den
+Shift-Presets).
+
+**Real auf Hardware verifiziert** (Pluto TX → RTL-SDR RX, 432,15MHz,
+-20dB Leistungsdeckel, über `pluto-cli tx rtty`/`pluto-cli rx fm
+--digimode rtty`): gesendeter Text `DA2JH PLUTO-CLI RTTY TEST` wurde im
+hinteren Teil exakt korrekt dekodiert ("...CLI RTTY TEST" fehlerfrei),
+der Anfang war verunstaltet — deckt sich mit dem bereits für PSK31
+dokumentierten, bekannten Phänomen einer kontinuierlich driftenden
+TX/RX-Frequenzabweichung dieses konkreten Pluto+RTL-SDR-Paars, die die
+AFC erst nach ein paar Polling-Zyklen einholt. Kein neuer Bug, sondern
+dieselbe bereits bekannte Hardware-Eigenart.
+
+`pluto_cli/rx.py`s `--psk31-monitor`/`--psk31-tone-hz` wurden durch ein
+einziges `--digimode {psk31,rtty}` plus modusspezifische Flags ersetzt
+(bewusster Breaking Change) — der alte Flag gatete ohnehin nur die
+STDOUT-Ausgabe, nicht den Flowgraph selbst (PSK31 lief davor sowieso
+immer mit), was mit dem neuen `active_digimode`-Design inkonsistent
+gewesen wäre.

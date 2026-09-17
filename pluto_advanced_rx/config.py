@@ -338,3 +338,83 @@ PSK31_AFC_THRESHOLD_DB = 25.0
 # still catching genuinely large offsets (e.g. a session's starting gap
 # from the operator's nominal).
 PSK31_AFC_DEADBAND_HZ = 120.0
+
+# --- RTTY RX (2-tone FSK Baudot digimode) -- MIRRORED defaults of
+# pluto_tx/config.py's RTTY_* block (mark/shift/baud presets, MUST stay
+# in sync), plus RX-only demod-chain/AFC constants with no TX-side
+# equivalent. Unlike PSK31 (fixed 31.25 baud, Costas-loop phase-tracked),
+# RTTY's shift/baud are real runtime-adjustable settings and its
+# quadrature-discriminator demod has no continuous carrier-tracking loop
+# of its own -- see pluto_advanced_rx/flowgraph.py's RTTY branch and
+# rtty_deframer.py's own docstring for why it uses open-loop UART-style
+# framing instead of PSK31's symbol_sync_ff approach.
+RTTY_MARK_HZ_DEFAULT = 2125.0
+RTTY_MARK_HZ_RANGE = (300.0, 2700.0)
+RTTY_SHIFT_HZ_DEFAULT = 170.0
+RTTY_SHIFT_HZ_PRESETS = (170.0, 425.0, 850.0)
+RTTY_BAUD_RATE_DEFAULT = 45.45
+RTTY_BAUD_RATE_PRESETS = (45.45, 50.0, 75.0, 100.0)
+RTTY_STOP_BITS = 1.5
+
+# Fixed working rate rtty_band_filter decimates DEMOD_IF_RATE down to --
+# unlike PSK31_WORKING_RATE_HZ (tied to the Costas loop's own sps
+# requirement), this is sized purely to comfortably contain the widest
+# supported shift preset (850Hz) plus filter guard band while staying
+# far above what even the fastest baud preset (100) needs for the RX
+# deframer's own oversampled edge-timing arithmetic (5000/100=50
+# samples/bit, vs. 5000/45.45=~110 at the slowest -- both comfortably
+# oversampled). Deliberately NOT tied to baud_rate the way an earlier
+# draft of this design considered -- keeping it fixed means a baud-rate
+# change only updates cheap arithmetic inside rtty_deframer.py's
+# set_baud_rate(), no GNU Radio block reconfiguration at all.
+RTTY_WORKING_RATE_HZ = 5_000.0
+# rtty_band_filter's cutoff/transition are sized from the CONFIGURED
+# shift (cutoff = shift_hz/2 + this margin) via set_rtty_shift_hz()'s
+# set_taps() retune, the same already-proven live-retune pattern as
+# set_fm_demod_width()/set_ssb_demod_width()/set_baseband_width() --
+# see flowgraph.py. 300Hz gives comfortable margin at both the
+# narrowest (170Hz) and widest (850Hz) shift presets while staying well
+# under RTTY_WORKING_RATE_HZ/2's 2500Hz Nyquist even at 850Hz shift
+# (cutoff=725Hz there).
+RTTY_FILTER_GUARD_HZ = 300.0
+# rtty_lowpass (smooths the quadrature-demod discriminator output before
+# slicing) -- a single FIXED cutoff/transition sized for the FASTEST
+# baud preset (100, needing the widest passband), not retuned per baud
+# change: given RTTY_WORKING_RATE_HZ's large oversampling margin at
+# every baud preset, a filter wide enough for 100 baud is never too
+# narrow for a slower one, just marginally less noise-rejecting -- an
+# acceptable, simpler trade-off vs. adding a second baud-triggered
+# GNU Radio retune alongside rtty_band_filter's shift-triggered one.
+RTTY_LOWPASS_CUTOFF_HZ = 150.0
+RTTY_LOWPASS_TRANS_HZ = 100.0
+
+# --- RTTY AFC (frequency-drift compensation) -- structurally mirrors
+# PSK31_AFC's own design (a dedicated FftProbe + rade_autotune.
+# estimate_signal_center(), see that section's comment above for the
+# full mechanism), with two real differences the Plan-review for this
+# feature specifically called out:
+# 1. RTTY has TWO tones with data-dependent relative energy (idle/LTRS-
+#    heavy vs. FIGS/digit-heavy traffic shifts which tone dominates) --
+#    a single wide centroid search across both tones (PSK31's approach)
+#    would drift toward whichever tone is momentarily more common, not
+#    the true mark/space midpoint. rtty_afc_step() therefore runs TWO
+#    separate narrow-radius searches (one near mark_hz, one near the
+#    current space frequency) and averages the two found peaks.
+# 2. RTTY's occupied span varies 3x across the shift presets (170 vs
+#    850Hz), so the search radius is a function of the CONFIGURED shift
+#    (shift_hz/2 + this margin), not a static constant like PSK31's.
+RTTY_AFC_FFT_SIZE = 4096
+RTTY_AFC_COMPUTE_RATE_HZ = 20
+# More frequent than PSK31_AFC_POLL_INTERVAL_S (2.0s) and a smaller
+# deadband than PSK31_AFC_DEADBAND_HZ (120Hz) -- deliberate, NOT a
+# blind carry-over: PSK31's Costas loop continuously tracks ordinary
+# drift on its own between AFC polls, so PSK31's AFC only needs to catch
+# rare, large corrections. RTTY's quadrature-discriminator demod has no
+# equivalent continuous tracking at all, so AFC is the ONLY mechanism
+# correcting drift here -- starting candidates only, not yet real-
+# hardware-verified (unlike PSK31_AFC_THRESHOLD_DB/DEADBAND_HZ's own
+# documented real over-the-air calibration history above).
+RTTY_AFC_POLL_INTERVAL_S = 1.0
+RTTY_AFC_SEARCH_MARGIN_HZ = 300.0  # search radius = shift_hz/2 + this
+RTTY_AFC_THRESHOLD_DB = 25.0  # starting point, mirrors PSK31_AFC_THRESHOLD_DB's real-hardware-verified value
+RTTY_AFC_DEADBAND_HZ = 60.0

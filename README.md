@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -27,7 +27,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM, SSB (USB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
@@ -132,10 +132,17 @@ eigenem M17-Demodulator) kann mitlesen/mithören. Rufzeichen (Quelle/
 Ziel) direkt in der GUI einstellbar.
 
 **PSK31-Chat.** Klassisches Keyboard-to-Keyboard-Digimode, eigener
-Reiter "Digimodes" in beiden Apps. Der PSK31-Zweig läuft in
-`pluto-advanced-rx` **immer parallel im Hintergrund**, unabhängig vom
-gerade gewählten Empfangsmodus — man kann also z.B. FM hören und
-gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen.
+Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
+gewählten primären Empfangsmodus (man kann z.B. FM hören und
+gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
+aber nur einer der beiden Digimodes (PSK31 **oder** RTTY) kann
+gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
+Digimodes-Reiter umschaltbar.
+
+**RTTY.** Klassisches 2-Ton-FSK-Fernschreiben (Baudot/ITA2), ebenfalls
+im Digimodes-Reiter. Baudrate (45.45/50/75/100) und Shift
+(170/425/850Hz) frei einstellbar, inkl. Normal/Reverse-Umschalter für
+Gegenstationen mit vertauschter Ton-Zuordnung.
 
 **Waterfall Writer.** Sendet eingegebenen Text so, dass er beim
 Empfänger direkt im Wasserfall/Spektrum als lesbares Bild erscheint —
@@ -176,7 +183,7 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | RADE, Waterfall Writer, PSK31 | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **Soundkarte / externes Funkgerät** | RADE, Waterfall Writer, PSK31, RTTY | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und
 Connect/Disconnect-Buttons. **Nur `pluto-tx`** hat zusätzlich ein

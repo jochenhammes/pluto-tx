@@ -3,15 +3,22 @@
 Each mode function only builds an AdvancedRxFlowgraph with the right
 kwargs/callbacks and hands off to runtime.run_rx_session() -- no RX logic
 lives here that doesn't already exist in pluto_advanced_rx/flowgraph.py
-itself. PSK31/File Broadcast are always-on parallel branches in the real
-flowgraph (not gated by demod_mode), so they're available as extra flags
-on EVERY mode here, not separate subcommands -- see pluto_cli/README.md.
-"""
+itself. File Broadcast is an always-on parallel branch in the real
+flowgraph (not gated by demod_mode), so it's available as an extra flag
+on EVERY mode here, not a separate subcommand.
+
+PSK31/RTTY are DIFFERENT: only one digimode is ever connected/decoding at
+a time (AdvancedRxFlowgraph.active_digimode, fixed at construction -- a
+GNU Radio limitation, not a CLI simplification, see flowgraph.py's own
+Digimodes comment), so `--digimode {psk31,rtty}` is a single, mutually-
+exclusive selector rather than a monitor flag per mode -- see
+pluto_cli/README.md."""
 from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
 from pluto_advanced_rx.psk31_state import Psk31ChatState
+from pluto_advanced_rx.rtty_state import RttyChatState
 
 from . import runtime
 
@@ -55,13 +62,37 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--psk31-monitor", action="store_true",
-        help="Also decode BPSK31 chat in parallel (always-on branch, independent of the primary "
-             "demod mode) and print received characters as they arrive",
+        "--digimode", choices=("psk31", "rtty"), default=None,
+        help="Also decode this digimode in parallel and print received characters as they "
+             "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
+             "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
+             "simplification (see pluto_cli/README.md). Omit to disable digimode decoding "
+             "entirely.",
     )
     parser.add_argument(
         "--psk31-tone-hz", type=float, default=rx_config.PSK31_DEFAULT_TONE_HZ,
-        help=f"PSK31 tone-filter center frequency in Hz (default: {rx_config.PSK31_DEFAULT_TONE_HZ:.0f})",
+        help=f"PSK31 tone-filter center frequency in Hz, used when --digimode psk31 "
+             f"(default: {rx_config.PSK31_DEFAULT_TONE_HZ:.0f})",
+    )
+    parser.add_argument(
+        "--rtty-mark-hz", type=float, default=rx_config.RTTY_MARK_HZ_DEFAULT,
+        help=f"RTTY mark tone frequency in Hz, used when --digimode rtty "
+             f"(default: {rx_config.RTTY_MARK_HZ_DEFAULT:.0f})",
+    )
+    parser.add_argument(
+        "--rtty-shift-hz", type=float, default=rx_config.RTTY_SHIFT_HZ_DEFAULT,
+        help=f"RTTY mark/space shift in Hz, used when --digimode rtty "
+             f"(default: {rx_config.RTTY_SHIFT_HZ_DEFAULT:.0f}, "
+             f"common presets: {', '.join(f'{s:g}' for s in rx_config.RTTY_SHIFT_HZ_PRESETS)})",
+    )
+    parser.add_argument(
+        "--rtty-baud-rate", type=float, default=rx_config.RTTY_BAUD_RATE_DEFAULT,
+        help=f"RTTY baud rate, used when --digimode rtty (default: {rx_config.RTTY_BAUD_RATE_DEFAULT:g}, "
+             f"common presets: {', '.join(f'{b:g}' for b in rx_config.RTTY_BAUD_RATE_PRESETS)})",
+    )
+    parser.add_argument(
+        "--rtty-reverse", action="store_true",
+        help="Swap which tone is Mark vs. Space, used when --digimode rtty",
     )
     parser.add_argument(
         "--filebroadcast-save-dir", default=None, metavar="DIR",
@@ -74,12 +105,16 @@ def add_common_args(parser):
 
 def _build_and_run(args, mode, emitter, **mode_kwargs):
     psk31_state = Psk31ChatState()
+    rtty_state = RttyChatState()
     filebroadcast_state = FileBroadcastState()
 
     def on_psk31_char(ch):
         psk31_state.on_char(ch)
-        if args.psk31_monitor:
-            emitter.emit_char(ch)
+        emitter.emit_char(ch)
+
+    def on_rtty_char(ch):
+        rtty_state.on_char(ch)
+        emitter.emit_char(ch, event="rtty_char")
 
     def on_filebroadcast_frame(frame):
         if frame["type"] == "directory":
@@ -101,9 +136,13 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             device_type=args.device, uri=connection, frequency=args.freq,
             sample_rate=args.bandwidth, gain_mode=args.gain_mode, manual_gain_db=args.gain,
             demod_mode=mode, audio_device=args.audio_out,
+            active_digimode=args.digimode,
             psk31_tone_hz=args.psk31_tone_hz,
             on_psk31_char=on_psk31_char, on_filebroadcast_frame=on_filebroadcast_frame,
             on_m17_fields=on_m17_fields,
+            rtty_mark_hz=args.rtty_mark_hz, rtty_shift_hz=args.rtty_shift_hz,
+            rtty_baud_rate=args.rtty_baud_rate, rtty_reverse=args.rtty_reverse,
+            on_rtty_char=on_rtty_char,
             **mode_kwargs,
         )
 

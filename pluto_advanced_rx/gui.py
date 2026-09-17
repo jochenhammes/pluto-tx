@@ -32,6 +32,7 @@ from .fft_probe import FftProbe
 from .filebroadcast_state import FileBroadcastState
 from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE
 from .psk31_state import Psk31ChatState
+from .rtty_state import RttyChatState
 from .waterfall_widget import AdvancedWaterfallWidget
 
 
@@ -63,15 +64,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._filebroadcast_state = FileBroadcastState()
         self._filebroadcast_snapshot = []
 
-        # PSK31 chat RX state -- same "constructed ONCE, survives every
-        # flowgraph rebuild" reasoning as _filebroadcast_state above.
-        # AdvancedRxFlowgraph's PSK31 branch is always wired regardless of
-        # connection state, so characters can start arriving from the
-        # moment _connect()/_on_bandwidth_changed() construct a new tb --
-        # this must already exist by then.
+        # PSK31/RTTY chat RX state -- same "constructed ONCE, survives
+        # every flowgraph rebuild" reasoning as _filebroadcast_state
+        # above. Unlike File Broadcast, only ONE of these two is ever the
+        # active digimode at a time (see AdvancedRxFlowgraph.
+        # active_digimode) -- both state objects still always exist so
+        # switching back to a previously-used digimode doesn't lose its
+        # accumulated transcript.
         self._psk31_state = Psk31ChatState()
-        self._psk31_receiving = False
         self._psk31_last_afc_poll_time = 0.0
+        self._rtty_state = RttyChatState()
+        self._rtty_last_afc_poll_time = 0.0
+        # Which digimode (None/"psk31"/"rtty") the CURRENT self.tb was
+        # built with -- source of truth threaded into every
+        # AdvancedRxFlowgraph(...) call, kept in sync by
+        # _rebuild_for_digimode() (see its own docstring for why
+        # switching needs a full flowgraph rebuild, not a cheap runtime
+        # toggle). Starts None: the Digimodes tab isn't the default
+        # active tab, so nothing should be decoding yet at startup.
+        self._active_digimode = None
 
         # M17 RX status -- same "constructed ONCE, survives every flowgraph
         # rebuild" reasoning as _psk31_state above. Just the most recent
@@ -155,12 +166,31 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab = QtWidgets.QWidget()
         digimodes_tab_layout = QtWidgets.QVBoxLayout(digimodes_tab)
         self._digimodes_tab_index = self.mode_tab_widget.addTab(digimodes_tab, "Digimodes")
-        # PSK31 (BPSK31 chat) -- the tab's only occupant so far (pluto_tx's
-        # own "Waterfall Writer" digimode is TX-only, never lands here --
-        # see the plan). Always-on branch (see flowgraph.py), independent
-        # of demod_mode/connection state, matching File-Transfer's tab
-        # below.
-        digimodes_tab_layout.addWidget(QtWidgets.QLabel(
+        # Digimode selector -- mirrors pluto_tx/gui.py's own digimode_combo
+        # (there: Waterfall Writer/PSK31/RTTY; here: PSK31/RTTY only,
+        # Waterfall Writer being TX-only). Exactly ONE of these is ever the
+        # active digimode (see AdvancedRxFlowgraph.active_digimode) --
+        # selecting a different entry, or entering/leaving this tab,
+        # triggers _rebuild_for_digimode() (see its own docstring for why
+        # a full flowgraph rebuild is needed here, unlike demod_combo's
+        # cheap runtime switch).
+        digimode_row = QtWidgets.QHBoxLayout()
+        digimode_row.addWidget(QtWidgets.QLabel("Digimode:"))
+        self.digimode_combo = QtWidgets.QComboBox()
+        self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", "psk31")
+        self.digimode_combo.addItem("RTTY", "rtty")
+        self.digimode_combo.currentIndexChanged.connect(self._on_digimode_changed)
+        digimode_row.addWidget(self.digimode_combo)
+        digimode_row.addStretch(1)
+        digimodes_tab_layout.addLayout(digimode_row)
+
+        # --- PSK31 controls -- own group widget, shown only while PSK31 is
+        # the selected digimode_combo entry (mirrors pluto_tx/gui.py's
+        # digitext_group_widget/psk31_group_widget visibility pattern).
+        psk31_group = QtWidgets.QWidget()
+        psk31_group_layout = QtWidgets.QVBoxLayout(psk31_group)
+        psk31_group_layout.setContentsMargins(0, 0, 0, 0)
+        psk31_group_layout.addWidget(QtWidgets.QLabel(
             f"PHY: {config.PSK31_SYMBOL_RATE_HZ:g} baud BPSK31, Varicode -- keyboard-to-keyboard chat"
         ))
         psk31_tone_row = QtWidgets.QHBoxLayout()
@@ -182,33 +212,96 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_tone_label = QtWidgets.QLabel(f"{int(config.PSK31_DEFAULT_TONE_HZ)} Hz")
         self.psk31_tone_label.setMinimumWidth(60)
         psk31_tone_row.addWidget(self.psk31_tone_label)
-        digimodes_tab_layout.addLayout(psk31_tone_row)
-        # Start/Stop reception -- same reasoning as filebroadcast_receive_button
-        # below: gates only whether decoded characters get APPENDED to
-        # Psk31ChatState (see _on_psk31_char()), the underlying GNU Radio
-        # branch (and its own AFC search) keeps running regardless, so the
-        # signal-status label stays accurate even while stopped.
-        self.psk31_receive_button = QtWidgets.QPushButton()
-        self.psk31_receive_button.setCheckable(True)
-        self.psk31_receive_button.setChecked(False)
-        self.psk31_receive_button.setMinimumHeight(40)
-        self.psk31_receive_button.toggled.connect(self._on_psk31_receive_toggled)
-        self._style_psk31_receive_button(receiving=False)
-        digimodes_tab_layout.addWidget(self.psk31_receive_button)
+        psk31_group_layout.addLayout(psk31_tone_row)
         self.psk31_signal_label = QtWidgets.QLabel()
-        digimodes_tab_layout.addWidget(self.psk31_signal_label)
+        psk31_group_layout.addWidget(self.psk31_signal_label)
         self._psk31_last_chars_decoded = 0
         self._psk31_last_activity_time = 0.0
         self._update_psk31_signal_label()
         self.psk31_transcript = QtWidgets.QTextEdit()
         self.psk31_transcript.setReadOnly(True)
-        digimodes_tab_layout.addWidget(self.psk31_transcript)
-        clear_row = QtWidgets.QHBoxLayout()
-        clear_row.addStretch(1)
+        psk31_group_layout.addWidget(self.psk31_transcript)
+        psk31_clear_row = QtWidgets.QHBoxLayout()
+        psk31_clear_row.addStretch(1)
         self.psk31_clear_button = QtWidgets.QPushButton("Clear Transcript")
         self.psk31_clear_button.clicked.connect(self._on_psk31_clear_clicked)
-        clear_row.addWidget(self.psk31_clear_button)
-        digimodes_tab_layout.addLayout(clear_row)
+        psk31_clear_row.addWidget(self.psk31_clear_button)
+        psk31_group_layout.addLayout(psk31_clear_row)
+        digimodes_tab_layout.addWidget(psk31_group)
+        self.psk31_group_widget = psk31_group
+
+        # --- RTTY controls -- own group widget, same pattern as
+        # psk31_group above. Unlike PSK31 (fixed baud, single tone), mark/
+        # shift/baud/Normal-Reverse are all real, user-adjustable settings
+        # (per explicit request) -- mirrors pluto_tx/gui.py's own RTTY
+        # controls group.
+        rtty_group = QtWidgets.QWidget()
+        rtty_group_layout = QtWidgets.QVBoxLayout(rtty_group)
+        rtty_group_layout.setContentsMargins(0, 0, 0, 0)
+        rtty_group_layout.addWidget(QtWidgets.QLabel("PHY: 2-tone FSK, Baudot/ITA2 -- RTTY"))
+        rtty_settings_row = QtWidgets.QHBoxLayout()
+        rtty_settings_row.addWidget(QtWidgets.QLabel("Mark (Hz):"))
+        self.rtty_mark_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.rtty_mark_slider.setRange(int(config.RTTY_MARK_HZ_RANGE[0]), int(config.RTTY_MARK_HZ_RANGE[1]))
+        self.rtty_mark_slider.setSingleStep(5)
+        self.rtty_mark_slider.setPageStep(50)
+        self.rtty_mark_slider.setValue(int(config.RTTY_MARK_HZ_DEFAULT))
+        self.rtty_mark_slider.setToolTip(
+            "Mark tone frequency -- must match the sending station's own. Subject to the "
+            "same TX/RX drift as PSK31 -- see this mode's own AFC status in the signal "
+            "indicator below."
+        )
+        self.rtty_mark_slider.valueChanged.connect(self._on_rtty_mark_changed)
+        rtty_settings_row.addWidget(self.rtty_mark_slider)
+        self.rtty_mark_label = QtWidgets.QLabel(f"{int(config.RTTY_MARK_HZ_DEFAULT)} Hz")
+        self.rtty_mark_label.setMinimumWidth(60)
+        rtty_settings_row.addWidget(self.rtty_mark_label)
+
+        rtty_settings_row.addWidget(QtWidgets.QLabel("Shift:"))
+        self.rtty_shift_combo = QtWidgets.QComboBox()
+        for shift in config.RTTY_SHIFT_HZ_PRESETS:
+            self.rtty_shift_combo.addItem(f"{shift:g} Hz", shift)
+        initial_shift_idx = self.rtty_shift_combo.findData(config.RTTY_SHIFT_HZ_DEFAULT)
+        self.rtty_shift_combo.setCurrentIndex(initial_shift_idx if initial_shift_idx >= 0 else 0)
+        self.rtty_shift_combo.currentIndexChanged.connect(self._on_rtty_shift_changed)
+        rtty_settings_row.addWidget(self.rtty_shift_combo)
+
+        rtty_settings_row.addWidget(QtWidgets.QLabel("Baud:"))
+        self.rtty_baud_combo = QtWidgets.QComboBox()
+        for baud in config.RTTY_BAUD_RATE_PRESETS:
+            self.rtty_baud_combo.addItem(f"{baud:g}", baud)
+        initial_baud_idx = self.rtty_baud_combo.findData(config.RTTY_BAUD_RATE_DEFAULT)
+        self.rtty_baud_combo.setCurrentIndex(initial_baud_idx if initial_baud_idx >= 0 else 0)
+        self.rtty_baud_combo.currentIndexChanged.connect(self._on_rtty_baud_changed)
+        rtty_settings_row.addWidget(self.rtty_baud_combo)
+
+        self.rtty_reverse_checkbox = QtWidgets.QCheckBox("Reverse")
+        self.rtty_reverse_checkbox.setToolTip(
+            "Swaps which audio tone is Mark vs. Space -- use this if a sending station's "
+            "tone assignment is flipped relative to this one."
+        )
+        self.rtty_reverse_checkbox.toggled.connect(self._on_rtty_reverse_changed)
+        rtty_settings_row.addWidget(self.rtty_reverse_checkbox)
+        rtty_settings_row.addStretch(1)
+        rtty_group_layout.addLayout(rtty_settings_row)
+        self.rtty_signal_label = QtWidgets.QLabel()
+        rtty_group_layout.addWidget(self.rtty_signal_label)
+        self._rtty_last_chars_decoded = 0
+        self._rtty_last_activity_time = 0.0
+        self._update_rtty_signal_label()
+        self.rtty_transcript = QtWidgets.QTextEdit()
+        self.rtty_transcript.setReadOnly(True)
+        rtty_group_layout.addWidget(self.rtty_transcript)
+        rtty_clear_row = QtWidgets.QHBoxLayout()
+        rtty_clear_row.addStretch(1)
+        self.rtty_clear_button = QtWidgets.QPushButton("Clear Transcript")
+        self.rtty_clear_button.clicked.connect(self._on_rtty_clear_clicked)
+        rtty_clear_row.addWidget(self.rtty_clear_button)
+        rtty_group_layout.addLayout(rtty_clear_row)
+        digimodes_tab_layout.addWidget(rtty_group)
+        self.rtty_group_widget = rtty_group
+
+        self._update_digimode_controls_enabled()
         # File-Transfer: Phase 4's directory table -- this codebase's first
         # QTableWidget (Filename/Size/Progress/Record-toggle per row),
         # replacing Phase 1-3's plain QListWidget. Always live, independent
@@ -576,12 +669,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.waterfall.frequency_clicked.connect(self._on_waterfall_clicked)
         self.waterfall.zoom_step_requested.connect(self._on_waterfall_zoom_step)
-        # PSK31's marker/band should only be visible while the operator is
-        # actually on the Digimodes tab -- see set_psk31_visible()'s own
-        # docstring. mode_tab_widget defaults to the "Audio" tab (index 0),
-        # so this starts hidden; _on_mode_tab_changed() keeps it in sync.
+        # Each digimode's marker/band should only be visible while it's
+        # both the selected digimode AND the operator is actually on the
+        # Digimodes tab -- see set_psk31_visible()/set_rtty_visible()'s
+        # own docstrings. mode_tab_widget defaults to the "Audio" tab
+        # (index 0), so both start hidden; _on_mode_tab_changed()/
+        # _sync_waterfall() keep them in sync from here on.
         self.mode_tab_widget.currentChanged.connect(self._on_mode_tab_changed)
-        self.waterfall.set_psk31_visible(self.mode_tab_widget.currentIndex() == self._digimodes_tab_index)
+        self.waterfall.set_psk31_visible(False)
+        self.waterfall.set_rtty_visible(False)
 
         # Floor/Ceiling: vertical sliders stacked to the right of the
         # spectrum+waterfall, since the noise floor varies a lot with
@@ -638,7 +734,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(self._poll_fft)
         self._timer.timeout.connect(self._poll_filebroadcast)
-        self._timer.timeout.connect(self._poll_psk31)
+        self._timer.timeout.connect(self._poll_digimode)
         self._timer.start(config.WATERFALL_POLL_INTERVAL_MS)
 
         # Everything above builds the window with widgets in their normal
@@ -667,7 +763,8 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.agc_gain_widget, self.manual_gain_widget, self.nf_gain_slider,
                   self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
                   self.receive_button, self.autotune_button, self.filebroadcast_receive_button,
-                  self.psk31_receive_button, self.psk31_tone_slider):
+                  self.digimode_combo, self.psk31_tone_slider, self.rtty_mark_slider,
+                  self.rtty_shift_combo, self.rtty_baud_combo, self.rtty_reverse_checkbox):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
         if not enabled:
@@ -685,12 +782,13 @@ class MainWindow(QtWidgets.QMainWindow):
         color = "#27ae60" if receiving else "#7f8c8d"
         self.filebroadcast_receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
 
-    def _style_psk31_receive_button(self, receiving: bool):
-        self.psk31_receive_button.setText(
-            "Receiving Chat (click to stop)" if receiving else "Stopped (click to start receiving)"
-        )
-        color = "#27ae60" if receiving else "#7f8c8d"
-        self.psk31_receive_button.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
+    def _update_digimode_controls_enabled(self):
+        # Which of psk31_group_widget/rtty_group_widget is showing follows
+        # digimode_combo's own selection -- mirrors pluto_tx/gui.py's
+        # _update_psk31_controls_enabled()/_update_digitext_controls_enabled().
+        selected = self.digimode_combo.currentData()
+        self.psk31_group_widget.setVisible(selected == "psk31")
+        self.rtty_group_widget.setVisible(selected == "rtty")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -869,6 +967,24 @@ class MainWindow(QtWidgets.QMainWindow):
                        for name, (widget, _label, stage) in self._manual_gain_controls.items()}
         return dict(gain_mode=config.DEFAULT_GAIN_MODE, manual_gain_db=0.0, gain_values=gain_values)
 
+    def _digimode_kwargs(self, active_digimode):
+        """PSK31/RTTY callback+setting kwargs shared by every
+        AdvancedRxFlowgraph(...) construction site (fresh connect,
+        bandwidth/audio-device rebuild, digimode-switch rebuild) --
+        pulled out once here since this session added a second digimode
+        (RTTY) alongside PSK31 with several more settings of its own
+        (mark/shift/baud/reverse), and every construction site already
+        needs to carry PSK31's own tone setting over too."""
+        return dict(
+            active_digimode=active_digimode,
+            on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()),
+            on_rtty_char=self._on_rtty_char,
+            rtty_mark_hz=float(self.rtty_mark_slider.value()),
+            rtty_shift_hz=float(self.rtty_shift_combo.currentData()),
+            rtty_baud_rate=float(self.rtty_baud_combo.currentData()),
+            rtty_reverse=self.rtty_reverse_checkbox.isChecked(),
+        )
+
     def _sync_waterfall(self):
         """Push the current tuned frequency/span/demod-band to the waterfall
         widget. Must be called any time the tuned frequency, fine offset,
@@ -912,14 +1028,23 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.waterfall.set_frequency_range(freq, zoomed_span)
         self.waterfall.set_tuned_frequency(freq)
-        # PSK31 is an always-on parallel decode branch (independent of
-        # demod_combo below), so its own marker/band is shown unconditionally
-        # -- psk31_tone_center_hz is the LIVE AFC-tracked position
-        # (psk31_afc_step()), not the static nominal psk31_tone_hz, so this
-        # reflects where PSK31 is actually locked, not just where it started.
-        psk31_freq = freq + self.tb.psk31_tone_center_hz
-        psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
-        self.waterfall.set_psk31_marker(psk31_freq, psk31_freq - psk31_half_bw, psk31_freq + psk31_half_bw)
+        # Exactly one digimode (or none) is ever active at a time (see
+        # AdvancedRxFlowgraph.active_digimode) -- show that one's
+        # marker/band and hide the other, rather than the old always-both
+        # PSK31-only behavior. *_center_hz reflects the LIVE AFC-tracked
+        # position, not just the static nominal, so this shows where the
+        # decoder is actually locked, not just where it started.
+        self.waterfall.set_psk31_visible(self.tb.active_digimode == "psk31")
+        self.waterfall.set_rtty_visible(self.tb.active_digimode == "rtty")
+        if self.tb.active_digimode == "psk31":
+            psk31_freq = freq + self.tb.psk31_tone_center_hz
+            psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
+            self.waterfall.set_psk31_marker(psk31_freq, psk31_freq - psk31_half_bw, psk31_freq + psk31_half_bw)
+        elif self.tb.active_digimode == "rtty":
+            mark_freq = freq + self.tb.rtty_mark_center_hz
+            space_freq = mark_freq + self.tb.rtty_shift_center_hz
+            margin = config.RTTY_FILTER_GUARD_HZ
+            self.waterfall.set_rtty_marker(mark_freq, space_freq, mark_freq - margin, space_freq + margin)
         mode = self.demod_combo.currentData()
         if mode == AdvancedRxFlowgraph.MODE_FM:
             half_bw = self.tb.fm_demod_width_hz / 2
@@ -1040,10 +1165,6 @@ class MainWindow(QtWidgets.QMainWindow):
         elif frame["type"] == "data":
             self._filebroadcast_state.on_data_frame(frame["file_id"], frame["offset"], frame["payload"])
 
-    def _on_psk31_receive_toggled(self, checked):
-        self._psk31_receiving = checked
-        self._style_psk31_receive_button(receiving=checked)
-
     def _on_psk31_tone_changed(self, value):
         self.psk31_tone_label.setText(f"{value} Hz")
         if self.tb is not None:
@@ -1054,12 +1175,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_transcript.clear()
 
     def _update_psk31_signal_label(self):
-        """Independent of _psk31_receiving (Start/Stop) -- reads
-        PSK31VaricodeDeframer's own chars_decoded counter directly off the
-        flowgraph, which keeps counting regardless of the Start/Stop
-        button, so the operator can see whether they're even correctly
-        tuned BEFORE pressing Start. Mirrors
-        _update_filebroadcast_signal_label()'s own reasoning exactly."""
+        """Reads PSK31VaricodeDeframer's own chars_decoded counter
+        directly off the flowgraph. Mirrors
+        _update_filebroadcast_signal_label()'s own reasoning; only
+        meaningful while PSK31 is the active digimode (self.tb.
+        psk31_deframer never receives any real bits otherwise, so this
+        just reports "no signal" forever, which is correct)."""
         if self.tb is None:
             self.psk31_signal_label.setText("Not connected.")
             return
@@ -1086,15 +1207,87 @@ class MainWindow(QtWidgets.QMainWindow):
         PSK31VaricodeDeframer.work() on the GNU Radio SCHEDULER thread, not
         the Qt thread. Psk31ChatState.on_char() is lock-guarded (safe to
         call directly from here); nothing here touches any Qt widget --
-        _poll_psk31() (Qt-thread, timer-driven) is what actually updates
-        the transcript, via get_snapshot(). Gated on _psk31_receiving
-        (Start/Stop button), same reasoning as _on_filebroadcast_frame()."""
-        if not self._psk31_receiving:
-            return
+        _poll_digimode() (Qt-thread, timer-driven) is what actually
+        updates the transcript, via get_snapshot(). Unconditional now
+        (unlike the old Start/Stop-gated version): this callback only
+        ever fires at all while PSK31 is the active digimode (see
+        AdvancedRxFlowgraph.active_digimode), so there's no separate gate
+        needed anymore."""
         self._psk31_state.on_char(char)
 
+    def _on_rtty_mark_changed(self, value):
+        self.rtty_mark_label.setText(f"{value} Hz")
+        if self.tb is not None:
+            self.tb.set_rtty_mark_hz(float(value))
+
+    def _on_rtty_shift_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_rtty_shift_hz(float(self.rtty_shift_combo.currentData()))
+
+    def _on_rtty_baud_changed(self, idx):
+        if self.tb is not None:
+            self.tb.set_rtty_baud_rate(float(self.rtty_baud_combo.currentData()))
+
+    def _on_rtty_reverse_changed(self, checked):
+        if self.tb is not None:
+            self.tb.set_rtty_reverse(checked)
+
+    def _on_rtty_clear_clicked(self):
+        self._rtty_state.clear()
+        self.rtty_transcript.clear()
+
+    def _update_rtty_signal_label(self):
+        """Structural mirror of _update_psk31_signal_label()."""
+        if self.tb is None:
+            self.rtty_signal_label.setText("Not connected.")
+            return
+        chars_decoded = self.tb.rtty_deframer.chars_decoded
+        if chars_decoded > self._rtty_last_chars_decoded:
+            self._rtty_last_chars_decoded = chars_decoded
+            self._rtty_last_activity_time = time.time()
+        recently_active = (
+            self._rtty_last_activity_time > 0
+            and time.time() - self._rtty_last_activity_time < 5.0
+        )
+        afc_note = (
+            f" -- AFC tracking near mark={self.tb.rtty_mark_center_hz:.0f}Hz/"
+            f"shift={self.tb.rtty_shift_center_hz:.0f}Hz"
+        )
+        if recently_active:
+            self.rtty_signal_label.setText(
+                f"Signal detected -- {chars_decoded} character(s) decoded since connecting.{afc_note}"
+            )
+        else:
+            self.rtty_signal_label.setText(
+                f"No signal detected -- check mark/shift/baud (no valid character seen recently).{afc_note}"
+            )
+
+    def _on_rtty_char(self, char):
+        """Structural mirror of _on_psk31_char() -- see its own docstring."""
+        self._rtty_state.on_char(char)
+
+    def _on_digimode_changed(self, idx):
+        """digimode_combo's own change handler -- only meaningfully fires
+        while the Digimodes tab is already active (the combo is hidden/
+        irrelevant otherwise); triggers the same rebuild
+        _on_mode_tab_changed() uses to enter this tab, just with the
+        newly-selected digimode instead."""
+        self._update_digimode_controls_enabled()
+        if self.mode_tab_widget.currentIndex() == self._digimodes_tab_index:
+            self._rebuild_for_digimode(self.digimode_combo.currentData())
+
     def _on_mode_tab_changed(self, index):
-        self.waterfall.set_psk31_visible(index == self._digimodes_tab_index)
+        """Entering the Digimodes tab activates digimode_combo's current
+        selection; leaving it deactivates back to None -- see
+        _rebuild_for_digimode()'s own docstring for why this is a full
+        flowgraph rebuild, not a cheap runtime toggle, and why the
+        resulting brief audio interruption on every tab visit is an
+        accepted, explicit trade-off (per user request) for guaranteeing
+        NOTHING decodes while this tab isn't even visible."""
+        if index == self._digimodes_tab_index:
+            self._rebuild_for_digimode(self.digimode_combo.currentData())
+        else:
+            self._rebuild_for_digimode(None)
 
     def _on_m17_fields(self, fields):
         """Passed to AdvancedRxFlowgraph as on_m17_fields -- called from
@@ -1108,40 +1301,61 @@ class MainWindow(QtWidgets.QMainWindow):
         with self._m17_lock:
             self._m17_last_fields = fields
 
-    def _poll_psk31(self):
+    def _poll_digimode(self):
+        """Structural merge of the old _poll_psk31() (only PSK31 existed
+        before) -- now updates whichever digimode's transcript is showing
+        and, only for that ONE (self.tb.active_digimode), runs its own
+        AFC step. The inactive digimode's transcript still refreshes (its
+        state persists across the rebuild that deactivated it -- see
+        __init__'s own comment), it just never gets NEW characters."""
         self._update_psk31_signal_label()
+        self._update_rtty_signal_label()
         # Independent of self.tb's connection state (unlike the AFC step
-        # below) -- the transcript itself lives on MainWindow and should
-        # keep showing whatever was already received even across a brief
-        # reconnect, same reasoning as _poll_filebroadcast().
-        snapshot = self._psk31_state.get_snapshot()
-        if snapshot != self.psk31_transcript.toPlainText():
+        # below) -- each transcript lives on MainWindow and should keep
+        # showing whatever was already received even across a rebuild,
+        # same reasoning as _poll_filebroadcast().
+        psk31_snapshot = self._psk31_state.get_snapshot()
+        if psk31_snapshot != self.psk31_transcript.toPlainText():
             scrollbar = self.psk31_transcript.verticalScrollBar()
             at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
-            self.psk31_transcript.setPlainText(snapshot)
+            self.psk31_transcript.setPlainText(psk31_snapshot)
             if at_bottom:
                 scrollbar.setValue(scrollbar.maximum())
-        # AFC step, throttled to PSK31_AFC_POLL_INTERVAL_S -- see
-        # AdvancedRxFlowgraph.psk31_afc_step()'s own docstring for why this
-        # doesn't need to run on every ~33ms waterfall-poll tick (the
-        # underlying FftProbe already throttles its own compute rate
-        # independently; this throttle is purely about how often gui.py
-        # itself bothers to ask).
+        rtty_snapshot = self._rtty_state.get_snapshot()
+        if rtty_snapshot != self.rtty_transcript.toPlainText():
+            scrollbar = self.rtty_transcript.verticalScrollBar()
+            at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+            self.rtty_transcript.setPlainText(rtty_snapshot)
+            if at_bottom:
+                scrollbar.setValue(scrollbar.maximum())
         if self.tb is None:
             return
         now = time.time()
-        if now - self._psk31_last_afc_poll_time < config.PSK31_AFC_POLL_INTERVAL_S:
-            return
-        self._psk31_last_afc_poll_time = now
-        self.tb.psk31_afc_step()
-        # Refresh just the PSK31 marker/band (not the full _sync_waterfall(),
-        # which also recomputes the axis/FM-SSB-RADE band every call) so it
-        # visibly tracks psk31_afc_step()'s live corrections to
-        # psk31_tone_center_hz, at this same throttled cadence.
-        freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
-        psk31_freq = freq + self.tb.psk31_tone_center_hz
-        psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
-        self.waterfall.set_psk31_marker(psk31_freq, psk31_freq - psk31_half_bw, psk31_freq + psk31_half_bw)
+        # AFC step, throttled to each mode's own *_AFC_POLL_INTERVAL_S --
+        # see AdvancedRxFlowgraph.psk31_afc_step()/rtty_afc_step()'s own
+        # docstrings for why this doesn't need to run on every ~33ms
+        # waterfall-poll tick.
+        if self.tb.active_digimode == "psk31":
+            if now - self._psk31_last_afc_poll_time >= config.PSK31_AFC_POLL_INTERVAL_S:
+                self._psk31_last_afc_poll_time = now
+                self.tb.psk31_afc_step()
+            # Refresh just the PSK31 marker/band (not the full
+            # _sync_waterfall(), which also recomputes the axis/FM-SSB-RADE
+            # band every call) so it visibly tracks psk31_afc_step()'s live
+            # corrections to psk31_tone_center_hz, at this same cadence.
+            freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
+            psk31_freq = freq + self.tb.psk31_tone_center_hz
+            psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
+            self.waterfall.set_psk31_marker(psk31_freq, psk31_freq - psk31_half_bw, psk31_freq + psk31_half_bw)
+        elif self.tb.active_digimode == "rtty":
+            if now - self._rtty_last_afc_poll_time >= config.RTTY_AFC_POLL_INTERVAL_S:
+                self._rtty_last_afc_poll_time = now
+                self.tb.rtty_afc_step()
+            freq = self.tb.nominal_freq_hz + self.tb.fine_offset_hz
+            mark_freq = freq + self.tb.rtty_mark_center_hz
+            space_freq = mark_freq + self.tb.rtty_shift_center_hz
+            margin = config.RTTY_FILTER_GUARD_HZ
+            self.waterfall.set_rtty_marker(mark_freq, space_freq, mark_freq - margin, space_freq + margin)
 
     _FB_COL_FILENAME, _FB_COL_SIZE, _FB_COL_RECEIVED, _FB_COL_RECORD = range(4)
 
@@ -1645,7 +1859,6 @@ class MainWindow(QtWidgets.QMainWindow):
         fm_width = self.tb.fm_demod_width_hz
         ssb_width = self.tb.ssb_demod_width_hz
         baseband_width = self.tb.baseband_width_hz
-        psk31_tone = self.tb.psk31_tone_hz
 
         try:
             new_tb = AdvancedRxFlowgraph(
@@ -1653,7 +1866,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
+                audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
+                **self._digimode_kwargs(self.tb.active_digimode),
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
@@ -1673,11 +1887,75 @@ class MainWindow(QtWidgets.QMainWindow):
         self._filebroadcast_last_activity_time = 0.0
         self._psk31_last_chars_decoded = 0  # new tb's psk31_deframer.chars_decoded starts at 0 too
         self._psk31_last_activity_time = 0.0
+        self._rtty_last_chars_decoded = 0
+        self._rtty_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb
         self._sync_waterfall()
         self.tb.start()
         self.status_label.setText(f"Switched to {self._format_hz(new_rate)}.")
+
+    def _rebuild_for_digimode(self, new_digimode):
+        """Rebuilds self.tb with a different active_digimode -- see
+        AdvancedRxFlowgraph's own Digimodes intro comment for why a live
+        runtime toggle isn't possible here (a GNU Radio block with a
+        required input can't be left disconnected while the flowgraph is
+        running -- confirmed empirically while building this feature,
+        unlike demod_combo's cheap set_demod_mode() switch). Same shape
+        as _on_bandwidth_changed()/_on_audio_device_changed() -- build
+        the new flowgraph FIRST, only shutdown/swap the old one on
+        success. Called on every Digimodes-tab enter/leave AND every
+        digimode_combo selection change while already on that tab -- per
+        explicit user request, so NOTHING decodes while the tab isn't
+        visible, at the accepted cost of a brief audio interruption on
+        every such switch (confirmed acceptable: digimode switching is
+        an occasional, deliberate operator action, not something done
+        continuously)."""
+        old_digimode = self._active_digimode
+        self._active_digimode = new_digimode
+        if self.tb is None or new_digimode == self.tb.active_digimode:
+            return
+        self._autotune_cancel()
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        freq = self.tb.nominal_freq_hz
+        fine = self.tb.fine_offset_hz
+        demod_mode = self.demod_combo.currentData()
+        nf_gain = self.nf_gain_slider.value() / 100.0
+        fft_size = self.fft_size_combo.currentData()
+        fm_width = self.tb.fm_demod_width_hz
+        ssb_width = self.tb.ssb_demod_width_hz
+        baseband_width = self.tb.baseband_width_hz
+
+        try:
+            new_tb = AdvancedRxFlowgraph(
+                uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
+                demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
+                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
+                audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
+                **self._digimode_kwargs(new_digimode),
+                **self._current_gain_kwargs(device_cls),
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not switch digimode: {e}")
+            self._active_digimode = old_digimode
+            return
+
+        new_tb.set_fine_offset(fine)
+        new_tb.set_rx_muted(self._rx_muted)  # carry the CURRENT mute state over, same reasoning as the other rebuilds
+        new_tb.set_fft_zoom(self.zoom_slider.value())
+        new_tb.set_fft_avg_count(self.avg_slider.value())
+        self._fft_gen = -1
+        self._filebroadcast_last_attempt_total = 0
+        self._filebroadcast_last_activity_time = 0.0
+        self._psk31_last_chars_decoded = 0  # new tb's psk31_deframer.chars_decoded starts at 0 too
+        self._psk31_last_activity_time = 0.0
+        self._rtty_last_chars_decoded = 0
+        self._rtty_last_activity_time = 0.0
+        self.tb.shutdown()
+        self.tb = new_tb
+        self._sync_waterfall()
+        self.tb.start()
 
     def _on_audio_device_changed(self, idx):
         """Audio Output combo change: gnuradio's audio.sink() has no
@@ -1702,7 +1980,6 @@ class MainWindow(QtWidgets.QMainWindow):
         fm_width = self.tb.fm_demod_width_hz
         ssb_width = self.tb.ssb_demod_width_hz
         baseband_width = self.tb.baseband_width_hz
-        psk31_tone = self.tb.psk31_tone_hz
 
         try:
             new_tb = AdvancedRxFlowgraph(
@@ -1710,7 +1987,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=psk31_tone, audio_device=new_device, on_m17_fields=self._on_m17_fields,
+                audio_device=new_device, on_m17_fields=self._on_m17_fields,
+                **self._digimode_kwargs(self.tb.active_digimode),
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:
@@ -1730,6 +2008,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._filebroadcast_last_activity_time = 0.0
         self._psk31_last_chars_decoded = 0
         self._psk31_last_activity_time = 0.0
+        self._rtty_last_chars_decoded = 0
+        self._rtty_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb
         self._sync_waterfall()
@@ -1774,6 +2054,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._filebroadcast_last_activity_time = 0.0
         self._psk31_last_chars_decoded = 0
         self._psk31_last_activity_time = 0.0
+        self._rtty_last_chars_decoded = 0
+        self._rtty_last_activity_time = 0.0
         self.waterfall.clear()
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
@@ -1798,12 +2080,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filebroadcast_receive_button.setChecked(False)
         self.filebroadcast_receive_button.blockSignals(False)
         self._style_filebroadcast_receive_button(receiving=False)
-        # Same reset-only-on-disconnect reasoning as _filebroadcast_receiving above.
-        self._psk31_receiving = False
-        self.psk31_receive_button.blockSignals(True)
-        self.psk31_receive_button.setChecked(False)
-        self.psk31_receive_button.blockSignals(False)
-        self._style_psk31_receive_button(receiving=False)
+        # Digimode decoding itself is already gated by active_digimode/the
+        # Digimodes tab (see _rebuild_for_digimode()) -- nothing extra to
+        # reset here for PSK31/RTTY, unlike filebroadcast's separate
+        # manual Start/Stop button above.
 
     def _connect(self, uri_text):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -1848,8 +2128,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 fft_size=self.fft_size_combo.currentData(),
                 fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
-                on_psk31_char=self._on_psk31_char, psk31_tone_hz=float(self.psk31_tone_slider.value()), on_m17_fields=self._on_m17_fields,
+                on_m17_fields=self._on_m17_fields,
                 audio_device=self._audio_device,
+                **self._digimode_kwargs(self._active_digimode),
                 **self._current_gain_kwargs(device_cls),
             )
         except Exception as e:

@@ -13,7 +13,7 @@ from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "m17", "freedv", "rade", "digitext", "psk31", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -43,7 +43,7 @@ def add_common_args(parser):
     parser.add_argument(
         "--source", choices=["mic", "file"], default="mic",
         help="Audio source for modes that transmit live/file audio (default: mic; ignored for "
-             "text-based/file-based modes: digitext, psk31, filebroadcast)",
+             "text-based/file-based modes: digitext, psk31, rtty, filebroadcast)",
     )
     parser.add_argument("--wav-file", default=None, help="WAV file path, when --source file")
     parser.add_argument(
@@ -54,8 +54,9 @@ def add_common_args(parser):
     )
     parser.add_argument(
         "--duration", type=float, default=3.0,
-        help="Seconds to stay keyed (default: 3.0). Ignored for digitext/psk31, which transmit "
-             "their text exactly once and compute their own duration; ignored with --interactive.",
+        help="Seconds to stay keyed (default: 3.0). Ignored for digitext/psk31/rtty, which "
+             "transmit their text exactly once and compute their own duration; ignored with "
+             "--interactive.",
     )
     parser.add_argument(
         "--interactive", action="store_true",
@@ -221,6 +222,31 @@ def run_psk31(args):
     )
 
 
+def add_rtty_subparser(subparsers):
+    p = subparsers.add_parser("rtty", help="RTTY (2-tone FSK Baudot) digimode", description=__doc__)
+    add_common_args(p)
+    p.add_argument("--text", required=True, help="Text to send")
+    p.add_argument("--mark-hz", type=float, default=tx_config.RTTY_MARK_HZ_DEFAULT,
+                   help=f"Mark tone frequency in Hz (default: {tx_config.RTTY_MARK_HZ_DEFAULT:.0f})")
+    p.add_argument("--shift-hz", type=float, default=tx_config.RTTY_SHIFT_HZ_DEFAULT,
+                   help=f"Mark/Space tone separation in Hz (default: {tx_config.RTTY_SHIFT_HZ_DEFAULT:.0f}, "
+                        f"common presets: {', '.join(f'{s:g}' for s in tx_config.RTTY_SHIFT_HZ_PRESETS)})")
+    p.add_argument("--baud-rate", type=float, default=tx_config.RTTY_BAUD_RATE_DEFAULT,
+                   help=f"Baud rate (default: {tx_config.RTTY_BAUD_RATE_DEFAULT:g}, "
+                        f"common presets: {', '.join(f'{b:g}' for b in tx_config.RTTY_BAUD_RATE_PRESETS)})")
+    p.add_argument("--reverse", action="store_true",
+                   help="Swap which tone plays Mark vs. Space (for counterpart stations with flipped polarity)")
+    p.set_defaults(func=run_rtty)
+
+
+def run_rtty(args):
+    return _run(
+        args, PlutoTxFlowgraph.MODE_RTTY, runtime.Emitter(args.json),
+        rtty_text=args.text, rtty_mark_hz=args.mark_hz, rtty_shift_hz=args.shift_hz,
+        rtty_baud_rate=args.baud_rate, rtty_reverse=args.reverse,
+    )
+
+
 def add_filebroadcast_subparser(subparsers):
     p = subparsers.add_parser(
         "filebroadcast", help="Repetitive file broadcast (round-robin, gap-fill)", description=__doc__,
@@ -281,5 +307,6 @@ def add_subparsers(tx_subparsers):
     add_rade_subparser(tx_subparsers)
     add_digitext_subparser(tx_subparsers)
     add_psk31_subparser(tx_subparsers)
+    add_rtty_subparser(tx_subparsers)
     add_filebroadcast_subparser(tx_subparsers)
     add_baseband_subparser(tx_subparsers)

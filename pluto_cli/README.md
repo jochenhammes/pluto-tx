@@ -105,10 +105,10 @@ Common flags (every mode):
 | `--freq HZ` | Transmit frequency in Hz |
 | `--power-ceiling DB` | Max TX power/attenuation (device-specific meaning); omit for the device's own safe default |
 | `--power DB` | Target power within `--power-ceiling` (default: equal to the ceiling) |
-| `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/filebroadcast |
+| `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/rtty/filebroadcast |
 | `--wav-file PATH` | WAV file, when `--source file` |
 | `--audio-device STR` | Mic device string, from `pluto-cli devices list-audio-inputs` |
-| `--duration SECONDS` | Seconds to stay keyed (default: 3.0); ignored for digitext/psk31 (see below) and `--interactive` |
+| `--duration SECONDS` | Seconds to stay keyed (default: 3.0); ignored for digitext/psk31/rtty (see below) and `--interactive` |
 | `--interactive` | Enter to key, Enter again to unkey, repeatedly; Ctrl-C to quit |
 | `--yes` | Skip the `Type YES to key up` confirmation prompt |
 | `--json` | One JSON object per line instead of text |
@@ -121,6 +121,7 @@ Common flags (every mode):
 | `rade` | `--eoo` | requires `install-rade.sh`; `--eoo` sends an End-Of-Over marker after unkey and waits for it to finish |
 | `digitext` | `--text` (required), `--layout {horizontal,vertical}`, `--zoom`, `--min-freq-hz` | waterfall-drawn text; `--duration` is ignored -- the transmission runs exactly once for however long the rendered text takes |
 | `psk31` | `--text` (required), `--tone-hz` | BPSK31 chat; `--duration` ignored, same reason as digitext |
+| `rtty` | `--text` (required), `--mark-hz`, `--shift-hz`, `--baud-rate`, `--reverse` | 2-tone FSK Baudot; `--duration` ignored, same reason as digitext |
 | `filebroadcast` | `--file PATH` (repeatable, >=1 required) | round-robin file broadcast; each `--file` is read from disk once at startup |
 | `baseband` | `--deviation-hz` | raw wideband FM passthrough, no audio processing -- see [Recipes](#7-recipes) |
 
@@ -144,17 +145,31 @@ Common flags (every mode):
 | `--gain DB` | Manual gain, used when `--gain-mode manual` |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
-| `--psk31-monitor` | Also decode BPSK31 chat in parallel and print characters as they arrive (see below) |
-| `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency |
+| `--digimode {psk31,rtty}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
+| `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency, used with `--digimode psk31` |
+| `--rtty-mark-hz HZ` | RTTY mark tone frequency, used with `--digimode rtty` |
+| `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
+| `--rtty-baud-rate BAUD` | RTTY baud rate, used with `--digimode rtty` (presets: 45.45/50/75/100) |
+| `--rtty-reverse` | Swap which tone is Mark vs. Space, used with `--digimode rtty` |
 | `--filebroadcast-save-dir DIR` | Also watch for File Broadcast files in parallel and save each as soon as it's complete (see below) |
 | `--json` | One JSON object per line instead of text |
 
-**PSK31 and File Broadcast are always-on parallel branches** inside
+**File Broadcast is an always-on parallel branch** inside
 `AdvancedRxFlowgraph`, independent of the primary demod mode -- this mirrors
 the real flowgraph exactly, not a `pluto_cli` simplification. That means
 `pluto-cli rx m17 --filebroadcast-save-dir ./received` decodes M17 audio to
 the chosen output *and* saves any File Broadcast files seen in the same
 band, at the same time.
+
+**PSK31/RTTY are different: only ONE digimode can ever be active at a
+time**, selected via `--digimode`. This is a real GNU Radio limitation, not
+a `pluto_cli`-specific restriction: a block with a required input can't be
+left disconnected while a flowgraph is running, so switching which digimode
+decodes means rebuilding the whole flowgraph -- the GUI apps hit the exact
+same constraint (see `pluto_advanced_rx/flowgraph.py`'s own comments) and
+handle it by rebuilding whenever the Digimodes tab/selection changes.
+`pluto-cli` sidesteps the "switching" case entirely by fixing the digimode
+for the whole process lifetime via `--digimode` at startup.
 
 | mode | extra flags | notes |
 |---|---|---|
@@ -241,7 +256,8 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `interactive_ready` | TX `--interactive`: ready for input | `hint` |
 | `shutdown` | TX or RX: safe shutdown has completed | -- |
 | `started` | RX: flowgraph is running and unmuted | -- |
-| `psk31_char` | RX `--psk31-monitor` (or `--json` PSK31 TX side prints nothing -- this is RX-only): one decoded character | `char` (single character string) |
+| `psk31_char` | RX `--digimode psk31`: one decoded character (RX-only; TX `psk31` prints nothing) | `char` (single character string) |
+| `rtty_char` | RX `--digimode rtty`: one decoded character (RX-only; TX `rtty` prints nothing) | `char` (single character string) |
 | `m17_fields` | RX `m17` mode: one decoded M17 frame | the decoded LSF fields dict as reported by `gr-m17` (`dst`, `src`, `type`, `meta`, ...; numpy arrays are converted to plain lists) |
 | `filebroadcast_added` | TX `filebroadcast`: a `--file` was registered at startup | `file_id`, `filename`, `bytes` |
 | `filebroadcast_progress` | RX: a watched file's received-byte count changed | `file_id`, `filename`, `bytes_received`, `total_size`, `is_complete` |
@@ -251,8 +267,8 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `error` | M17/RADE unavailable, an uncaught exception, or a scan/probe failure | `message` |
 
 Without `--json`, the same events print as plain `event key=value ...` lines
-(e.g. `keyed mode=2`), and PSK31 characters print as a raw, unframed text
-stream instead of one `psk31_char` event per character.
+(e.g. `keyed mode=2`), and PSK31/RTTY characters print as a raw, unframed
+text stream instead of one `psk31_char`/`rtty_char` event per character.
 
 ## 7. Recipes
 
@@ -302,6 +318,20 @@ pluto-cli rx m17 --freq 432150000 --device rtlsdr --duration 15 --json
 close-range/attended test -- pick a level appropriate to your own setup and
 license conditions.)
 
+### RTTY TX -> RX test
+
+```bash
+pluto-cli tx rtty --freq 432150000 --text "DE DA2JH PSE K" --power-ceiling -20 --yes &
+pluto-cli rx fm --freq 432150000 --device rtlsdr --digimode rtty --duration 15 --json
+```
+
+Defaults are the classic HF-RTTY tone pair (Mark 2125Hz, 170Hz shift,
+45.45 baud) -- override with `--mark-hz`/`--shift-hz`/`--baud-rate` on TX
+and the matching `--rtty-mark-hz`/`--rtty-shift-hz`/`--rtty-baud-rate` on
+RX. Any RX mode works alongside `--digimode rtty` (`fm` above is just a
+placeholder primary mode -- RTTY decodes from the IF stage independently
+of it, same as PSK31).
+
 ## 8. Exit codes & known limitations
 
 - Exit code `0`: success. `1`: a handled error (bad device, unreachable
@@ -311,5 +341,9 @@ license conditions.)
   digitext composition, use the GUI apps (`pluto-tx`, `pluto-advanced-rx`).
 - **One process per physical device at a time** -- see the hardware-
   exclusivity note in [section 1](#1-overview--philosophy).
-- `tx digitext`/`tx psk31` ignore `--duration`: their transmission length is
-  computed from the rendered text and cannot be shortened or extended.
+- `tx digitext`/`tx psk31`/`tx rtty` ignore `--duration`: their transmission
+  length is computed from the rendered text and cannot be shortened or
+  extended.
+- **Only one of PSK31/RTTY can decode at a time** (`--digimode`) -- see
+  section 4's own note on why this is a real GNU Radio limitation, not a
+  `pluto_cli` restriction.
