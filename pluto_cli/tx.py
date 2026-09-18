@@ -7,13 +7,13 @@ README.md for the full command reference and examples.
 """
 import sys
 
-from pluto_tx.flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE
+from pluto_tx.flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE
 from pluto_tx import config as tx_config
 from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "meshtastic", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -247,6 +247,63 @@ def run_rtty(args):
     )
 
 
+def add_meshtastic_subparser(subparsers):
+    p = subparsers.add_parser(
+        "meshtastic",
+        help="Meshtastic (LoRa) text broadcast -- one frame (requires gr-lora_sdr, see install-lora.sh)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--text", required=True, help="Message to broadcast")
+    p.add_argument("--preset", choices=("eu433", "eu868"), default="eu868",
+                   help="Meshtastic LongFast preset; sets the carrier (433.5 / 869.525 MHz), "
+                        "--freq is ignored (default: eu868). eu433 = Ham Mode (needs --callsign, "
+                        "no encryption); eu868 = ISM/SRD, 10%% duty cycle enforced")
+    p.add_argument("--callsign", default="", help="Your callsign -- required on eu433 (appended to the text)")
+    p.add_argument("--node-id", default=None, metavar="HEX",
+                   help="Sender node number in hex, e.g. 5a1d0f42 (default: random)")
+    p.add_argument("--channel", default=None, help="Channel name (default: LongFast)")
+    p.add_argument("--psk", default=tx_config.MESHTASTIC_DEFAULT_PSK_B64,
+                   help="Channel key, base64 as in the Meshtastic apps (default: the stock channel key "
+                        "AQ==; empty = no encryption; ignored on eu433)")
+    p.add_argument("--hop-limit", type=int, default=tx_config.MESHTASTIC_DEFAULT_HOP_LIMIT,
+                   help=f"Hop limit, 0-{tx_config.MESHTASTIC_MAX_HOP_LIMIT} "
+                        f"(default: {tx_config.MESHTASTIC_DEFAULT_HOP_LIMIT}); 0 = direct neighbours only")
+    p.set_defaults(func=run_meshtastic)
+
+
+def run_meshtastic(args):
+    emitter = runtime.Emitter(args.json)
+    if not LORA_AVAILABLE:
+        emitter.error("Meshtastic is not available -- gr-lora_sdr / the meshtastic package is not installed, "
+                      "see install-lora.sh")
+        return 1
+    try:
+        node_id = int(args.node_id, 16) if args.node_id else None
+    except ValueError:
+        emitter.error(f"invalid --node-id {args.node_id!r} (expected hex)")
+        return 1
+    preset_index = 0 if args.preset == "eu433" else 1
+    hop_limit = max(0, min(tx_config.MESHTASTIC_MAX_HOP_LIMIT, args.hop_limit))
+
+    def preflight(tb):
+        # every refusal (empty text, bad PSK, missing Ham-Mode callsign, duty cycle...) BEFORE any RF action
+        ok, message, info = tb.prepare_meshtastic_tx()
+        if not ok:
+            emitter.error(message)
+            tb.shutdown_safe()
+            sys.exit(1)
+        emitter.emit("meshtastic_frame", preset=info["preset"].name, freq_hz=info["preset"].frequency_hz,
+                     text=info["text"], bytes=len(info["packet"]), airtime_s=round(info["airtime_s"], 3))
+
+    return _run(
+        args, PlutoTxFlowgraph.MODE_MESHTASTIC, emitter, post_construct=preflight,
+        meshtastic_preset_index=preset_index, meshtastic_text=args.text, meshtastic_node_id=node_id,
+        meshtastic_channel_name=args.channel, meshtastic_psk_b64=args.psk,
+        meshtastic_hop_limit=hop_limit, meshtastic_callsign=args.callsign,
+    )
+
+
 def add_filebroadcast_subparser(subparsers):
     p = subparsers.add_parser(
         "filebroadcast", help="Repetitive file broadcast (round-robin, gap-fill)", description=__doc__,
@@ -308,5 +365,6 @@ def add_subparsers(tx_subparsers):
     add_digitext_subparser(tx_subparsers)
     add_psk31_subparser(tx_subparsers)
     add_rtty_subparser(tx_subparsers)
+    add_meshtastic_subparser(tx_subparsers)
     add_filebroadcast_subparser(tx_subparsers)
     add_baseband_subparser(tx_subparsers)

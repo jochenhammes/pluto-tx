@@ -7,16 +7,17 @@ itself. File Broadcast is an always-on parallel branch in the real
 flowgraph (not gated by demod_mode), so it's available as an extra flag
 on EVERY mode here, not a separate subcommand.
 
-PSK31/RTTY are DIFFERENT: only one digimode is ever connected/decoding at
+PSK31/RTTY/Meshtastic are DIFFERENT: only one digimode is ever connected/decoding at
 a time (AdvancedRxFlowgraph.active_digimode, fixed at construction -- a
 GNU Radio limitation, not a CLI simplification, see flowgraph.py's own
-Digimodes comment), so `--digimode {psk31,rtty}` is a single, mutually-
+Digimodes comment), so `--digimode {psk31,rtty,meshtastic}` is a single, mutually-
 exclusive selector rather than a monitor flag per mode -- see
 pluto_cli/README.md."""
-from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE
+from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_AVAILABLE
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
+from pluto_advanced_rx.meshtastic_state import MeshtasticState
 from pluto_advanced_rx.psk31_state import Psk31ChatState
 from pluto_advanced_rx.rtty_state import RttyChatState
 
@@ -68,7 +69,7 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
@@ -101,6 +102,21 @@ def add_common_args(parser):
         help="Swap which tone is Mark vs. Space, used when --digimode rtty",
     )
     parser.add_argument(
+        "--meshtastic-preset", choices=("eu433", "eu868"), default="eu868",
+        help="Meshtastic LongFast preset, used when --digimode meshtastic: retunes to the preset's "
+             "carrier (433.5 / 869.525 MHz), --freq is ignored (default: eu868). Needs --bandwidth "
+             "of at least 0.5 MS/s.",
+    )
+    parser.add_argument(
+        "--meshtastic-channel", default=None,
+        help="Channel name for the header pre-filter, used when --digimode meshtastic (default: LongFast)",
+    )
+    parser.add_argument(
+        "--meshtastic-psk", default=rx_config.MESHTASTIC_DEFAULT_PSK_B64,
+        help="Channel key, base64 as in the Meshtastic apps (default: the stock channel key AQ==; "
+             "empty = unencrypted), used when --digimode meshtastic",
+    )
+    parser.add_argument(
         "--filebroadcast-save-dir", default=None, metavar="DIR",
         help="Also watch for File Broadcast files in parallel (always-on branch, independent of "
              "the primary demod mode) and save each one to this directory as soon as it's fully "
@@ -130,8 +146,42 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         elif frame["type"] == "data":
             filebroadcast_state.on_data_frame(frame["file_id"], frame["offset"], frame["payload"])
 
+    meshtastic_state = MeshtasticState()
+    meshtastic_preset_index = 0 if args.meshtastic_preset == "eu433" else 1
+    meshtastic_preset = rx_config.MESHTASTIC_PRESETS[meshtastic_preset_index]
+
+    def on_meshtastic_frame(raw):
+        meshtastic_state.on_frame(raw)
+        row = meshtastic_state.get_snapshot()[1][-1]
+        fields = {"kind": row["kind"], "bytes": row["raw_len"]}
+        if "from" in row:
+            fields.update({"from": f"{row['from']:08x}", "to": f"{row['to']:08x}", "id": row["id"],
+                           "hop_limit": row["hop_limit"], "hop_start": row["hop_start"], "text": row["text"]})
+        emitter.emit("meshtastic_frame", **fields)
+
     def on_m17_fields(fields):
         emitter.emit("m17_fields", **runtime.json_safe(fields))
+
+    frequency = args.freq
+    if args.digimode == "meshtastic":
+        if not LORA_AVAILABLE:
+            emitter.error("Meshtastic is not available -- gr-lora_sdr / the meshtastic package is not installed, "
+                          "see install-lora.sh")
+            return 1
+        from pluto_tx import meshtastic_codec
+        try:
+            psk = meshtastic_codec.parse_psk(args.meshtastic_psk)
+        except ValueError as e:
+            emitter.error(f"invalid --meshtastic-psk: {e}")
+            return 1
+        name = args.meshtastic_channel or meshtastic_codec.DEFAULT_CHANNEL_NAME
+        channels = [(name, psk)]
+        if meshtastic_preset.ham_mode_required and psk:
+            channels.insert(0, (name, b""))  # amateur band: unencrypted first
+        meshtastic_state.set_channels(channels)
+        frequency = meshtastic_preset.frequency_hz
+        emitter.emit("meshtastic_listen", preset=meshtastic_preset.name, freq_hz=frequency,
+                     regulatory=meshtastic_preset.regulatory_label)
 
     device_cls = rx_devices.DEVICE_REGISTRY[args.device]
     connection = runtime.resolve_connection(device_cls, args.uri)
@@ -139,7 +189,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
 
     def _build():
         return AdvancedRxFlowgraph(
-            device_type=args.device, uri=connection, frequency=args.freq,
+            device_type=args.device, uri=connection, frequency=frequency,
             sample_rate=args.bandwidth, buffer_size=args.buffer_size,
             gain_mode=args.gain_mode, manual_gain_db=args.gain,
             demod_mode=mode, audio_device=args.audio_out,
@@ -150,6 +200,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             rtty_mark_hz=args.rtty_mark_hz, rtty_shift_hz=args.rtty_shift_hz,
             rtty_baud_rate=args.rtty_baud_rate, rtty_reverse=args.rtty_reverse,
             on_rtty_char=on_rtty_char,
+            on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
             **mode_kwargs,
         )
 

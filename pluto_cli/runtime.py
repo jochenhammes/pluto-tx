@@ -183,7 +183,8 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
     error. Mirrors pluto_tx/app.py's exact key_ptt()->sleep()->
     unkey_ptt() shape, generalized across every mode's different
     "how long does this transmission actually take" semantics --
-    Digitext/PSK31/RTTY render fresh audio inside key_ptt() itself and
+    Digitext/PSK31/RTTY render fresh audio inside key_ptt() itself (Meshtastic
+    builds its packet there and reports tb.meshtastic_hold_s) and
     only reveal their real duration afterward (tb.digitext_duration_s/
     tb.psk31_duration_s/tb.rtty_duration_s), so --duration is ignored
     for those three."""
@@ -211,6 +212,8 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                 time.sleep(tb.psk31_duration_s)
             elif mode == PlutoTxFlowgraph.MODE_RTTY:
                 time.sleep(tb.rtty_duration_s)
+            elif mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
+                time.sleep(tb.meshtastic_hold_s)
             else:
                 time.sleep(args.duration)
             tb.unkey_ptt()

@@ -30,7 +30,10 @@ from . import devices
 from . import rade_autotune
 from .fft_probe import FftProbe
 from .filebroadcast_state import FileBroadcastState
-from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE
+from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_AVAILABLE
+from .meshtastic_state import MeshtasticState
+if LORA_AVAILABLE:
+    from pluto_tx import meshtastic_codec
 from .psk31_state import Psk31ChatState
 from .rtty_state import RttyChatState
 from .waterfall_widget import AdvancedWaterfallWidget
@@ -75,6 +78,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._psk31_last_afc_poll_time = 0.0
         self._rtty_state = RttyChatState()
         self._rtty_last_afc_poll_time = 0.0
+        # Meshtastic traffic log -- same "constructed ONCE, survives every
+        # flowgraph rebuild" reasoning as the two above.
+        self._meshtastic_state = MeshtasticState()
+        self._meshtastic_rendered_version = -1
+        self._meshtastic_last_frames = 0
+        self._meshtastic_last_activity_time = 0.0
+        self._meshtastic_psk_error = None
+        # Carrier (Hz) to restore when leaving Meshtastic, whose presets retune the receiver.
+        self._freq_before_lora = None
         # Which digimode (None/"psk31"/"rtty") the CURRENT self.tb was
         # built with -- source of truth threaded into every
         # AdvancedRxFlowgraph(...) call, kept in sync by
@@ -179,6 +191,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo = QtWidgets.QComboBox()
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", "psk31")
         self.digimode_combo.addItem("RTTY", "rtty")
+        self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
+        if not LORA_AVAILABLE:
+            lora_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshtastic"))
+            lora_item.setEnabled(False)
+            lora_item.setToolTip("gr-lora_sdr / the meshtastic package is not installed -- see install-lora.sh / README")
         self.digimode_combo.currentIndexChanged.connect(self._on_digimode_changed)
         digimode_row.addWidget(self.digimode_combo)
         digimode_row.addStretch(1)
@@ -300,6 +317,69 @@ class MainWindow(QtWidgets.QMainWindow):
         rtty_group_layout.addLayout(rtty_clear_row)
         digimodes_tab_layout.addWidget(rtty_group)
         self.rtty_group_widget = rtty_group
+
+        # --- Meshtastic (LoRa) controls -- own group widget, same pattern as
+        # rtty_group above. Receive-only here; sending lives in pluto_tx.
+        meshtastic_group = QtWidgets.QWidget()
+        meshtastic_group_layout = QtWidgets.QVBoxLayout(meshtastic_group)
+        meshtastic_group_layout.setContentsMargins(0, 0, 0, 0)
+        meshtastic_preset_row = QtWidgets.QHBoxLayout()
+        meshtastic_preset_row.addWidget(QtWidgets.QLabel("Preset:"))
+        self.meshtastic_preset_combo = QtWidgets.QComboBox()
+        for i, preset in enumerate(config.MESHTASTIC_PRESETS):
+            self.meshtastic_preset_combo.addItem(preset.name, i)
+        # MeshCore stays a visible but disabled placeholder (no protocol layer yet).
+        for preset in config.MESHCORE_PRESETS:
+            self.meshtastic_preset_combo.addItem(f"{preset.name} (placeholder)", -1)
+            item = self.meshtastic_preset_combo.model().item(self.meshtastic_preset_combo.count() - 1)
+            item.setEnabled(False)
+            item.setToolTip(config.MESHCORE_PLACEHOLDER_TIP)
+        self.meshtastic_preset_combo.currentIndexChanged.connect(self._on_meshtastic_preset_changed)
+        meshtastic_preset_row.addWidget(self.meshtastic_preset_combo)
+        meshtastic_preset_row.addWidget(QtWidgets.QLabel("Channel:"))
+        self.meshtastic_channel_edit = QtWidgets.QLineEdit("LongFast")
+        self.meshtastic_channel_edit.setMaximumWidth(110)
+        self.meshtastic_channel_edit.setToolTip("Channel name (feeds the header's channel-hash pre-filter).")
+        self.meshtastic_channel_edit.textChanged.connect(self._on_meshtastic_channel_changed)
+        meshtastic_preset_row.addWidget(self.meshtastic_channel_edit)
+        meshtastic_preset_row.addWidget(QtWidgets.QLabel("PSK:"))
+        self.meshtastic_psk_edit = QtWidgets.QLineEdit(config.MESHTASTIC_DEFAULT_PSK_B64)
+        self.meshtastic_psk_edit.setMaximumWidth(260)
+        self.meshtastic_psk_edit.setToolTip(
+            "Base64 channel key as shown in the Meshtastic apps. \"AQ==\" is the default "
+            "channel key; empty = unencrypted. Frames on Ham-Mode presets (433 MHz) are "
+            "tried unencrypted first.")
+        self.meshtastic_psk_edit.textChanged.connect(self._on_meshtastic_channel_changed)
+        meshtastic_preset_row.addWidget(self.meshtastic_psk_edit)
+        meshtastic_preset_row.addStretch(1)
+        meshtastic_group_layout.addLayout(meshtastic_preset_row)
+        self.meshtastic_regulatory_label = QtWidgets.QLabel()
+        self.meshtastic_regulatory_label.setWordWrap(True)
+        meshtastic_group_layout.addWidget(self.meshtastic_regulatory_label)
+        self.meshtastic_signal_label = QtWidgets.QLabel()
+        meshtastic_group_layout.addWidget(self.meshtastic_signal_label)
+        self.meshtastic_table = QtWidgets.QTableWidget(0, 6)
+        self.meshtastic_table.setHorizontalHeaderLabels(["Time", "From", "To", "Type", "Hops", "Message"])
+        self.meshtastic_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.meshtastic_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.meshtastic_table.verticalHeader().setVisible(False)
+        self.meshtastic_table.horizontalHeader().setStretchLastSection(True)
+        self.meshtastic_table.setMinimumHeight(160)
+        self.meshtastic_table.setToolTip(
+            "Every CRC-valid LoRa frame heard on the preset's frequency. Text of frames on "
+            "another channel (different name/key) can't be read -- they are listed as \"other channel\".")
+        meshtastic_group_layout.addWidget(self.meshtastic_table)
+        meshtastic_clear_row = QtWidgets.QHBoxLayout()
+        meshtastic_clear_row.addStretch(1)
+        self.meshtastic_clear_button = QtWidgets.QPushButton("Clear")
+        self.meshtastic_clear_button.clicked.connect(self._on_meshtastic_clear_clicked)
+        meshtastic_clear_row.addWidget(self.meshtastic_clear_button)
+        meshtastic_group_layout.addLayout(meshtastic_clear_row)
+        digimodes_tab_layout.addWidget(meshtastic_group)
+        self.meshtastic_group_widget = meshtastic_group
+        self._apply_meshtastic_channels()
+        self._update_meshtastic_regulatory_label()
+        self._update_meshtastic_signal_label()
 
         self._update_digimode_controls_enabled()
         # File-Transfer: Phase 4's directory table -- this codebase's first
@@ -795,6 +875,7 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.bandwidth_combo, self.fft_size_combo, self.zoom_slider, self.avg_slider,
                   self.receive_button, self.autotune_button, self.filebroadcast_receive_button,
                   self.digimode_combo, self.psk31_tone_slider, self.rtty_mark_slider,
+                  self.meshtastic_preset_combo, self.meshtastic_channel_edit, self.meshtastic_psk_edit,
                   self.rtty_shift_combo, self.rtty_baud_combo, self.rtty_reverse_checkbox):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
@@ -820,6 +901,7 @@ class MainWindow(QtWidgets.QMainWindow):
         selected = self.digimode_combo.currentData()
         self.psk31_group_widget.setVisible(selected == "psk31")
         self.rtty_group_widget.setVisible(selected == "rtty")
+        self.meshtastic_group_widget.setVisible(selected == "meshtastic")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -888,6 +970,13 @@ class MainWindow(QtWidgets.QMainWindow):
         has_frequency = device_cls.frequency_range_hz != (0.0, 0.0)
         has_audio_tuning = device_cls.audio_tuning_range_hz is not None
         self.freq_spin.setVisible(has_frequency)
+        # LoRa needs a real RF front end -- a sound card can't carry it.
+        lora_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshtastic"))
+        lora_item.setEnabled(LORA_AVAILABLE and has_frequency)
+        if LORA_AVAILABLE and not has_frequency:
+            lora_item.setToolTip("LoRa needs an RF device, not a soundcard")
+            if self.digimode_combo.currentData() == "meshtastic":
+                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
         self.audio_tune_label.setVisible(has_audio_tuning)
         self.audio_tune_spin.setVisible(has_audio_tuning)
         self.fine_slider.setVisible(has_frequency or has_audio_tuning)
@@ -1023,6 +1112,8 @@ class MainWindow(QtWidgets.QMainWindow):
             rtty_shift_hz=float(self.rtty_shift_combo.currentData()),
             rtty_baud_rate=float(self.rtty_baud_combo.currentData()),
             rtty_reverse=self.rtty_reverse_checkbox.isChecked(),
+            on_meshtastic_frame=self._meshtastic_state.on_frame,
+            meshtastic_preset_index=self._meshtastic_preset_index(),
         )
 
     def _sync_waterfall(self):
@@ -1306,6 +1397,99 @@ class MainWindow(QtWidgets.QMainWindow):
         """Structural mirror of _on_psk31_char() -- see its own docstring."""
         self._rtty_state.on_char(char)
 
+    # --- Meshtastic -------------------------------------------------------
+
+    def _meshtastic_preset_index(self):
+        idx = self.meshtastic_preset_combo.currentData()
+        return idx if idx is not None and idx >= 0 else 0
+
+    def _meshtastic_preset(self):
+        return config.MESHTASTIC_PRESETS[self._meshtastic_preset_index()]
+
+    def _update_meshtastic_regulatory_label(self):
+        # Permanent while the mode is showing, not a one-time notice -- the 868 MHz
+        # certification risk stays visible in actual use (see the LoRa mesh plan).
+        preset = self._meshtastic_preset()
+        colour = "#1f6fb2" if preset.ham_mode_required else "#b9770e"
+        self.meshtastic_regulatory_label.setText(
+            f"<b>{preset.frequency_hz / 1e6:.3f} MHz, SF{preset.spreading_factor}, "
+            f"{preset.bandwidth_hz / 1e3:g} kHz</b> -- {preset.regulatory_label}")
+        self.meshtastic_regulatory_label.setStyleSheet(f"color: {colour};")
+
+    def _apply_meshtastic_channels(self):
+        """Push the channel name/PSK fields into the traffic state. An invalid
+        PSK keeps the previous key and is flagged in the signal label."""
+        if not LORA_AVAILABLE:
+            return
+        name = self.meshtastic_channel_edit.text().strip() or meshtastic_codec.DEFAULT_CHANNEL_NAME
+        try:
+            psk = meshtastic_codec.parse_psk(self.meshtastic_psk_edit.text())
+        except ValueError as e:
+            self._meshtastic_psk_error = str(e)
+            return
+        self._meshtastic_psk_error = None
+        channels = [(name, psk)]
+        if self._meshtastic_preset().ham_mode_required and psk:
+            channels.insert(0, (name, b""))  # amateur band: unencrypted first
+        self._meshtastic_state.set_channels(channels)
+
+    def _on_meshtastic_channel_changed(self, _text=None):
+        self._apply_meshtastic_channels()
+        self._update_meshtastic_signal_label()
+
+    def _on_meshtastic_preset_changed(self, idx):
+        self._update_meshtastic_regulatory_label()
+        self._apply_meshtastic_channels()
+        if self.tb is not None and self.tb.active_digimode == "meshtastic":
+            self._rebuild_for_digimode("meshtastic", force=True)  # decoder + carrier are per preset
+
+    def _on_meshtastic_clear_clicked(self):
+        self._meshtastic_state.clear()
+        self._render_meshtastic_table()
+
+    def _update_meshtastic_signal_label(self):
+        if self._meshtastic_psk_error:
+            self.meshtastic_signal_label.setText(
+                f"Invalid PSK ({self._meshtastic_psk_error}) -- still using the previous key.")
+            self.meshtastic_signal_label.setStyleSheet("color: #c0392b;")
+            return
+        self.meshtastic_signal_label.setStyleSheet("")
+        if self.tb is None:
+            self.meshtastic_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "meshtastic":
+            self.meshtastic_signal_label.setText("Not listening.")
+            return
+        frames = self.tb.meshtastic_deframer.frames_decoded
+        if frames > self._meshtastic_last_frames:
+            self._meshtastic_last_frames = frames
+            self._meshtastic_last_activity_time = time.time()
+        freq = (self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6
+        recent = self._meshtastic_last_activity_time > 0 and time.time() - self._meshtastic_last_activity_time < 10.0
+        state = "Frame received" if recent else "Listening"
+        self.meshtastic_signal_label.setText(f"{state} on {freq:.3f} MHz -- {frames} frame(s) decoded since connecting.")
+
+    def _render_meshtastic_table(self):
+        version, rows = self._meshtastic_state.get_snapshot()
+        self._meshtastic_rendered_version = version
+        table = self.meshtastic_table
+        scrollbar = table.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            stamp = time.strftime("%H:%M:%S", time.localtime(row["time"]))
+            if "from" in row:
+                to = "broadcast" if row["to"] == meshtastic_codec.BROADCAST_ADDR else meshtastic_codec.node_name(row["to"])
+                cells = [stamp, meshtastic_codec.node_name(row["from"]), to, row["kind"],
+                         f"{row['hop_limit']}/{row['hop_start']}", row["text"]]
+            else:
+                cells = [stamp, "", "", row["kind"], "", f"{row['raw_len']} B"]
+            for c, text in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+        table.resizeColumnsToContents()
+        if at_bottom:
+            table.scrollToBottom()
+
     def _on_digimode_changed(self, idx):
         """digimode_combo's own change handler -- only meaningfully fires
         while the Digimodes tab is already active (the combo is hidden/
@@ -1350,6 +1534,9 @@ class MainWindow(QtWidgets.QMainWindow):
         __init__'s own comment), it just never gets NEW characters."""
         self._update_psk31_signal_label()
         self._update_rtty_signal_label()
+        self._update_meshtastic_signal_label()
+        if self._meshtastic_state.version != self._meshtastic_rendered_version:
+            self._render_meshtastic_table()
         # Independent of self.tb's connection state (unlike the AFC step
         # below) -- each transcript lives on MainWindow and should keep
         # showing whatever was already received even across a rebuild,
@@ -1994,7 +2181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb.start()
         self.status_label.setText(f"Switched RX buffer size to {new_buffer_size}.")
 
-    def _rebuild_for_digimode(self, new_digimode):
+    def _rebuild_for_digimode(self, new_digimode, force=False):
         """Rebuilds self.tb with a different active_digimode -- see
         AdvancedRxFlowgraph's own Digimodes intro comment for why a live
         runtime toggle isn't possible here (a GNU Radio block with a
@@ -2012,11 +2199,20 @@ class MainWindow(QtWidgets.QMainWindow):
         continuously)."""
         old_digimode = self._active_digimode
         self._active_digimode = new_digimode
-        if self.tb is None or new_digimode == self.tb.active_digimode:
+        if self.tb is None or (new_digimode == self.tb.active_digimode and not force):
             return
         self._autotune_cancel()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         freq = self.tb.nominal_freq_hz
+        # Meshtastic presets retune the receiver to the preset's carrier; the
+        # previous frequency comes back when leaving the mode again.
+        if new_digimode == "meshtastic":
+            if self.tb.active_digimode != "meshtastic":
+                self._freq_before_lora = freq
+            freq = self._meshtastic_preset().frequency_hz
+        elif self.tb.active_digimode == "meshtastic" and self._freq_before_lora is not None:
+            freq = self._freq_before_lora
+            self._freq_before_lora = None
         fine = self.tb.fine_offset_hz
         demod_mode = self.demod_combo.currentData()
         nf_gain = self.nf_gain_slider.value() / 100.0
@@ -2052,8 +2248,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._psk31_last_activity_time = 0.0
         self._rtty_last_chars_decoded = 0
         self._rtty_last_activity_time = 0.0
+        self._meshtastic_last_frames = 0
+        self._meshtastic_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb
+        if abs(self.freq_spin.value() - freq / 1e6) > 1e-9:
+            self.freq_spin.blockSignals(True)  # the new flowgraph was already built at `freq`
+            self.freq_spin.setValue(freq / 1e6)
+            self.freq_spin.blockSignals(False)
         self._sync_waterfall()
         self.tb.start()
 

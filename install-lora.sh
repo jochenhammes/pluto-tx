@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Optional, separate installer for LoRa CSS PHY support (pluto_tx's/
-# pluto_advanced_rx's future "LoRa Mesh" mode, see
-# /home/hammesj/.claude/plans/swirling-waddling-noodle.md for the full
-# plan). Kept apart from install.sh on purpose: install.sh is pure apt, no
-# source builds, by design -- gr-lora_sdr (https://github.com/tapparelj/
+# Optional, separate installer for LoRa CSS PHY support (the Meshtastic
+# digimode of pluto_tx / pluto_advanced_rx). Kept apart from install.sh on
+# purpose: install.sh is pure apt, no source builds, by design -- gr-lora_sdr (https://github.com/tapparelj/
 # gr-lora_sdr) isn't on apt/PyPI and needs a real cmake/C++ build. LoRa is
 # fully optional: pluto_tx/pluto_advanced_rx work fine without ever running
-# this script (the "LoRa Mesh" mode entry just shows greyed-out with an
-# explanatory tooltip once it exists).
+# this script (the Meshtastic entry just shows greyed-out with an
+# explanatory tooltip).
 #
 # Builds gr-lora_sdr to a LOCAL prefix ($HOME/.local) -- no sudo needed for
 # the actual gr-lora_sdr build/install, only for the handful of apt
@@ -182,9 +180,17 @@ echo "Done -- pluto-tx, pluto-advanced-rx and pluto-cli now find gr-lora_sdr aut
 
 echo
 echo "== Done =="
-echo "Once the 'LoRa Mesh' mode exists in pluto_tx/pluto_advanced_rx (see"
-echo "the LoRa mesh plan), it should be selectable instead of greyed out"
-echo "after this script completes successfully."
+echo "The Meshtastic (LoRa) entry in both apps' Digimode combo is now selectable"
+echo "-- as long as the Python packages 'meshtastic' and 'cryptography' are"
+echo "also installed (the packet layer, pure Python, from PyPI):"
+if python3 -c "import meshtastic, cryptography" 2>/dev/null; then
+    echo "    found -- nothing more to do."
+else
+    echo "    NOT found. Install them with:"
+    echo "        pip install --user meshtastic cryptography"
+    echo "    (on a PEP 668 system, i.e. 'externally-managed-environment' error, add"
+    echo "     --break-system-packages: it still only writes to ~/.local, but is your call)"
+fi
 echo
 echo "If you run either app some OTHER way (not via these launchers), set"
 echo "this in your shell first:"

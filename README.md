@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, Meshtastic/LoRa) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -27,7 +27,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM, SSB (USB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR, MeshCore als Platzhalter) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
@@ -72,6 +72,20 @@ braucht C++/CMake-Build, [gr-m17](https://github.com/M17-Project/gr-m17)).
 Ohne dieses Skript ist der M17-Moduseintrag in beiden Apps ausgegraut,
 der Rest läuft normal. Baut `gr-m17` (gepinnter Commit) nach
 `$HOME/.local`, regeneriert die Starter mit passendem `LD_LIBRARY_PATH`.
+
+### Optional: Meshtastic (LoRa)
+
+```
+./install-lora.sh
+```
+
+Baut [`gr-lora_sdr`](https://github.com/tapparelj/gr-lora_sdr) (GPL-3.0,
+gepinnter Commit) nach `$HOME/.local` und regeneriert die Starter. Die
+Protokollschicht braucht zusätzlich die pip-Pakete `meshtastic` und
+`cryptography` (`pip install --user --break-system-packages meshtastic
+cryptography` bei PEP-668-Systemen). Ohne das ist der
+Meshtastic-Eintrag im Digimode-Kombo beider Apps ausgegraut, der Rest
+läuft normal.
 
 ### FreeDV braucht kein separates Skript
 
@@ -135,7 +149,7 @@ Ziel) direkt in der GUI einstellbar.
 Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
 gewählten primären Empfangsmodus (man kann z.B. FM hören und
 gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
-aber nur einer der beiden Digimodes (PSK31 **oder** RTTY) kann
+aber nur einer der Digimodes (PSK31, RTTY **oder** Meshtastic) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
@@ -143,6 +157,27 @@ Digimodes-Reiter umschaltbar.
 im Digimodes-Reiter. Baudrate (45.45/50/75/100) und Shift
 (170/425/850Hz) frei einstellbar, inkl. Normal/Reverse-Umschalter für
 Gegenstationen mit vertauschter Ton-Zuordnung.
+
+**Meshtastic (LoRa).** Sendet und empfängt echte Meshtastic-Pakete
+(LongFast, SF11/250 kHz) im Digimodes-Reiter beider Apps — bit-genau
+gegen einen echten Heltec V3 verifiziert (868 MHz, beide Richtungen).
+`pluto-tx` sendet eine Textnachricht als Broadcast auf dem Standardkanal
+(Kanalname/PSK, Hop-Limit und Node-ID einstellbar, PTT sendet genau ein
+Paket und löst danach selbst aus); `pluto-advanced-rx` zeigt jedes
+empfangene Paket in einer Tabelle (Absender, Ziel, Typ, Hops, Text —
+Pakete anderer Kanäle als "other channel"). Nur ein Digimode gleichzeitig
+(wie bei PSK31/RTTY), und nur mit RF-Gerät (Pluto/HackRF/RTL-SDR),
+nicht über Soundkarte. MeshCore steht als deaktivierter Platzhalter im
+Preset-Kombo (Protokollschicht noch nicht implementiert).
+**Rechtlicher Hinweis, im Programm bei jedem Preset sichtbar:**
+*433,5 MHz* liegt im deutschen 70-cm-Amateurfunkband — dort greift die
+Eigenbau-Ausnahme, es gilt aber Ham Mode (Rufzeichen Pflicht, keine
+Verschlüsselung; die App erzwingt beides). *869,525 MHz* ist reines
+ISM/SRD-Band ohne Amateurfunk-Sonderrecht: der Betrieb unzertifizierter
+SDR-Hardware ist dort ein eigenes, bewusst zu tragendes Risiko; die App
+erzwingt wenigstens die 10 % Duty-Cycle pro Stunde (Sendungen werden
+sonst abgelehnt). Zum Testen `--hop-limit 0` und geringe Leistung
+verwenden, kein Rufzeichen in Text auf dem öffentlichen 868-MHz-Kanal.
 
 **Waterfall Writer.** Sendet eingegebenen Text so, dass er beim
 Empfänger direkt im Wasserfall/Spektrum als lesbares Bild erscheint —
@@ -214,19 +249,22 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
 ## Struktur
 
 ```
-install.sh / install-m17.sh / install-rade.sh
+install.sh / install-m17.sh / install-rade.sh / install-lora.sh
 pluto_tx/                 # Sende-App
 ├── config.py                # geräteunabhängige Konstanten
 ├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard)
 ├── safety.py                 # PlutoSafety: rohes python3-libiio, unabhängig von GNU Radio
 ├── flowgraph.py               # PlutoTxFlowgraph: die gesamte Signalkette
 ├── dynamics.py                # Kompressor/Limiter
+├── lora.py / lora_airtime.py    # LoRa-PHY (gr-lora_sdr), Airtime-Formel + Duty-Cycle-Begrenzer
+├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
 ├── gui.py / app.py
 └── da2jh-test.wav              # Standard-Testaufnahme
 pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
 ├── waterfall_widget.py         # eigenes pyqtgraph-Wasserfall-Widget
 └── ...
+tests/                     # Unit-/Loopback-Tests: python3 -m unittest discover tests
 pluto_cli/                 # headless CLI, importiert die beiden Apps oben, siehe pluto_cli/README.md
 docs/screenshots/          # Screenshots für dieses README
 backlog/                   # geparkte/archivierte Arbeit (Entwicklungshistorie, nicht aktiv genutzte Module)
@@ -245,6 +283,12 @@ einstellbare Floor/Ceiling-Slider. RX-Bandbreiten-Presets bis 10 MHz
 
 ## Bekannte Einschränkungen
 
+- **Meshtastic ist ein Basis-Digimode, kein vollwertiger Mesh-Knoten**:
+  gesendet wird eine Textnachricht als Broadcast (kein NodeInfo/Position,
+  keine Empfangsbestätigungen, kein Weiterleiten fremder Pakete), nur der
+  Standard-LongFast-Preset (SF11/250 kHz), nur ein Kanal gleichzeitig.
+  Bit-genau verifiziert ist 868 MHz gegen einen echten Heltec V3; 433 MHz
+  (Ham Mode) wurde bisher nur im Selbst-Loopback getestet.
 - **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf
   (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere
   Unterbrechung. Audiodatei loopt unabhängig von PTT weiter, Position

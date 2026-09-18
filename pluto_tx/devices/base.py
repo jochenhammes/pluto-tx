@@ -97,6 +97,13 @@ class TxDevice(abc.ABC):
         apart."""
         return cls.frequency_range_hz == (0.0, 0.0)
 
+    def set_rf_bandwidth(self, hz: float):
+        """Change the analog TX bandwidth at runtime (wideband modes like
+        LoRa need more than a device's narrowband default). No-op unless a
+        backend has such a control -- concrete default so callers need no
+        hasattr() check."""
+        pass
+
     def set_frequency_correction(self, hz: float):
         """No-op unless supports_frequency_correction=True (see HackRFDevice
         for the one backend that currently overrides this) -- concrete

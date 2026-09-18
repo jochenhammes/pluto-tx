@@ -17,6 +17,7 @@ audio rate -> complex resampler up to TX rate, not real-resample-then-Hilbert.
 import math
 import os
 import sys
+import time
 import wave
 
 from gnuradio import gr, blocks, filter, analog, qtgui, digital
@@ -32,6 +33,19 @@ from . import filebroadcast
 from .filebroadcast_source import FileBroadcastSource
 from . import psk31
 from . import rtty
+from . import lora_airtime
+
+# LoRa/Meshtastic is optional: gr-lora_sdr is a from-source build (see
+# install-lora.sh) and the protocol layer needs the `meshtastic` +
+# `cryptography` pip packages. Same posture as M17_AVAILABLE above -- the app
+# stays fully usable without them, the GUI greys the mode out.
+try:
+    from . import meshtastic_codec
+    from .lora import LORA_AVAILABLE, LoraTxEncoder, lora_resampler_taps
+except ImportError:
+    meshtastic_codec = None
+    LoraTxEncoder = None
+    LORA_AVAILABLE = False
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
 # install-m17.sh), not something every pluto_tx user necessarily has. The
@@ -97,6 +111,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_PSK31 = 7
     MODE_BASEBAND = 8
     MODE_RTTY = 9
+    MODE_MESHTASTIC = 10
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -108,7 +123,10 @@ class PlutoTxFlowgraph(gr.top_block):
                  psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ,
                  rtty_text="", rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
-                 rtty_reverse=False):
+                 rtty_reverse=False,
+                 meshtastic_preset_index=0, meshtastic_text="", meshtastic_node_id=None,
+                 meshtastic_channel_name=None, meshtastic_psk_b64=config.MESHTASTIC_DEFAULT_PSK_B64,
+                 meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign=""):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -136,6 +154,9 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode == self.MODE_FREEDV and not FREEDV_AVAILABLE:
             mode = self.MODE_FM
         if mode == self.MODE_RADE and not RADE_AVAILABLE:
+            mode = self.MODE_FM
+        if mode == self.MODE_MESHTASTIC and (not LORA_AVAILABLE or device_cls.is_audio_only()):
+            # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
@@ -562,6 +583,45 @@ class PlutoTxFlowgraph(gr.top_block):
         self.rtty_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
         self.connect(self.rtty_audio_gain, self.rtty_audio_sink)
 
+        # --- Meshtastic (LoRa CSS) branch. IQ-native like M17/RADE: gr-lora_sdr's
+        # modulate emits complex baseband directly at 4x the LoRa bandwidth, so
+        # the only thing needed on top is a resampler up to the device rate --
+        # with EXPLICIT low-pass taps (a taps=[] auto-design corrupted the
+        # phase-continuous FSK modes, see backlog/ft8, and a chirp is just as
+        # phase-sensitive). The encoder has no stream input: it stays silent
+        # until key_ptt() pushes a packet, so it is always built (when
+        # available) and just drains into a null sink while another mode is
+        # active. PHY parameters come from the first Meshtastic preset; every
+        # preset in config.MESHTASTIC_PRESETS shares SF/BW/CR (only the
+        # frequency differs), asserted by the tests.
+        self.meshtastic_preset_index = int(meshtastic_preset_index)
+        self.meshtastic_text = meshtastic_text
+        if meshtastic_node_id is None and LORA_AVAILABLE:
+            meshtastic_node_id = meshtastic_codec.random_node_id()
+        self.meshtastic_node_id = meshtastic_node_id
+        self.meshtastic_channel_name = meshtastic_channel_name
+        self.meshtastic_psk_b64 = meshtastic_psk_b64
+        self.meshtastic_hop_limit = int(meshtastic_hop_limit)
+        self.meshtastic_callsign = meshtastic_callsign
+        self.meshtastic_hold_s = 0.0  # RF hold of the frame currently/last keyed (airtime + tail)
+        self.meshtastic_last_airtime_s = 0.0
+        self._meshtastic_pending = None  # (packet, airtime_s, preset) prepared by prepare_meshtastic_tx()
+        self._meshtastic_busy_until = 0.0  # monotonic; the previous frame is still draining until then
+        self._meshtastic_duty = lora_airtime.DutyCycleLimiter(None)
+        self._lora_rf_bandwidth_active = False
+        if LORA_AVAILABLE:
+            lp = config.MESHTASTIC_PRESETS[0]
+            lora_bw = int(lp.bandwidth_hz)
+            self.lora_encoder = LoraTxEncoder(lp.spreading_factor, lora_bw, lora_airtime.cr_index(lp.coding_rate))
+            lora_fs = int(self.lora_encoder.samp_rate)
+            g_lora = math.gcd(quad_rate, lora_fs)
+            lora_interp, lora_decim = quad_rate // g_lora, lora_fs // g_lora
+            self._lora_tx_taps = lora_resampler_taps(lora_bw, lora_interp, lora_fs * lora_interp)
+            self.lora_tx_resampler = filter.rational_resampler_ccf(
+                interpolation=lora_interp, decimation=lora_decim, taps=self._lora_tx_taps,
+            )
+            self.connect(self.lora_encoder, self.lora_tx_resampler)
+
         # --- File Broadcast branch (repetitive file-broadcast mode, 23cm
         # broadband GFSK -- see pluto_tx/filebroadcast.py and the plan).
         # IQ-native like M17/RADE (gfsk_mod produces complex baseband
@@ -733,6 +793,8 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
         self._null_sink_psk31 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see PSK31 branch above
         self._null_sink_rtty = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see RTTY branch above
+        if LORA_AVAILABLE:
+            self._null_sink_lora = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
 
@@ -847,6 +909,8 @@ class PlutoTxFlowgraph(gr.top_block):
         # the comment on prepare_for_start() above, but the app starts
         # unkeyed). See key_ptt()/unkey_ptt() for the PTT<->device-safety
         # hard tie.
+        if self.mode == self.MODE_MESHTASTIC:
+            self._apply_mode_rf_settings(self.mode)
         self.device.post_unkey()
 
     def _build_file_source(self, wav_path):
@@ -897,6 +961,8 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
         producers[self.MODE_PSK31] = self.psk31_ssb_resampler  # always available, see its branch above
         producers[self.MODE_RTTY] = self.rtty_ssb_resampler  # always available, see its branch above
+        if LORA_AVAILABLE:
+            producers[self.MODE_MESHTASTIC] = self.lora_tx_resampler
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         return producers
@@ -916,6 +982,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_psk31
         if producer is self.rtty_ssb_resampler:
             return self._null_sink_rtty
+        if LORA_AVAILABLE and producer is self.lora_tx_resampler:
+            return self._null_sink_lora
         if producer is self.filebroadcast_tx_resampler:
             return self._null_sink_filebroadcast
         if producer is self.baseband_mod:
@@ -945,15 +1013,125 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
 
+        self._apply_mode_rf_settings(mode)
+
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
-                    self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND):
-            return  # all eight bypass the NF filter/dynamics chain entirely, nothing to retap
+                    self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
+                    self.MODE_MESHTASTIC):
+            return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
         preset = "SSB" if mode == self.MODE_SSB else "FM"
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[preset]
         taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter.set_taps(taps)
+
+    # --- Meshtastic ----------------------------------------------------
+
+    @property
+    def meshtastic_preset(self):
+        return config.MESHTASTIC_PRESETS[self.meshtastic_preset_index]
+
+    def _apply_mode_rf_settings(self, mode):
+        """Per-mode RF front-end settings the generic wiring doesn't cover:
+        while a LoRa preset is active the device's analog TX bandwidth must
+        cover the whole +-BW/2 chirp (the Pluto default of 200 kHz would clip
+        LongFast's 250 kHz edges) and the carrier goes to the preset's
+        frequency; leaving the mode restores the device default."""
+        if mode == self.MODE_MESHTASTIC:
+            preset = self.meshtastic_preset
+            default_bw = self.device.default_bandwidth_hz or 0
+            self.device.set_rf_bandwidth(max(default_bw, preset.bandwidth_hz * config.LORA_TX_RF_BANDWIDTH_MARGIN))
+            self._lora_rf_bandwidth_active = True
+            self.set_frequency(preset.frequency_hz)
+        elif self._lora_rf_bandwidth_active:
+            if self.device.default_bandwidth_hz:
+                self.device.set_rf_bandwidth(self.device.default_bandwidth_hz)
+            self._lora_rf_bandwidth_active = False
+
+    def set_meshtastic_preset(self, index: int):
+        self.meshtastic_preset_index = int(index)
+        self._meshtastic_pending = None
+        if self.mode == self.MODE_MESHTASTIC:
+            self.set_frequency(self.meshtastic_preset.frequency_hz)
+
+    def set_meshtastic_text(self, text: str):
+        self.meshtastic_text = text
+        self._meshtastic_pending = None
+
+    def set_meshtastic_node_id(self, node_id: int):
+        self.meshtastic_node_id = int(node_id)
+        self._meshtastic_pending = None
+
+    def set_meshtastic_channel(self, channel_name, psk_b64: str):
+        """channel_name None = the default "LongFast" channel name. psk_b64 is
+        parsed at prepare time so a half-typed key never raises here."""
+        self.meshtastic_channel_name = channel_name
+        self.meshtastic_psk_b64 = psk_b64
+        self._meshtastic_pending = None
+
+    def set_meshtastic_hop_limit(self, hop_limit: int):
+        self.meshtastic_hop_limit = max(0, min(config.MESHTASTIC_MAX_HOP_LIMIT, int(hop_limit)))
+        self._meshtastic_pending = None
+
+    def set_meshtastic_callsign(self, callsign: str):
+        self.meshtastic_callsign = callsign.strip().upper()
+        self._meshtastic_pending = None
+
+    def meshtastic_duty_status(self, now=None):
+        """(used_s, budget_s) of the current preset's rolling duty-cycle window;
+        budget_s is 0 when the preset has no limit."""
+        now = time.monotonic() if now is None else now
+        self._meshtastic_duty.limit = self.meshtastic_preset.duty_cycle_limit
+        return self._meshtastic_duty.used_s(now), self._meshtastic_duty.budget_s()
+
+    def prepare_meshtastic_tx(self, now=None):
+        """Build the over-the-air packet for the current settings and run every
+        pre-flight check WITHOUT touching RF. Returns (ok, message, info):
+        info has "packet", "airtime_s" and "preset" when ok. Checks: text set
+        and within the byte limit, valid PSK, Ham-Mode rules on presets that
+        require them (callsign mandatory and appended to the text, encryption
+        forced off), previous frame no longer draining, and the preset's
+        duty-cycle budget. key_ptt() calls this itself when nothing is
+        pending; the GUI calls it first so a refusal never reaches the key."""
+        now = time.monotonic() if now is None else now
+        preset = self.meshtastic_preset
+        text = self.meshtastic_text.strip()
+        if not text:
+            return False, "Enter a message first.", None
+        if now < self._meshtastic_busy_until:
+            return False, "The previous frame is still being sent.", None
+        callsign = self.meshtastic_callsign.strip().upper()
+        channel_name = self.meshtastic_channel_name or meshtastic_codec.DEFAULT_CHANNEL_NAME
+        try:
+            psk = meshtastic_codec.parse_psk(self.meshtastic_psk_b64)
+        except ValueError as e:
+            return False, f"Invalid PSK: {e}", None
+        if preset.ham_mode_required:
+            if not callsign:
+                return False, f"{preset.name}: Ham Mode needs your callsign.", None
+            psk = b""  # amateur bands: no encryption
+            if callsign not in text.upper():
+                text = f"{text} [{callsign}]"
+        if len(text.encode("utf-8")) > config.MESHTASTIC_TEXT_MAX_BYTES:
+            return False, f"Text is longer than {config.MESHTASTIC_TEXT_MAX_BYTES} bytes.", None
+        packet = meshtastic_codec.build_text_packet(
+            text, self.meshtastic_node_id, channel_name=channel_name, psk=psk, hop_limit=self.meshtastic_hop_limit,
+        )
+        airtime_s = lora_airtime.lora_airtime_s(
+            len(packet), preset.spreading_factor, preset.bandwidth_hz, lora_airtime.cr_index(preset.coding_rate),
+            config.MESHTASTIC_PREAMBLE_LEN,
+        )
+        self._meshtastic_duty.limit = preset.duty_cycle_limit
+        ok, wait_s = self._meshtastic_duty.check(airtime_s, now)
+        if not ok:
+            if wait_s == float("inf"):
+                return False, "This frame alone exceeds the duty-cycle budget.", None
+            return False, (f"Duty-cycle limit ({preset.duty_cycle_limit:.0%} per hour) reached -- "
+                           f"next frame possible in {wait_s / 60:.1f} min."), None
+        info = {"packet": packet, "airtime_s": airtime_s, "preset": preset, "text": text}
+        self._meshtastic_pending = (packet, airtime_s, preset)
+        return True, f"{len(packet)} B, {airtime_s:.2f} s airtime", info
 
     def set_baseband_deviation(self, hz: float):
         """Retune baseband_mod's FM sensitivity in place -- mirrors
@@ -1231,6 +1409,10 @@ class PlutoTxFlowgraph(gr.top_block):
         way."""
         self._m17_ending = False
         self._rade_ending = False
+        if self.mode == self.MODE_MESHTASTIC and self._meshtastic_pending is None:
+            ok, message, _info = self.prepare_meshtastic_tx()
+            if not ok:
+                raise ValueError(message)  # refused before any RF action
         if self.mode == self.MODE_RADE and self.device.is_audio_only():
             self.ptt_mute.set_k(1.0)
             self.tx_gain.set_k(1.0 + 0j)
@@ -1322,6 +1504,15 @@ class PlutoTxFlowgraph(gr.top_block):
         for stage_name, value in self._secondary_power.items():
             if stage_name in device_stage_names:
                 self.device.set_power(stage_name, value)
+        if self.mode == self.MODE_MESHTASTIC:
+            packet, airtime_s, _preset = self._meshtastic_pending
+            self._meshtastic_pending = None
+            now = time.monotonic()
+            self.meshtastic_last_airtime_s = airtime_s
+            self.meshtastic_hold_s = airtime_s + config.MESHTASTIC_TX_TAIL_S
+            self._meshtastic_busy_until = now + self.meshtastic_hold_s
+            self._meshtastic_duty.record(airtime_s, now)
+            self.lora_encoder.send_payload_bytes(packet)
         self._keyed = True
 
     def unkey_ptt(self):

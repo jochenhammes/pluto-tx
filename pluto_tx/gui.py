@@ -6,6 +6,7 @@ against Qt5, and mixing two Qt runtimes in one process is a crash risk.
 import os
 import signal
 import sys
+import time
 
 from PyQt5 import QtCore, QtWidgets, sip
 
@@ -15,7 +16,11 @@ from . import devices
 from . import digitext
 from . import filebroadcast
 from .devices import pluto as pluto_device
-from .flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, _default_wav_path
+from .flowgraph import (
+    PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, _default_wav_path,
+)
+if LORA_AVAILABLE:
+    from . import meshtastic_codec
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 
 
@@ -30,7 +35,8 @@ class MainWindow(QtWidgets.QMainWindow):
                  psk31_text="", psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ,
                  rtty_text="", rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
-                 rtty_reverse=False):
+                 rtty_reverse=False,
+                 meshtastic_preset_index=0, meshtastic_text="", meshtastic_callsign=""):
         """Builds the window in a disconnected/default state using the given
         initial settings (mirrors PlutoTxFlowgraph's own constructor
         defaults), then immediately attempts one real connection via
@@ -61,7 +67,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # started directly in File Broadcast or a Digimodes-tab mode.
         self._last_audio_mode = (
             mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
-                                  PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY)
+                                  PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
+                                  PlutoTxFlowgraph.MODE_MESHTASTIC)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -74,6 +81,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # Same per-press staleness guard, for RTTY's own auto-unkey timers
         # (see _schedule_rtty_auto_unkey()).
         self._rtty_ptt_epoch = 0
+        # Same per-press staleness guard for Meshtastic's one-shot frame timers.
+        self._meshtastic_ptt_epoch = 0
+        # Carrier frequency (MHz) to restore when leaving Meshtastic mode, whose
+        # presets retune the device to 433.5/869.525 MHz.
+        self._freq_before_lora = None
+        self._meshtastic_node_id = meshtastic_codec.random_node_id() if LORA_AVAILABLE else 0
         self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
         self._audio_device = ""  # carried across reconnects; updated when source_combo picks a different mic
@@ -457,6 +470,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
         self.digimode_combo.addItem("RTTY", PlutoTxFlowgraph.MODE_RTTY)
+        self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
+        if not LORA_AVAILABLE:
+            lora_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHTASTIC))
+            lora_item.setEnabled(False)
+            lora_item.setToolTip("gr-lora_sdr / the meshtastic package is not installed -- see install-lora.sh / README")
         # Sync to the flowgraph's actual mode BEFORE wiring the change
         # signal, same reasoning/ordering as mode_combo's own identical
         # comment above -- avoids firing _on_digimode_changed() ->
@@ -686,11 +704,117 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(rtty_group)
         self.rtty_group_widget = rtty_group
 
+        # --- Meshtastic (LoRa) controls -- own group widget, same pattern as
+        # rtty_group above. One-shot: PTT builds one real Meshtastic packet from
+        # the fields below, sends it, and auto-unkeys after its airtime.
+        meshtastic_group = QtWidgets.QWidget()
+        meshtastic_group_layout = QtWidgets.QVBoxLayout(meshtastic_group)
+        meshtastic_group_layout.setContentsMargins(0, 0, 0, 0)
+
+        meshtastic_preset_row = QtWidgets.QHBoxLayout()
+        meshtastic_preset_row.addWidget(QtWidgets.QLabel("Preset:"))
+        self.meshtastic_preset_combo = QtWidgets.QComboBox()
+        for i, preset in enumerate(config.MESHTASTIC_PRESETS):
+            self.meshtastic_preset_combo.addItem(preset.name, i)
+        # MeshCore stays a visible but disabled placeholder (no protocol layer yet).
+        for preset in config.MESHCORE_PRESETS:
+            self.meshtastic_preset_combo.addItem(f"{preset.name} (placeholder)", -1)
+            item = self.meshtastic_preset_combo.model().item(self.meshtastic_preset_combo.count() - 1)
+            item.setEnabled(False)
+            item.setToolTip(config.MESHCORE_PLACEHOLDER_TIP)
+        self.meshtastic_preset_combo.setCurrentIndex(
+            max(0, min(int(meshtastic_preset_index), len(config.MESHTASTIC_PRESETS) - 1)))
+        self.meshtastic_preset_combo.currentIndexChanged.connect(self._on_meshtastic_preset_changed)
+        meshtastic_preset_row.addWidget(self.meshtastic_preset_combo)
+        meshtastic_preset_row.addStretch(1)
+        meshtastic_group_layout.addLayout(meshtastic_preset_row)
+
+        self.meshtastic_regulatory_label = QtWidgets.QLabel()
+        self.meshtastic_regulatory_label.setWordWrap(True)
+        meshtastic_group_layout.addWidget(self.meshtastic_regulatory_label)
+
+        meshtastic_text_row = QtWidgets.QHBoxLayout()
+        meshtastic_text_row.addWidget(QtWidgets.QLabel("Text:"))
+        self.meshtastic_text_edit = QtWidgets.QLineEdit(meshtastic_text)
+        self.meshtastic_text_edit.setMaxLength(config.MESHTASTIC_TEXT_MAX_BYTES)
+        self.meshtastic_text_edit.setPlaceholderText("Type a message, then press PTT to send it (broadcast)")
+        self.meshtastic_text_edit.textChanged.connect(self._on_meshtastic_text_changed)
+        self.meshtastic_text_edit.setMinimumWidth(420)
+        self.meshtastic_text_edit.setStyleSheet("font-size: 13pt;")
+        meshtastic_text_row.addWidget(self.meshtastic_text_edit)
+        meshtastic_group_layout.addLayout(meshtastic_text_row)
+
+        meshtastic_settings_row = QtWidgets.QHBoxLayout()
+        meshtastic_settings_row.addWidget(QtWidgets.QLabel("Channel:"))
+        self.meshtastic_channel_edit = QtWidgets.QLineEdit(meshtastic_codec.DEFAULT_CHANNEL_NAME if LORA_AVAILABLE else "LongFast")
+        self.meshtastic_channel_edit.setMaximumWidth(110)
+        self.meshtastic_channel_edit.setToolTip(
+            "Channel name -- only feeds the header's channel-hash byte. The stock channel is \"LongFast\".")
+        self.meshtastic_channel_edit.textChanged.connect(self._on_meshtastic_channel_changed)
+        meshtastic_settings_row.addWidget(self.meshtastic_channel_edit)
+        meshtastic_settings_row.addWidget(QtWidgets.QLabel("PSK:"))
+        self.meshtastic_psk_edit = QtWidgets.QLineEdit(config.MESHTASTIC_DEFAULT_PSK_B64)
+        self.meshtastic_psk_edit.setMaximumWidth(260)
+        self.meshtastic_psk_edit.setToolTip(
+            "Base64 channel key as shown in the Meshtastic apps. \"AQ==\" is the default "
+            "channel key; empty = no encryption. Forced off on Ham-Mode presets (433 MHz).")
+        self.meshtastic_psk_edit.textChanged.connect(self._on_meshtastic_channel_changed)
+        meshtastic_settings_row.addWidget(self.meshtastic_psk_edit)
+        meshtastic_settings_row.addWidget(QtWidgets.QLabel("Hops:"))
+        self.meshtastic_hop_spin = QtWidgets.QSpinBox()
+        self.meshtastic_hop_spin.setRange(0, config.MESHTASTIC_MAX_HOP_LIMIT)
+        self.meshtastic_hop_spin.setValue(config.MESHTASTIC_DEFAULT_HOP_LIMIT)
+        self.meshtastic_hop_spin.setToolTip(
+            "Hop limit: how many times neighbouring nodes may rebroadcast this packet. "
+            "0 = only nodes that hear you directly. Keep it low to not load the mesh.")
+        self.meshtastic_hop_spin.valueChanged.connect(self._on_meshtastic_hop_changed)
+        meshtastic_settings_row.addWidget(self.meshtastic_hop_spin)
+        meshtastic_settings_row.addStretch(1)
+        meshtastic_group_layout.addLayout(meshtastic_settings_row)
+
+        meshtastic_id_row = QtWidgets.QHBoxLayout()
+        meshtastic_id_row.addWidget(QtWidgets.QLabel("Node ID:"))
+        self.meshtastic_node_edit = QtWidgets.QLineEdit(self._format_node_id(self._meshtastic_node_id))
+        self.meshtastic_node_edit.setMaximumWidth(110)
+        self.meshtastic_node_edit.setToolTip(
+            "Your node number on the mesh (8 hex digits). Random per session; "
+            "other nodes list you under this ID.")
+        self.meshtastic_node_edit.editingFinished.connect(self._on_meshtastic_node_edited)
+        meshtastic_id_row.addWidget(self.meshtastic_node_edit)
+        self.meshtastic_node_new_button = QtWidgets.QPushButton("New")
+        self.meshtastic_node_new_button.clicked.connect(self._on_meshtastic_node_new)
+        meshtastic_id_row.addWidget(self.meshtastic_node_new_button)
+        meshtastic_id_row.addWidget(QtWidgets.QLabel("Callsign:"))
+        self.meshtastic_callsign_edit = QtWidgets.QLineEdit(meshtastic_callsign)
+        self.meshtastic_callsign_edit.setMaximumWidth(110)
+        self.meshtastic_callsign_edit.setMaxLength(12)
+        self.meshtastic_callsign_edit.setToolTip(
+            "Required on Ham-Mode presets (433 MHz): appended to every message as the station ID.")
+        self.meshtastic_callsign_edit.textChanged.connect(self._on_meshtastic_callsign_changed)
+        meshtastic_id_row.addWidget(self.meshtastic_callsign_edit)
+        meshtastic_id_row.addStretch(1)
+        meshtastic_group_layout.addLayout(meshtastic_id_row)
+
+        self.meshtastic_info_label = QtWidgets.QLabel()
+        self.meshtastic_info_label.setWordWrap(True)
+        meshtastic_group_layout.addWidget(self.meshtastic_info_label)
+
+        self.meshtastic_sent_log = QtWidgets.QTextEdit()
+        self.meshtastic_sent_log.setReadOnly(True)
+        self.meshtastic_sent_log.setMaximumHeight(120)
+        self.meshtastic_sent_log.setToolTip(
+            "Local echo of what THIS station has sent -- what other nodes send "
+            "appears in pluto_advanced_rx's Meshtastic mode.")
+        meshtastic_group_layout.addWidget(self.meshtastic_sent_log)
+        digimodes_tab_layout.addWidget(meshtastic_group)
+        self.meshtastic_group_widget = meshtastic_group
+
         digimodes_tab_layout.addStretch(1)
         self._update_digitext_estimate()
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
+        self._update_meshtastic_controls_enabled()
 
         # --- File Broadcast rotation list -- lives in the "File-Transfer"
         # tab, same "own tab" convention as Digitext's Digimodes tab.
@@ -1011,6 +1135,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_digitext_controls_enabled()
         self._psk31_connected = enabled
         self._update_psk31_controls_enabled()
+        self._meshtastic_connected = enabled
+        self._update_meshtastic_controls_enabled()
         self._filebroadcast_connected = enabled
         self._update_filebroadcast_controls_enabled()
         self._baseband_connected = enabled
@@ -1090,6 +1216,152 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rtty_shift_combo.setEnabled(connected)
         self.rtty_baud_combo.setEnabled(connected)
         self.rtty_reverse_checkbox.setEnabled(connected)
+
+    def _update_meshtastic_controls_enabled(self):
+        is_mesh_mode = self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC
+        self.meshtastic_group_widget.setVisible(is_mesh_mode)
+        connected = getattr(self, "_meshtastic_connected", True)
+        preset = self._meshtastic_selected_preset()
+        for w in (self.meshtastic_preset_combo, self.meshtastic_text_edit, self.meshtastic_channel_edit,
+                  self.meshtastic_hop_spin, self.meshtastic_node_edit, self.meshtastic_node_new_button,
+                  self.meshtastic_callsign_edit):
+            w.setEnabled(connected)
+        # Ham-Mode presets send unencrypted, so the key field is moot there.
+        self.meshtastic_psk_edit.setEnabled(connected and not preset.ham_mode_required)
+        self._update_meshtastic_regulatory_label()
+
+    @staticmethod
+    def _format_node_id(node_id):
+        return f"!{node_id:08x}"
+
+    def _meshtastic_selected_preset(self):
+        idx = self.meshtastic_preset_combo.currentData()
+        return config.MESHTASTIC_PRESETS[idx if idx is not None and idx >= 0 else 0]
+
+    def _update_meshtastic_regulatory_label(self):
+        # Permanent, per-preset, always visible while the mode is active -- the
+        # 868 MHz certification risk must stay in front of the operator, not
+        # be a one-time notice (see the LoRa mesh plan's regulatory section).
+        preset = self._meshtastic_selected_preset()
+        colour = "#1f6fb2" if preset.ham_mode_required else "#b9770e"
+        self.meshtastic_regulatory_label.setText(
+            f"<b>{preset.frequency_hz / 1e6:.3f} MHz, SF{preset.spreading_factor}, "
+            f"{preset.bandwidth_hz / 1e3:g} kHz</b> -- {preset.regulatory_label}")
+        self.meshtastic_regulatory_label.setStyleSheet(f"color: {colour};")
+
+    def _update_meshtastic_info(self, message=None, error=False):
+        """Info line under the fields: the pre-flight verdict for the CURRENT
+        settings (size/airtime, or why sending is refused) plus the duty-cycle
+        budget used so far."""
+        if self.tb is None:
+            self.meshtastic_info_label.setText("")
+            return
+        if message is None:
+            ok, message, _info = self.tb.prepare_meshtastic_tx()
+            error = not ok and bool(self.meshtastic_text_edit.text().strip())
+            if not ok and not self.meshtastic_text_edit.text().strip():
+                message = ""
+        used_s, budget_s = self.tb.meshtastic_duty_status()
+        duty = f"  |  duty cycle: {used_s:.1f} s of {budget_s:.0f} s per hour" if budget_s else ""
+        self.meshtastic_info_label.setText(f"{message}{duty}" if message else duty.lstrip(" |"))
+        self.meshtastic_info_label.setStyleSheet("color: #c0392b;" if error else "")
+
+    def _on_meshtastic_preset_changed(self, idx):
+        preset = self._meshtastic_selected_preset()
+        if self.tb is not None:
+            self.tb.set_meshtastic_preset(self.meshtastic_preset_combo.currentData())
+            if self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
+                self.freq_spin.setValue(self.tb.nominal_freq_hz / 1e6)
+        self._update_meshtastic_controls_enabled()
+        self._update_meshtastic_info()
+
+    def _on_meshtastic_text_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_meshtastic_text(text)
+        self._update_meshtastic_info()
+
+    def _on_meshtastic_channel_changed(self, _text=None):
+        name = self.meshtastic_channel_edit.text().strip() or None
+        psk = self.meshtastic_psk_edit.text()
+        if self.tb is not None:
+            self.tb.set_meshtastic_channel(name, psk)
+        self._update_meshtastic_info()
+
+    def _on_meshtastic_hop_changed(self, value):
+        if self.tb is not None:
+            self.tb.set_meshtastic_hop_limit(value)
+
+    def _on_meshtastic_callsign_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_meshtastic_callsign(text)
+        self._update_meshtastic_info()
+
+    def _on_meshtastic_node_edited(self):
+        text = self.meshtastic_node_edit.text().strip().lstrip("!")
+        if text.lower().startswith("0x"):
+            text = text[2:]
+        try:
+            node_id = int(text, 16)
+            if not 4 <= node_id < meshtastic_codec.BROADCAST_ADDR:
+                raise ValueError
+        except ValueError:
+            node_id = self._meshtastic_node_id  # reject, keep the previous ID
+        self._meshtastic_node_id = node_id
+        self.meshtastic_node_edit.setText(self._format_node_id(node_id))
+        if self.tb is not None:
+            self.tb.set_meshtastic_node_id(node_id)
+
+    def _on_meshtastic_node_new(self):
+        self._meshtastic_node_id = meshtastic_codec.random_node_id()
+        self.meshtastic_node_edit.setText(self._format_node_id(self._meshtastic_node_id))
+        if self.tb is not None:
+            self.tb.set_meshtastic_node_id(self._meshtastic_node_id)
+
+    def _meshtastic_ptt_allowed(self):
+        """Pre-flight for a Meshtastic PTT press (True outside Meshtastic mode):
+        refuses BEFORE any RF action -- empty text, bad PSK, missing Ham-Mode
+        callsign, previous frame still draining, duty-cycle budget used up."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_MESHTASTIC:
+            return True
+        ok, message, info = self.tb.prepare_meshtastic_tx()
+        self._meshtastic_last_info = info
+        if not ok:
+            self._update_meshtastic_info(message, error=True)
+            self.status_label.setText(f"Not sent: {message}")
+        return ok
+
+    def _log_meshtastic_sent(self):
+        if self._current_mode != PlutoTxFlowgraph.MODE_MESHTASTIC:
+            return
+        info = getattr(self, "_meshtastic_last_info", None)
+        if not info:
+            return
+        self.meshtastic_sent_log.append(
+            f"[{time.strftime('%H:%M:%S')}] {info['preset'].name}: {info['text']}  ({info['airtime_s']:.2f} s)")
+        self._update_meshtastic_info(f"Sending {len(info['packet'])} B, {info['airtime_s']:.2f} s airtime")
+
+    def _schedule_meshtastic_auto_unkey(self):
+        """Structural mirror of _schedule_rtty_auto_unkey(): unkey after the
+        frame's airtime + tail, with a hard watchdog behind it."""
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_MESHTASTIC:
+            return
+        token = self.tb
+        self._meshtastic_ptt_epoch += 1
+        epoch = self._meshtastic_ptt_epoch
+        hold_s = self.tb.meshtastic_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._finish_meshtastic_auto_unkey(token, epoch))
+        QtCore.QTimer.singleShot(
+            int((hold_s + config.MESHTASTIC_TX_WATCHDOG_MARGIN_S) * 1000),
+            lambda: self._finish_meshtastic_auto_unkey(token, epoch),
+        )
+
+    def _finish_meshtastic_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._meshtastic_ptt_epoch or not self.tb.keyed:
+            return
+        self._reset_digitext_ptt_visual()
+        self._release_ptt()
+        # a moment later, once the busy window has closed, refresh the verdict
+        QtCore.QTimer.singleShot(300, self._update_meshtastic_info)
 
     def _update_filebroadcast_controls_enabled(self):
         # No visibility toggle -- lives in its own "File-Transfer" tab
@@ -1231,6 +1503,12 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.mode_combo.findData(mode)
             enabled = available and (is_rf or mode in self._AUDIO_ONLY_CAPABLE_MODES)
             self.mode_combo.model().item(idx).setEnabled(enabled)
+        lora_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHTASTIC))
+        lora_item.setEnabled(LORA_AVAILABLE and is_rf)
+        if LORA_AVAILABLE and not is_rf:
+            lora_item.setToolTip("LoRa needs an RF device -- a 48 kHz soundcard cannot carry it")
+            if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_MESHTASTIC:
+                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
         if not is_rf and self._current_mode not in self._AUDIO_ONLY_CAPABLE_MODES:
             if RADE_AVAILABLE:
                 self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE))
@@ -1319,9 +1597,22 @@ class MainWindow(QtWidgets.QMainWindow):
         from _on_mode_tab_changed() when landing on a tab makes its own
         combo (or File-Transfer's fixed mode) live again without that
         combo's own value having changed."""
+        was_lora = self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC
         self._current_mode = mode
+        is_lora = mode == PlutoTxFlowgraph.MODE_MESHTASTIC
+        if is_lora and not was_lora:
+            self._freq_before_lora = self.freq_spin.value()
         if self.tb is not None:
             self.tb.set_mode(mode)
+            if is_lora:
+                # the preset retuned the device; show the real carrier
+                self.freq_spin.setValue(self.tb.nominal_freq_hz / 1e6)
+            elif was_lora and self._freq_before_lora is not None:
+                self.freq_spin.setValue(self._freq_before_lora)  # tb.set_frequency() via _on_freq_changed
+                self._freq_before_lora = None
+        self._update_meshtastic_controls_enabled()
+        if is_lora:
+            self._update_meshtastic_info()
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
         self._update_rade_controls_enabled()
@@ -1672,6 +1963,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ptt_button.setChecked(False)
             self.ptt_button.blockSignals(False)
             return
+        if checked and not self._meshtastic_ptt_allowed():
+            self._reset_digitext_ptt_visual()
+            return
         if checked:
             self.tb.key_ptt()
             self.ptt_button.setText("PTT (click to stop)")
@@ -1681,12 +1975,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log_psk31_sent()
             self._schedule_rtty_auto_unkey()
             self._log_rtty_sent()
+            self._schedule_meshtastic_auto_unkey()
+            self._log_meshtastic_sent()
         else:
             self.ptt_button.setText("PTT (click to send)")
             self._release_ptt()
 
     def _on_ptt_pressed(self):
         if not self._armed or self.tb is None:
+            return
+        if not self._meshtastic_ptt_allowed():
             return
         self.tb.key_ptt()
         self._set_indicator_on_air()
@@ -1695,6 +1993,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_psk31_sent()
         self._schedule_rtty_auto_unkey()
         self._log_rtty_sent()
+        self._schedule_meshtastic_auto_unkey()
+        self._log_meshtastic_sent()
 
     def _on_ptt_released(self):
         if self.tb is None or not self.tb.keyed:
@@ -2016,6 +2316,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 rtty_shift_hz=float(self.rtty_shift_combo.currentData()),
                 rtty_baud_rate=float(self.rtty_baud_combo.currentData()),
                 rtty_reverse=self.rtty_reverse_checkbox.isChecked(),
+                meshtastic_preset_index=max(0, self.meshtastic_preset_combo.currentData() or 0),
+                meshtastic_text=self.meshtastic_text_edit.text(),
+                meshtastic_node_id=self._meshtastic_node_id if LORA_AVAILABLE else None,
+                meshtastic_channel_name=self.meshtastic_channel_edit.text().strip() or None,
+                meshtastic_psk_b64=self.meshtastic_psk_edit.text(),
+                meshtastic_hop_limit=self.meshtastic_hop_spin.value(),
+                meshtastic_callsign=self.meshtastic_callsign_edit.text().strip().upper(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")
@@ -2042,6 +2349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
         new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
         new_tb.set_rade_eoo_enabled(self.rade_eoo_checkbox.isChecked())
+        if new_tb.mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
+            self.freq_spin.setValue(new_tb.nominal_freq_hz / 1e6)  # the preset's carrier, see __init__
         if self._filebroadcast_entries:
             self._reload_all_filebroadcast_files(new_tb)
         self._wav_path = new_tb.wav_path

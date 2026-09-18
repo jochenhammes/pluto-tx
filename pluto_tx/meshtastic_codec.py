@@ -46,11 +46,13 @@ custom channel PSK. `cryptography.hazmat.primitives.ciphers.algorithms.
 AES` picks AES-128 vs AES-256 automatically from the key length passed
 in, so both are supported by the same code path here -- just pass a
 32-byte psk for a custom AES-256 channel."""
+import base64
+import os
 import struct
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from meshtastic.protobuf import mesh_pb2
+from meshtastic.protobuf import mesh_pb2, portnums_pb2
 
 DEFAULT_CHANNEL_PSK = bytes.fromhex("d4f1bb3a20290759f0bcffabcf4e6901")
 
@@ -144,3 +146,100 @@ def decode_packet(raw: bytes, psk: bytes = DEFAULT_CHANNEL_PSK) -> dict:
         "channel_hash": channel_hash, "next_hop": next_hop, "relay_node": relay_node,
         "data": data,
     }
+
+
+# ---------------------------------------------------------------------------
+# App-level helpers (used by the TX flowgraph, the GUI and the CLI)
+# ---------------------------------------------------------------------------
+def parse_psk(text: str) -> bytes:
+    """Base64 PSK as shown in the official apps -> raw key bytes. "" means no
+    encryption; "AQ==" (one byte 0x01) is the default-channel shorthand and
+    expands to DEFAULT_CHANNEL_PSK. Other one-byte values (0x02..0x0A) are
+    the firmware's "default key, last byte bumped" variants. Only 0, 16 and
+    32 byte keys are valid otherwise. Raises ValueError on anything else."""
+    text = text.strip()
+    if not text:
+        return b""
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except Exception as e:
+        raise ValueError(f"PSK is not valid base64: {e}") from None
+    if len(raw) == 1:
+        if raw[0] == 0:
+            return b""
+        # firmware: shorthand N selects the default key with its last byte
+        # incremented by N-1 (0x01 == the unmodified default key)
+        key = bytearray(DEFAULT_CHANNEL_PSK)
+        key[-1] = (key[-1] + raw[0] - 1) & 0xFF
+        return bytes(key)
+    if len(raw) not in (16, 32):
+        raise ValueError(f"PSK must decode to 1, 16 or 32 bytes, got {len(raw)}")
+    return raw
+
+
+def random_node_id() -> int:
+    """Random valid Meshtastic node number (firmware reserves 0..3 and the
+    broadcast address)."""
+    while True:
+        n = int.from_bytes(os.urandom(4), "little")
+        if 4 <= n < BROADCAST_ADDR:
+            return n
+
+
+def random_packet_id() -> int:
+    return int.from_bytes(os.urandom(4), "little")
+
+
+def build_text_packet(text: str, from_node: int, to: int = BROADCAST_ADDR, channel_name: str = DEFAULT_CHANNEL_NAME,
+                      psk: bytes = DEFAULT_CHANNEL_PSK, hop_limit: int = 3, packet_id=None) -> bytes:
+    """One over-the-air TEXT_MESSAGE_APP packet. The channel hash byte is
+    derived from `channel_name` and `psk`."""
+    data = mesh_pb2.Data()
+    data.portnum = portnums_pb2.PortNum.TEXT_MESSAGE_APP
+    data.payload = text.encode("utf-8")
+    return encode_packet(
+        to=to, from_=from_node, packet_id=random_packet_id() if packet_id is None else packet_id,
+        data=data, channel_hash=channel_hash(channel_name, psk), hop_limit=hop_limit, hop_start=hop_limit, psk=psk,
+    )
+
+
+def summarize_packet(raw: bytes, psk: bytes = DEFAULT_CHANNEL_PSK, channel_name: str = DEFAULT_CHANNEL_NAME) -> dict:
+    """Decode a received frame for display. Never raises: returns a dict with
+    keys from, to, id, hop_limit, hop_start, want_ack, channel_hash,
+    channel_match (header pre-filter vs our channel), kind ("text",
+    "position", "nodeinfo", "telemetry", "other", "undecodable"), text (for
+    "text" only) and raw_len."""
+    out = {"raw_len": len(raw), "kind": "undecodable", "text": ""}
+    if len(raw) < HEADER_LEN:
+        return out
+    to, from_, pid, flags, ch, _nh, relay = _HEADER_STRUCT.unpack(raw[:HEADER_LEN])
+    out.update({
+        "to": to, "from": from_, "id": pid, "hop_limit": flags & 0x07, "hop_start": (flags >> 5) & 0x07,
+        "want_ack": bool(flags & 0x08), "channel_hash": ch, "relay_node": relay,
+        "channel_match": ch == channel_hash(channel_name, psk),
+    })
+    try:
+        pkt = decode_packet(raw, psk=psk)
+    except Exception:
+        return out
+    data = pkt["data"]
+    port = data.portnum
+    if port == portnums_pb2.PortNum.TEXT_MESSAGE_APP:
+        try:
+            out.update(kind="text", text=data.payload.decode("utf-8"))
+        except UnicodeDecodeError:
+            return out
+    elif port == portnums_pb2.PortNum.POSITION_APP:
+        out["kind"] = "position"
+    elif port == portnums_pb2.PortNum.NODEINFO_APP:
+        out["kind"] = "nodeinfo"
+    elif port == portnums_pb2.PortNum.TELEMETRY_APP:
+        out["kind"] = "telemetry"
+    else:
+        out["kind"] = "other"
+    return out
+
+
+def node_name(node: int) -> str:
+    """"!43b59fcc" -- the notation the official apps use for a node number."""
+    return f"!{node:08x}"

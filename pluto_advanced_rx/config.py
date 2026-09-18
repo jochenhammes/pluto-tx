@@ -23,6 +23,13 @@ from pluto_tx.config import (  # noqa: F401 (re-exported)
 # constants above: the RX demod chain (flowgraph.py's Baseband branch) must
 # use the SAME deviation the TX side modulates with, or a default-settings
 # receiver won't correctly capture a default-settings transmission.
+# LoRa/Meshtastic presets + the PHY framing constants the TX chain encodes
+# with -- the RX decoder must use the exact same values, so re-exported
+# rather than duplicated (same reasoning as the M17 constants above).
+from pluto_tx.config import (  # noqa: F401 (re-exported)
+    LORA_PRESETS, MESHTASTIC_PRESETS, MESHCORE_PRESETS, MESHCORE_PLACEHOLDER_TIP,
+    MESHTASTIC_PREAMBLE_LEN, MESHTASTIC_SYNC_SYMBOLS, MESHTASTIC_DEFAULT_PSK_B64,
+)
 from pluto_tx.config import BASEBAND_DEVIATION_HZ  # noqa: F401 (re-exported)
 
 # RX baseband ("quadrature") rate presets -- these double as the waterfall's

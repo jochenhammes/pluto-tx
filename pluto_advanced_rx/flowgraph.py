@@ -39,6 +39,19 @@ from .fft_probe import FftProbe
 from .filebroadcast_deframer import FileBroadcastDeframer
 from .psk31_deframer import PSK31VaricodeDeframer
 from .rtty_deframer import RTTYBaudotDeframer
+from .meshtastic_deframer import MeshtasticDeframer
+from pluto_tx.lora_airtime import cr_index as _lora_cr_index
+
+# LoRa/Meshtastic is optional, same reasoning as M17/RADE above: gr-lora_sdr
+# is a from-source build (install-lora.sh), and the packet layer needs the
+# `meshtastic` + `cryptography` pip packages.
+try:
+    from .lora_rx import LoraRxDecoder, LORA_AVAILABLE
+    from pluto_tx.lora import lora_resampler_taps as _lora_resampler_taps
+    from pluto_tx import meshtastic_codec as _meshtastic_codec  # noqa: F401 (import check)
+except ImportError:
+    LoraRxDecoder = None
+    LORA_AVAILABLE = False
 
 # RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
 # install-rade.sh), not something every user has.
@@ -79,7 +92,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_m17_fields=None, baseband_width_hz=config.BASEBAND_WIDTH_DEFAULT_HZ,
                  on_rtty_char=None, rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
-                 rtty_reverse=False, active_digimode=None, buffer_size=None):
+                 rtty_reverse=False, active_digimode=None, buffer_size=None,
+                 on_meshtastic_frame=None, meshtastic_preset_index=0):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -671,7 +685,42 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.connect(self.rtty_slicer, self.rtty_deframer)
             self.connect(self.if_filter, self.rtty_afc_probe)
 
-        if active_digimode not in (None, "psk31", "rtty"):
+        # --- Meshtastic (LoRa CSS) RX. Taps pluto_source DIRECTLY (like File
+        # Broadcast, not the 50 kHz if_filter output: LongFast is 250 kHz wide),
+        # resamples to 4 x LoRa bandwidth with EXPLICIT taps, then gr-lora_sdr's
+        # decoder emits one message per CRC-verified frame to the deframer.
+        # Constructed only when active (the decoder is heavy, unlike the plain
+        # deframers above); the deframer object always exists so the GUI can
+        # read tb.meshtastic_deframer.frames_decoded regardless.
+        self.meshtastic_preset_index = int(meshtastic_preset_index)
+        self.meshtastic_deframer = MeshtasticDeframer(on_meshtastic_frame or (lambda raw: None))
+        if active_digimode == "meshtastic":
+            if not LORA_AVAILABLE:
+                raise ValueError("Meshtastic needs gr-lora_sdr and the meshtastic package -- see install-lora.sh")
+            if self.device.is_audio_only():
+                raise ValueError("Meshtastic (LoRa) needs an RF device, not a soundcard")
+            lp = config.MESHTASTIC_PRESETS[self.meshtastic_preset_index]
+            lora_bw = int(lp.bandwidth_hz)
+            lora_fs = lora_bw * 4  # LoraRxDecoder's proven oversampling (samp_rate_mult=4)
+            if self.sample_rate < 2 * lora_bw:
+                raise ValueError(
+                    f"RX bandwidth {self.sample_rate / 1e6:g} MS/s is too low for {lp.name} "
+                    f"({lora_bw / 1e3:g} kHz) -- pick at least {2 * lora_bw / 1e6:g} MS/s")
+            g_lora = math.gcd(int(self.sample_rate), lora_fs)
+            lora_interp, lora_decim = lora_fs // g_lora, int(self.sample_rate) // g_lora
+            self.meshtastic_rx_resampler = filter.rational_resampler_ccf(
+                interpolation=lora_interp, decimation=lora_decim,
+                taps=_lora_resampler_taps(lora_bw, float(lora_interp), self.sample_rate * lora_interp),
+            )
+            self.meshtastic_decoder = LoraRxDecoder(
+                lp.spreading_factor, lora_bw, _lora_cr_index(lp.coding_rate),
+                center_freq_hz=self.nominal_freq_hz,
+            )
+            self.connect(self.pluto_source, self.meshtastic_rx_resampler)
+            self.connect(self.meshtastic_rx_resampler, self.meshtastic_decoder)
+            self.msg_connect(self.meshtastic_decoder, "msg", self.meshtastic_deframer, "msg")
+
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the

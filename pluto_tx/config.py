@@ -532,6 +532,36 @@ LORA_PRESETS = (
     ),
 )
 
+# Presets the apps expose as a working Meshtastic digimode (TX + RX). MeshCore
+# stays a visible, disabled placeholder in both apps until its protocol layer
+# exists (no Ham-Mode/encoding/decoding implemented) -- LORA_PRESETS[2].
+MESHTASTIC_PRESETS = LORA_PRESETS[:2]
+MESHCORE_PRESETS = LORA_PRESETS[2:]
+MESHCORE_PLACEHOLDER_TIP = (
+    "MeshCore is a placeholder only: the LoRa PHY parameters are stored, but the "
+    "MeshCore protocol layer is not implemented yet."
+)
+
+# Meshtastic TX. Text payload limit in UTF-8 bytes: the LoRa payload ceiling is
+# 255 B, minus the 16 B mesh header, minus protobuf framing/overhead; 200 is
+# the conservative value the official apps also use.
+MESHTASTIC_TEXT_MAX_BYTES = 200
+# Hop limit for packets we originate (Meshtastic default is 3). Nearby nodes
+# will rebroadcast up to this many hops -- keep it low to not load the mesh.
+MESHTASTIC_DEFAULT_HOP_LIMIT = 3
+MESHTASTIC_MAX_HOP_LIMIT = 7
+# Seconds of RF hold after the computed airtime before the one-shot PTT auto-
+# unkeys: covers the encoder's trailing silence (20 symbols), the delay block
+# (10 symbols) and resampler/sink latency, so the frame's last symbol is out.
+MESHTASTIC_TX_TAIL_S = 0.6
+# Hard watchdog for a hung one-shot TX beyond airtime + tail (seconds).
+MESHTASTIC_TX_WATCHDOG_MARGIN_S = 3.0
+# Meshtastic app-visible default channel PSK shorthand ("AQ==" == 0x01).
+MESHTASTIC_DEFAULT_PSK_B64 = "AQ=="
+# Analog RF bandwidth to request from the TX device while a LoRa preset is
+# active (the Pluto default of 200 kHz would clip the +-125 kHz LongFast edges).
+LORA_TX_RF_BANDWIDTH_MARGIN = 1.2
+
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [

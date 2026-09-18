@@ -105,6 +105,10 @@ class PlutoDevice(TxDevice):
         self.frequency_hz = freq_hz
         self._sink.set_frequency(int(freq_hz))
 
+    def set_rf_bandwidth(self, hz):
+        self.bandwidth_hz = int(hz)
+        self._sink.set_bandwidth(int(hz))
+
     def set_power(self, stage_name, value):
         assert stage_name == "attenuation", f"PlutoDevice has no power stage {stage_name!r}"
         self._sink.set_attenuation(0, _pluto_atten_arg(value))

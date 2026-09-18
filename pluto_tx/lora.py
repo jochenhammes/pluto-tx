@@ -162,8 +162,27 @@ import queue
 import numpy as np
 import pmt
 from gnuradio import gr, blocks
+from gnuradio.filter import firdes
+from gnuradio.fft import window
 
 from . import config
+
+
+def lora_resampler_taps(bw, gain, design_rate):
+    """Explicit low-pass taps for resampling a LoRa signal between the
+    encoder/decoder rate (4 x bw) and a device rate -- used by the TX branch
+    (interpolating up to the device) and the RX branch (down/up to 4 x bw).
+    `design_rate` is the rate the polyphase filter actually runs at
+    (input_rate * interpolation); `gain` = the interpolation factor.
+    Never taps=[] (see backlog/ft8 -- auto-designed taps corrupt phase-
+    continuous signals). firdes' cutoff is the CENTRE of the transition band:
+    flat up to 0.56 x bw (the chirp occupies +-0.5 x bw, plus CFO margin), fully
+    down by 3.2 x bw -- the first image/alias of a 4 x bw stream sits at
+    3.5 x bw."""
+    pass_edge, stop_edge = 0.56 * bw, 3.2 * bw
+    return firdes.low_pass(
+        gain, design_rate, (pass_edge + stop_edge) / 2.0, stop_edge - pass_edge, window.WIN_HAMMING,
+    )
 
 
 def _sync_symbols(sync_word):
