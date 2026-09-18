@@ -1,4 +1,5 @@
 """Shared constants for the PlutoSDR TX app."""
+from dataclasses import dataclass
 
 DEFAULT_URI = "ip:plutoplus.local"
 
@@ -427,6 +428,109 @@ RTTY_MAX_TEXT_LEN = 120  # mirrors PSK31_MAX_TEXT_LEN
 RTTY_PREAMBLE_S = 1.0
 RTTY_TAIL_S = 0.2  # mirrors PSK31_TAIL_S's own real-hardware-motivated rationale
 RTTY_AUTO_UNKEY_WATCHDOG_S = 2.0  # mirrors PSK31_AUTO_UNKEY_WATCHDOG_S
+
+# --- LoRa Mesh (Meshtastic/MeshCore interop, PHY not yet built -- Phase 0
+# of /home/hammesj/.claude/plans/swirling-waddling-noodle.md) -- via
+# gr-lora_sdr (install-lora.sh, optional GPL-3.0 dependency, gated like
+# gr-m17/M17_AVAILABLE once the actual mode exists). SF/BW/CR and region
+# frequency ranges below are NOT guessed: EU_433/EU_868 range, duty-cycle,
+# and power-limit values were fetched directly from Meshtastic firmware's
+# own source (RadioInterface.cpp's RDEF() region table) this session, and
+# LongFast's SF/BW/CR from the project's Meshtastic protocol reference
+# (see the plan's Referenzmaterial section). MeshCore-EU's preset is the
+# project's own already-cited reference default.
+#
+# regulatory_label/ham_mode_required encode the plan's central regulatory
+# finding: 433 MHz sits inside the German 70cm amateur allocation (RED
+# self-build exemption applies, but Ham Mode -- no encryption + periodic
+# callsign ID -- is legally REQUIRED there); 868 MHz is pure ISM/SRD
+# (certification status for uncertified Pluto/HackRF hardware is
+# genuinely unresolved -- a risk the user has knowingly accepted -- but
+# no amateur-radio encryption restriction applies there, and duty-cycle
+# is the only hard SRD limit to enforce). See the plan's own
+# "Regulatorik" section for the full analysis; this must stay visible in
+# the GUI once built, not just documented here.
+@dataclass(frozen=True)
+class LoraPreset:
+    name: str
+    frequency_hz: float
+    spreading_factor: int
+    bandwidth_hz: float
+    coding_rate: str  # e.g. "4/5"
+    duty_cycle_limit: float  # 0.10 = 10%, the SRD limit this preset's band enforces
+    ham_mode_required: bool  # True only on amateur-allocated spectrum (433 MHz)
+    regulatory_label: str  # shown in the GUI, must stay attached to the preset, not just this file
+
+
+# Meshtastic EU_433 region: 433.0-434.0 MHz, 10% duty cycle, 10 dBm power
+# limit -- from RDEF(EU_433, 433.0f, 434.0f, 10, 0, 10, true, false, false)
+# in Meshtastic firmware's src/mesh/RadioInterface.cpp (fetched, not
+# assumed). 433.5 MHz (band center) below is a Phase-0 placeholder --
+# real interop needs Meshtastic's own hash-of-channel-name channel
+# selection, a Phase 2 protocol-layer detail.
+LORA_MESHTASTIC_EU433_FREQ_RANGE_HZ = (433_000_000.0, 434_000_000.0)
+LORA_MESHTASTIC_EU433_DUTY_CYCLE = 0.10
+LORA_MESHTASTIC_EU433_POWER_LIMIT_DBM = 10.0
+
+# Meshtastic EU_868 region: 869.4-869.65 MHz (a NARROW slice, not "868
+# MHz" generically), 10% duty cycle, 27 dBm power limit -- from
+# RDEF(EU_868, 869.4f, 869.65f, 10, 0, 27, false, false, false), same
+# source. Note Meshtastic's own EU_868 region already enforces the
+# correct 10% SRD duty-cycle limit -- MeshCore's own ~50% default (see
+# MeshCore preset below) does NOT, and must be overridden.
+LORA_MESHTASTIC_EU868_FREQ_RANGE_HZ = (869_400_000.0, 869_650_000.0)
+LORA_MESHTASTIC_EU868_DUTY_CYCLE = 0.10
+LORA_MESHTASTIC_EU868_POWER_LIMIT_DBM = 27.0
+
+# Real on-air Meshtastic LoRa framing, MEASURED (not assumed) from a real
+# capture of a stock Heltec V3 (2026-09-19, manual symbol-level dechirp of
+# the recorded burst, then confirmed by frame_sync's own "netid1/netid2"
+# diagnostic): 16 preamble upchirps, and the two sync-word symbol VALUES
+# are (16, 2008). NOT derivable from a single sync-word byte via the
+# usual (nibble << 3) rule -- 2008 is not a multiple of 8 -- which is why
+# no sync_word byte value (0x12, 0x2B, ...) ever matched, on either the RX
+# or the TX side. gr-lora_sdr's modulate/frame_sync accept a 2-element
+# list as raw symbol values, bypassing that rule. See pluto_tx/lora.py.
+MESHTASTIC_PREAMBLE_LEN = 16
+MESHTASTIC_SYNC_SYMBOLS = (16, 2008)
+
+LORA_PRESETS = (
+    LoraPreset(
+        name="Meshtastic LongFast (EU433)",
+        frequency_hz=433_500_000.0,  # band center, see LORA_MESHTASTIC_EU433_FREQ_RANGE_HZ above
+        spreading_factor=11, bandwidth_hz=250_000.0, coding_rate="4/5",
+        duty_cycle_limit=LORA_MESHTASTIC_EU433_DUTY_CYCLE,
+        ham_mode_required=True,
+        regulatory_label=(
+            "433 MHz -- amateurfunkrechtlich abgesichert (DE 70cm-Band, "
+            "RED-Eigenbau-Ausnahme), Ham Mode Pflicht (keine Verschluesselung, Rufzeichen-ID)"
+        ),
+    ),
+    LoraPreset(
+        name="Meshtastic LongFast (EU868)",
+        frequency_hz=869_525_000.0,  # band center of the narrow 869.4-869.65 slice
+        spreading_factor=11, bandwidth_hz=250_000.0, coding_rate="4/5",
+        duty_cycle_limit=LORA_MESHTASTIC_EU868_DUTY_CYCLE,
+        ham_mode_required=False,
+        regulatory_label=(
+            "868 MHz -- ISM/SRD, Zertifizierungsstatus fuer unzertifizierte "
+            "Pluto/HackRF-Hardware ungeklaert (eigenes Risiko), kein Ham Mode "
+            "noetig, Verschluesselung erlaubt, 10% Duty-Cycle zwingend"
+        ),
+    ),
+    LoraPreset(
+        name="MeshCore (EU)",
+        frequency_hz=869_618_000.0,  # project's own previously-cited MeshCore-EU default
+        spreading_factor=8, bandwidth_hz=62_500.0, coding_rate="8",
+        duty_cycle_limit=0.10,  # NOT MeshCore's own ~50% default -- must be enforced independently, see above
+        ham_mode_required=False,
+        regulatory_label=(
+            "868 MHz -- ISM/SRD, Zertifizierungsstatus ungeklaert (eigenes "
+            "Risiko), kein Ham Mode noetig, Verschluesselung erlaubt, 10% "
+            "Duty-Cycle zwingend durchsetzen (MeshCores Standardverhalten NICHT uebernehmen)"
+        ),
+    ),
+)
 
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
