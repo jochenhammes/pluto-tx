@@ -47,12 +47,41 @@ class DutyCycleTests(unittest.TestCase):
 
 
 class PresetTests(unittest.TestCase):
-    def test_meshtastic_presets_share_phy(self):
-        # the TX/RX chains are built once from MESHTASTIC_PRESETS[0]; presets may only differ in frequency
-        first = config.MESHTASTIC_PRESETS[0]
+    def test_preset_table_matches_firmware(self):
+        # (SF, BW, CR) from firmware MeshRadio.h modemPresetToParams()
+        expected = {"LongFast": (11, 250e3, "4/5"), "LongModerate": (11, 125e3, "4/8"), "LongSlow": (12, 125e3, "4/8"),
+                    "MediumFast": (9, 250e3, "4/5"), "MediumSlow": (10, 250e3, "4/5"), "ShortFast": (7, 250e3, "4/5"),
+                    "ShortSlow": (8, 250e3, "4/5"), "ShortTurbo": (7, 500e3, "4/5"), "LongTurbo": (11, 500e3, "4/8")}
+        for name, phy in expected.items():
+            p = config.MESHTASTIC_PRESETS[config.meshtastic_preset_index(name, "EU433")]
+            self.assertEqual((p.spreading_factor, p.bandwidth_hz, p.coding_rate), phy)
+        self.assertEqual(len(config.MESHTASTIC_PRESETS), 16)  # no 500 kHz presets on the 250 kHz EU868 slice
+        with self.assertRaises(ValueError):
+            config.meshtastic_preset_index("ShortTurbo", "EU868")
+
+    def test_carrier_frequencies_follow_the_firmware_slot_formula(self):
+        f = lambda n, r: config.MESHTASTIC_PRESETS[config.meshtastic_preset_index(n, r)].frequency_hz
+        self.assertEqual(f("LongFast", "EU868"), 869_525_000.0)  # the one real-hardware-verified carrier
+        self.assertEqual(f("LongFast", "EU433"), 433_875_000.0)  # djb2("LongFast") % 4 == 3
         for p in config.MESHTASTIC_PRESETS:
-            self.assertEqual((p.spreading_factor, p.bandwidth_hz, p.coding_rate),
-                             (first.spreading_factor, first.bandwidth_hz, first.coding_rate))
+            lo, hi = ((433e6, 434e6) if p.ham_mode_required else (869.4e6, 869.65e6))
+            self.assertLessEqual(lo + p.bandwidth_hz / 2, p.frequency_hz)
+            self.assertLessEqual(p.frequency_hz + p.bandwidth_hz / 2, hi)
+
+    def test_default_channel_hash_byte_per_preset(self):
+        self.assertEqual(mc.channel_hash("LongFast", mc.DEFAULT_CHANNEL_PSK), 0x08)  # measured
+        names = {p.default_channel_name for p in config.MESHTASTIC_PRESETS}
+        self.assertIn("LongMod", names)  # firmware display name of LongModerate
+
+    def test_sync_symbols(self):
+        self.assertEqual(config.meshtastic_sync_symbols(11), config.MESHTASTIC_SYNC_SYMBOLS)  # measured (16, 2008)
+        self.assertEqual(config.meshtastic_sync_symbols(7), (16, 88))  # coincides with the nominal 0x2B symbols
+        for sf in range(7, 13):
+            self.assertLess(config.meshtastic_sync_symbols(sf)[1], 2 ** sf)
+
+    def test_only_longfast_is_marked_verified(self):
+        for p in config.MESHTASTIC_PRESETS:
+            self.assertEqual(p.phy_verified, p.default_channel_name == "LongFast")
 
     def test_meshcore_is_placeholder_only(self):
         self.assertTrue(config.MESHCORE_PRESETS)

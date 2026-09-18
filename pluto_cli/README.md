@@ -122,7 +122,7 @@ Common flags (every mode):
 | `digitext` | `--text` (required), `--layout {horizontal,vertical}`, `--zoom`, `--min-freq-hz` | waterfall-drawn text; `--duration` is ignored -- the transmission runs exactly once for however long the rendered text takes |
 | `psk31` | `--text` (required), `--tone-hz` | BPSK31 chat; `--duration` ignored, same reason as digitext |
 | `rtty` | `--text` (required), `--mark-hz`, `--shift-hz`, `--baud-rate`, `--reverse` | 2-tone FSK Baudot; `--duration` ignored, same reason as digitext |
-| `meshtastic` | `--text` (required), `--preset {eu433,eu868}`, `--callsign`, `--node-id HEX`, `--channel`, `--psk`, `--hop-limit` | One Meshtastic (LoRa) broadcast frame; `--freq`/`--duration` ignored (carrier from the preset, hold time from the frame's airtime). `eu433` = Ham Mode (callsign required, unencrypted); `eu868` = ISM/SRD, 10 % duty cycle enforced. Requires gr-lora_sdr, see `install-lora.sh` |
+| `meshtastic` | `--text` (required), `--region {eu433,eu868}`, `--modem-preset NAME`, `--callsign`, `--node-id HEX`, `--channel`, `--psk`, `--hop-limit` | One Meshtastic (LoRa) broadcast frame; `--freq`/`--duration` ignored (carrier from the preset, hold time from the frame's airtime). carrier and default channel name follow the preset (firmware slot formula); `eu433` = Ham Mode (callsign required, unencrypted); `eu868` = ISM/SRD, 10 % duty cycle enforced. Requires gr-lora_sdr, see `install-lora.sh` |
 | `filebroadcast` | `--file PATH` (repeatable, >=1 required) | round-robin file broadcast; each `--file` is read from disk once at startup |
 | `baseband` | `--deviation-hz` | raw wideband FM passthrough, no audio processing -- see [Recipes](#7-recipes) |
 
@@ -152,7 +152,7 @@ Common flags (every mode):
 | `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
 | `--rtty-baud-rate BAUD` | RTTY baud rate, used with `--digimode rtty` (presets: 45.45/50/75/100) |
 | `--rtty-reverse` | Swap which tone is Mark vs. Space, used with `--digimode rtty` |
-| `--meshtastic-preset {eu433,eu868}` | Meshtastic LongFast preset for `--digimode meshtastic` (default `eu868`); retunes to 433.5 / 869.525 MHz, `--freq` is ignored. Requires gr-lora_sdr, see `install-lora.sh` |
+| `--meshtastic-region {eu433,eu868}` / `--meshtastic-modem-preset NAME` | Region (default `eu868`) and Meshtastic modem preset (LongFast, LongModerate, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo, LongTurbo; default LongFast, the only one verified against real hardware) for `--digimode meshtastic`; retunes to the preset's carrier, `--freq` is ignored; RX `--bandwidth` must be at least twice the preset's LoRa bandwidth. Requires gr-lora_sdr, see `install-lora.sh` |
 | `--meshtastic-channel NAME` / `--meshtastic-psk B64` | Channel name (default `LongFast`) and key (default `AQ==` = stock channel; empty = unencrypted) used to read frames |
 | `--filebroadcast-save-dir DIR` | Also watch for File Broadcast files in parallel and save each as soon as it's complete (see below) |
 | `--json` | One JSON object per line instead of text |

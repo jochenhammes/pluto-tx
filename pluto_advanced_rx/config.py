@@ -29,6 +29,7 @@ from pluto_tx.config import (  # noqa: F401 (re-exported)
 from pluto_tx.config import (  # noqa: F401 (re-exported)
     LORA_PRESETS, MESHTASTIC_PRESETS, MESHCORE_PRESETS, MESHCORE_PLACEHOLDER_TIP,
     MESHTASTIC_PREAMBLE_LEN, MESHTASTIC_SYNC_SYMBOLS, MESHTASTIC_DEFAULT_PSK_B64,
+    MESHTASTIC_MODEM_NAMES, meshtastic_preset_index, meshtastic_sync_symbols,
 )
 from pluto_tx.config import BASEBAND_DEVIATION_HZ  # noqa: F401 (re-exported)
 

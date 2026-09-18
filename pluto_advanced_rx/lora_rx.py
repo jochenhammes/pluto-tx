@@ -43,7 +43,7 @@ class LoraRxDecoder(gr.hier_block2):
 
     def __init__(self, sf, bw, cr, center_freq_hz, has_crc=True, impl_head=False,
                  ldro=2, preamb_len=_tx_config.MESHTASTIC_PREAMBLE_LEN,
-                 sync_word=_tx_config.MESHTASTIC_SYNC_SYMBOLS, samp_rate_mult=4):
+                 sync_word=None, samp_rate_mult=4):
         assert LORA_AVAILABLE, "gr-lora_sdr not installed -- see install-lora.sh"
         # Real bug #3 (see pluto_tx/lora.py's module docstring): frame_sync
         # segfaults unconditionally with center_freq=0, even in a pure
@@ -69,6 +69,8 @@ class LoraRxDecoder(gr.hier_block2):
         self.bw = bw
         self.cr = cr
         self.samp_rate = bw * samp_rate_mult
+        if sync_word is None:
+            sync_word = _tx_config.meshtastic_sync_symbols(sf)  # Meshtastic's on-air sync symbols for this SF
 
         self.message_port_register_hier_out("msg")
 

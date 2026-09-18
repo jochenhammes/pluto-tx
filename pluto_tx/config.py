@@ -460,14 +460,19 @@ class LoraPreset:
     duty_cycle_limit: float  # 0.10 = 10%, the SRD limit this preset's band enforces
     ham_mode_required: bool  # True only on amateur-allocated spectrum (433 MHz)
     regulatory_label: str  # shown in the GUI, must stay attached to the preset, not just this file
+    # Meshtastic only: the primary channel's default name (= the modem preset's display name). It feeds
+    # the packet's channel-hash byte AND (via djb2 hash) the frequency slot the firmware picks.
+    default_channel_name: str = "LongFast"
+    # True only for PHY parameter sets measured against a real Meshtastic node. Everything else is
+    # built from the firmware's preset table but its on-air sync symbols are extrapolated.
+    phy_verified: bool = False
 
 
 # Meshtastic EU_433 region: 433.0-434.0 MHz, 10% duty cycle, 10 dBm power
 # limit -- from RDEF(EU_433, 433.0f, 434.0f, 10, 0, 10, true, false, false)
 # in Meshtastic firmware's src/mesh/RadioInterface.cpp (fetched, not
-# assumed). 433.5 MHz (band center) below is a Phase-0 placeholder --
-# real interop needs Meshtastic's own hash-of-channel-name channel
-# selection, a Phase 2 protocol-layer detail.
+# assumed). The carrier of each Meshtastic preset below is computed with
+# the firmware's own slot formula (meshtastic_channel_frequency_hz()).
 LORA_MESHTASTIC_EU433_FREQ_RANGE_HZ = (433_000_000.0, 434_000_000.0)
 LORA_MESHTASTIC_EU433_DUTY_CYCLE = 0.10
 LORA_MESHTASTIC_EU433_POWER_LIMIT_DBM = 10.0
@@ -492,32 +497,83 @@ LORA_MESHTASTIC_EU868_POWER_LIMIT_DBM = 27.0
 # or the TX side. gr-lora_sdr's modulate/frame_sync accept a 2-element
 # list as raw symbol values, bypassing that rule. See pluto_tx/lora.py.
 MESHTASTIC_PREAMBLE_LEN = 16
-MESHTASTIC_SYNC_SYMBOLS = (16, 2008)
+MESHTASTIC_SYNC_SYMBOLS = (16, 2008)  # at SF11; other SFs: meshtastic_sync_symbols(sf), defined below
 
-LORA_PRESETS = (
-    LoraPreset(
-        name="Meshtastic LongFast (EU433)",
-        frequency_hz=433_500_000.0,  # band center, see LORA_MESHTASTIC_EU433_FREQ_RANGE_HZ above
-        spreading_factor=11, bandwidth_hz=250_000.0, coding_rate="4/5",
-        duty_cycle_limit=LORA_MESHTASTIC_EU433_DUTY_CYCLE,
-        ham_mode_required=True,
-        regulatory_label=(
-            "433 MHz -- amateurfunkrechtlich abgesichert (DE 70cm-Band, "
-            "RED-Eigenbau-Ausnahme), Ham Mode Pflicht (keine Verschluesselung, Rufzeichen-ID)"
-        ),
-    ),
-    LoraPreset(
-        name="Meshtastic LongFast (EU868)",
-        frequency_hz=869_525_000.0,  # band center of the narrow 869.4-869.65 slice
-        spreading_factor=11, bandwidth_hz=250_000.0, coding_rate="4/5",
-        duty_cycle_limit=LORA_MESHTASTIC_EU868_DUTY_CYCLE,
-        ham_mode_required=False,
-        regulatory_label=(
-            "868 MHz -- ISM/SRD, Zertifizierungsstatus fuer unzertifizierte "
-            "Pluto/HackRF-Hardware ungeklaert (eigenes Risiko), kein Ham Mode "
-            "noetig, Verschluesselung erlaubt, 10% Duty-Cycle zwingend"
-        ),
-    ),
+def meshtastic_sync_symbols(sf: int):
+    """On-air sync symbol values for Meshtastic at spreading factor `sf`.
+    MEASURED only at SF11 (16, 2008) -- see MESHTASTIC_SYNC_SYMBOLS. The
+    other SFs use the extrapolation (16, 2**sf - 40): 2008 is the nominal
+    88 (= 0xB << 3) with the SF-7 upper symbol bits all set, and that
+    formula reproduces 2008 at SF11. Unverified elsewhere -- check against a
+    real node before trusting a preset (LoraPreset.phy_verified)."""
+    return (16, 2 ** sf - 40)
+
+
+def meshtastic_channel_name_hash(name: str) -> int:
+    """djb2, exactly as the firmware's hash() in RadioInterface.cpp."""
+    h = 5381
+    for c in name.encode("utf-8"):
+        h = (h * 33 + c) & 0xFFFFFFFF
+    return h
+
+
+def meshtastic_channel_frequency_hz(region_start_hz: int, region_end_hz: int, bandwidth_hz: int,
+                                    channel_name: str) -> float:
+    """Carrier the Meshtastic firmware picks for a primary channel: the region
+    is cut into floor(span / bw) slots and slot = djb2(channel name) % slots
+    (RadioInterface.cpp applyModemConfig(); EU regions have spacing 0)."""
+    n_slots = (int(region_end_hz) - int(region_start_hz)) // int(bandwidth_hz)
+    slot = meshtastic_channel_name_hash(channel_name) % n_slots
+    return float(region_start_hz + bandwidth_hz // 2 + slot * bandwidth_hz)
+
+
+# Meshtastic modem presets (firmware src/mesh/MeshRadio.h modemPresetToParams()
+# + DisplayFormatters.cpp for the names; the display name is also the default
+# primary channel name): (display name, SF, bandwidth Hz, coding rate).
+MESHTASTIC_MODEM_PRESETS = (
+    ("LongFast", 11, 250_000, "4/5"),
+    ("LongModerate", 11, 125_000, "4/8"),  # firmware display name is "LongMod"
+    ("LongSlow", 12, 125_000, "4/8"),
+    ("MediumFast", 9, 250_000, "4/5"),
+    ("MediumSlow", 10, 250_000, "4/5"),
+    ("ShortFast", 7, 250_000, "4/5"),
+    ("ShortSlow", 8, 250_000, "4/5"),
+    ("ShortTurbo", 7, 500_000, "4/5"),
+    ("LongTurbo", 11, 500_000, "4/8"),
+)
+_MESHTASTIC_CHANNEL_NAME = {"LongModerate": "LongMod"}  # display name differs from the preset title
+
+_EU433_LABEL = (
+    "433 MHz -- amateurfunkrechtlich abgesichert (DE 70cm-Band, "
+    "RED-Eigenbau-Ausnahme), Ham Mode Pflicht (keine Verschluesselung, Rufzeichen-ID)"
+)
+_EU868_LABEL = (
+    "868 MHz -- ISM/SRD, Zertifizierungsstatus fuer unzertifizierte "
+    "Pluto/HackRF-Hardware ungeklaert (eigenes Risiko), kein Ham Mode "
+    "noetig, Verschluesselung erlaubt, 10% Duty-Cycle zwingend"
+)
+
+
+def _meshtastic_presets():
+    regions = (
+        ("EU433", LORA_MESHTASTIC_EU433_FREQ_RANGE_HZ, LORA_MESHTASTIC_EU433_DUTY_CYCLE, True, _EU433_LABEL),
+        ("EU868", LORA_MESHTASTIC_EU868_FREQ_RANGE_HZ, LORA_MESHTASTIC_EU868_DUTY_CYCLE, False, _EU868_LABEL),
+    )
+    for title, sf, bw, cr in MESHTASTIC_MODEM_PRESETS:
+        channel = _MESHTASTIC_CHANNEL_NAME.get(title, title)
+        for region, (lo, hi), duty, ham, label in regions:
+            if hi - lo < bw:
+                continue  # the firmware refuses a preset wider than the region (EU868: no 500 kHz presets)
+            yield LoraPreset(
+                name=f"Meshtastic {title} ({region})",
+                frequency_hz=meshtastic_channel_frequency_hz(int(lo), int(hi), bw, channel),
+                spreading_factor=sf, bandwidth_hz=float(bw), coding_rate=cr,
+                duty_cycle_limit=duty, ham_mode_required=ham, regulatory_label=label,
+                default_channel_name=channel, phy_verified=(title == "LongFast"),
+            )
+
+
+LORA_PRESETS = tuple(_meshtastic_presets()) + (
     LoraPreset(
         name="MeshCore (EU)",
         frequency_hz=869_618_000.0,  # project's own previously-cited MeshCore-EU default
@@ -535,8 +591,22 @@ LORA_PRESETS = (
 # Presets the apps expose as a working Meshtastic digimode (TX + RX). MeshCore
 # stays a visible, disabled placeholder in both apps until its protocol layer
 # exists (no Ham-Mode/encoding/decoding implemented) -- LORA_PRESETS[2].
-MESHTASTIC_PRESETS = LORA_PRESETS[:2]
-MESHCORE_PRESETS = LORA_PRESETS[2:]
+MESHTASTIC_PRESETS = tuple(p for p in LORA_PRESETS if p.name.startswith("Meshtastic"))
+MESHCORE_PRESETS = tuple(p for p in LORA_PRESETS if p.name.startswith("MeshCore"))
+MESHTASTIC_MODEM_NAMES = tuple(m[0] for m in MESHTASTIC_MODEM_PRESETS)
+
+
+def meshtastic_preset_index(modem: str, region: str) -> int:
+    """Index into MESHTASTIC_PRESETS for e.g. ("ShortFast", "EU868"); raises
+    ValueError if that combination doesn't exist (no 500 kHz presets on EU868)."""
+    wanted = f"Meshtastic {modem} ({region.upper()})"
+    for i, p in enumerate(MESHTASTIC_PRESETS):
+        if p.name == wanted:
+            return i
+    raise ValueError(f"no preset {modem!r} in region {region.upper()} "
+                     f"(the region is narrower than the preset's bandwidth)")
+
+
 MESHCORE_PLACEHOLDER_TIP = (
     "MeshCore is a placeholder only: the LoRa PHY parameters are stored, but the "
     "MeshCore protocol layer is not implemented yet."

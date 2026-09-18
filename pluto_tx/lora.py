@@ -168,7 +168,7 @@ from gnuradio.fft import window
 from . import config
 
 
-def lora_resampler_taps(bw, gain, design_rate):
+def lora_resampler_taps(bw, gain, design_rate, min_io_rate=None):
     """Explicit low-pass taps for resampling a LoRa signal between the
     encoder/decoder rate (4 x bw) and a device rate -- used by the TX branch
     (interpolating up to the device) and the RX branch (down/up to 4 x bw).
@@ -178,8 +178,13 @@ def lora_resampler_taps(bw, gain, design_rate):
     continuous signals). firdes' cutoff is the CENTRE of the transition band:
     flat up to 0.56 x bw (the chirp occupies +-0.5 x bw, plus CFO margin), fully
     down by 3.2 x bw -- the first image/alias of a 4 x bw stream sits at
-    3.5 x bw."""
-    pass_edge, stop_edge = 0.56 * bw, 3.2 * bw
+    3.5 x bw. `min_io_rate` (the smaller of the resampler's input/output
+    rate, default 4 x bw) caps the stop edge for wide presets whose 4 x bw
+    stream is faster than the device rate: the first image then sits at
+    min_io_rate - 0.5 x bw."""
+    min_io_rate = 4 * bw if min_io_rate is None else min_io_rate
+    pass_edge = 0.56 * bw
+    stop_edge = min(3.2 * bw, min_io_rate - 0.5 * bw)
     return firdes.low_pass(
         gain, design_rate, (pass_edge + stop_edge) / 2.0, stop_edge - pass_edge, window.WIN_HAMMING,
     )
@@ -286,7 +291,7 @@ class LoraTxEncoder(gr.hier_block2):
 
     def __init__(self, sf, bw, cr, has_crc=True, impl_head=False, ldro=2,
                  preamb_len=config.MESHTASTIC_PREAMBLE_LEN,
-                 sync_word=config.MESHTASTIC_SYNC_SYMBOLS, samp_rate_mult=4):
+                 sync_word=None, samp_rate_mult=4):
         assert LORA_AVAILABLE, "gr-lora_sdr not installed -- see install-lora.sh"
         gr.hier_block2.__init__(
             self, "lora_tx_encoder",
@@ -297,6 +302,8 @@ class LoraTxEncoder(gr.hier_block2):
         self.bw = bw
         self.cr = cr
         self.samp_rate = bw * samp_rate_mult
+        if sync_word is None:
+            sync_word = config.meshtastic_sync_symbols(sf)  # Meshtastic's on-air sync symbols for this SF
 
         self._whitening = _lora_sdr.whitening(False, True, ",", "packet_len")
         self._header = _lora_sdr.header(impl_head, has_crc, cr)

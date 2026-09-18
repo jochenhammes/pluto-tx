@@ -87,6 +87,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # presets retune the device to 433.5/869.525 MHz.
         self._freq_before_lora = None
         self._meshtastic_node_id = meshtastic_codec.random_node_id() if LORA_AVAILABLE else 0
+        self._meshtastic_default_channel = ""  # set once the preset combo exists
         self._atten_ceiling_db = atten_ceiling_db  # fixed for the session, carried across reconnects
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
         self._audio_device = ""  # carried across reconnects; updated when source_combo picks a different mic
@@ -724,6 +725,7 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setToolTip(config.MESHCORE_PLACEHOLDER_TIP)
         self.meshtastic_preset_combo.setCurrentIndex(
             max(0, min(int(meshtastic_preset_index), len(config.MESHTASTIC_PRESETS) - 1)))
+        self._meshtastic_default_channel = self._meshtastic_selected_preset().default_channel_name
         self.meshtastic_preset_combo.currentIndexChanged.connect(self._on_meshtastic_preset_changed)
         meshtastic_preset_row.addWidget(self.meshtastic_preset_combo)
         meshtastic_preset_row.addStretch(1)
@@ -746,7 +748,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         meshtastic_settings_row = QtWidgets.QHBoxLayout()
         meshtastic_settings_row.addWidget(QtWidgets.QLabel("Channel:"))
-        self.meshtastic_channel_edit = QtWidgets.QLineEdit(meshtastic_codec.DEFAULT_CHANNEL_NAME if LORA_AVAILABLE else "LongFast")
+        self.meshtastic_channel_edit = QtWidgets.QLineEdit(self._meshtastic_default_channel)
         self.meshtastic_channel_edit.setMaximumWidth(110)
         self.meshtastic_channel_edit.setToolTip(
             "Channel name -- only feeds the header's channel-hash byte. The stock channel is \"LongFast\".")
@@ -1246,7 +1248,9 @@ class MainWindow(QtWidgets.QMainWindow):
         colour = "#1f6fb2" if preset.ham_mode_required else "#b9770e"
         self.meshtastic_regulatory_label.setText(
             f"<b>{preset.frequency_hz / 1e6:.3f} MHz, SF{preset.spreading_factor}, "
-            f"{preset.bandwidth_hz / 1e3:g} kHz</b> -- {preset.regulatory_label}")
+            f"{preset.bandwidth_hz / 1e3:g} kHz, CR {preset.coding_rate}</b> -- {preset.regulatory_label}"
+            + ("" if preset.phy_verified else
+               "<br><i>PHY parameters from the firmware table, not yet verified against a real node.</i>"))
         self.meshtastic_regulatory_label.setStyleSheet(f"color: {colour};")
 
     def _update_meshtastic_info(self, message=None, error=False):
@@ -1268,10 +1272,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_meshtastic_preset_changed(self, idx):
         preset = self._meshtastic_selected_preset()
+        # the channel name follows the preset (its display name is the default
+        # primary channel name) unless the operator typed a custom one
+        if self.meshtastic_channel_edit.text() in ("", self._meshtastic_default_channel):
+            self.meshtastic_channel_edit.setText(preset.default_channel_name)
+        self._meshtastic_default_channel = preset.default_channel_name
+        preset_index = self.meshtastic_preset_combo.currentData()
         if self.tb is not None:
-            self.tb.set_meshtastic_preset(self.meshtastic_preset_combo.currentData())
-            if self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
-                self.freq_spin.setValue(self.tb.nominal_freq_hz / 1e6)
+            if self.tb.meshtastic_phy_matches(preset_index):
+                self.tb.set_meshtastic_preset(preset_index)
+                if self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
+                    self.freq_spin.setValue(self.tb.nominal_freq_hz / 1e6)
+            else:
+                # another SF/BW/CR: the LoRa encoder is built per PHY, so rebuild
+                # the flowgraph with the new preset (same path as a WAV file swap)
+                self._update_meshtastic_controls_enabled()
+                self._rebuild(self.tb.device.connection, self._wav_path)
+                return
         self._update_meshtastic_controls_enabled()
         self._update_meshtastic_info()
 

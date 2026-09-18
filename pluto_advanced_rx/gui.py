@@ -334,10 +334,11 @@ class MainWindow(QtWidgets.QMainWindow):
             item = self.meshtastic_preset_combo.model().item(self.meshtastic_preset_combo.count() - 1)
             item.setEnabled(False)
             item.setToolTip(config.MESHCORE_PLACEHOLDER_TIP)
+        self._meshtastic_default_channel = self._meshtastic_preset().default_channel_name
         self.meshtastic_preset_combo.currentIndexChanged.connect(self._on_meshtastic_preset_changed)
         meshtastic_preset_row.addWidget(self.meshtastic_preset_combo)
         meshtastic_preset_row.addWidget(QtWidgets.QLabel("Channel:"))
-        self.meshtastic_channel_edit = QtWidgets.QLineEdit("LongFast")
+        self.meshtastic_channel_edit = QtWidgets.QLineEdit(self._meshtastic_default_channel)
         self.meshtastic_channel_edit.setMaximumWidth(110)
         self.meshtastic_channel_edit.setToolTip("Channel name (feeds the header's channel-hash pre-filter).")
         self.meshtastic_channel_edit.textChanged.connect(self._on_meshtastic_channel_changed)
@@ -1413,7 +1414,9 @@ class MainWindow(QtWidgets.QMainWindow):
         colour = "#1f6fb2" if preset.ham_mode_required else "#b9770e"
         self.meshtastic_regulatory_label.setText(
             f"<b>{preset.frequency_hz / 1e6:.3f} MHz, SF{preset.spreading_factor}, "
-            f"{preset.bandwidth_hz / 1e3:g} kHz</b> -- {preset.regulatory_label}")
+            f"{preset.bandwidth_hz / 1e3:g} kHz, CR {preset.coding_rate}</b> -- {preset.regulatory_label}"
+            + ("" if preset.phy_verified else
+               "<br><i>PHY parameters from the firmware table, not yet verified against a real node.</i>"))
         self.meshtastic_regulatory_label.setStyleSheet(f"color: {colour};")
 
     def _apply_meshtastic_channels(self):
@@ -1421,7 +1424,7 @@ class MainWindow(QtWidgets.QMainWindow):
         PSK keeps the previous key and is flagged in the signal label."""
         if not LORA_AVAILABLE:
             return
-        name = self.meshtastic_channel_edit.text().strip() or meshtastic_codec.DEFAULT_CHANNEL_NAME
+        name = self.meshtastic_channel_edit.text().strip() or self._meshtastic_preset().default_channel_name
         try:
             psk = meshtastic_codec.parse_psk(self.meshtastic_psk_edit.text())
         except ValueError as e:
@@ -1438,6 +1441,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_meshtastic_signal_label()
 
     def _on_meshtastic_preset_changed(self, idx):
+        # the channel name follows the preset (display name = default primary channel
+        # name) unless the operator typed a custom one
+        preset = self._meshtastic_preset()
+        if self.meshtastic_channel_edit.text() in ("", self._meshtastic_default_channel):
+            self.meshtastic_channel_edit.setText(preset.default_channel_name)
+        self._meshtastic_default_channel = preset.default_channel_name
         self._update_meshtastic_regulatory_label()
         self._apply_meshtastic_channels()
         if self.tb is not None and self.tb.active_digimode == "meshtastic":

@@ -255,10 +255,13 @@ def add_meshtastic_subparser(subparsers):
     )
     add_common_args(p)
     p.add_argument("--text", required=True, help="Message to broadcast")
-    p.add_argument("--preset", choices=("eu433", "eu868"), default="eu868",
-                   help="Meshtastic LongFast preset; sets the carrier (433.5 / 869.525 MHz), "
-                        "--freq is ignored (default: eu868). eu433 = Ham Mode (needs --callsign, "
-                        "no encryption); eu868 = ISM/SRD, 10%% duty cycle enforced")
+    p.add_argument("--region", choices=("eu433", "eu868"), default="eu868",
+                   help="Region/band; sets the carrier from the firmware's slot formula, --freq is "
+                        "ignored (default: eu868). eu433 = Ham Mode (needs --callsign, no encryption); "
+                        "eu868 = ISM/SRD, 10%% duty cycle enforced")
+    p.add_argument("--modem-preset", choices=tx_config.MESHTASTIC_MODEM_NAMES, default="LongFast",
+                   help="Meshtastic modem preset = SF/BW/CR combination (default: LongFast). Only "
+                        "LongFast is verified against real hardware. No 500 kHz presets on eu868.")
     p.add_argument("--callsign", default="", help="Your callsign -- required on eu433 (appended to the text)")
     p.add_argument("--node-id", default=None, metavar="HEX",
                    help="Sender node number in hex, e.g. 5a1d0f42 (default: random)")
@@ -283,7 +286,11 @@ def run_meshtastic(args):
     except ValueError:
         emitter.error(f"invalid --node-id {args.node_id!r} (expected hex)")
         return 1
-    preset_index = 0 if args.preset == "eu433" else 1
+    try:
+        preset_index = tx_config.meshtastic_preset_index(args.modem_preset, args.region)
+    except ValueError as e:
+        emitter.error(str(e))
+        return 1
     hop_limit = max(0, min(tx_config.MESHTASTIC_MAX_HOP_LIMIT, args.hop_limit))
 
     def preflight(tb):

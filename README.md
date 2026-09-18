@@ -159,8 +159,11 @@ im Digimodes-Reiter. Baudrate (45.45/50/75/100) und Shift
 Gegenstationen mit vertauschter Ton-Zuordnung.
 
 **Meshtastic (LoRa).** Sendet und empfängt echte Meshtastic-Pakete
-(LongFast, SF11/250 kHz) im Digimodes-Reiter beider Apps — bit-genau
-gegen einen echten Heltec V3 verifiziert (868 MHz, beide Richtungen).
+(alle neun Modem-Presets LongFast … ShortTurbo, je EU433/EU868; Träger und
+Standard-Kanalname wie in der Firmware berechnet) im Digimodes-Reiter beider
+Apps. **Nur LongFast (SF11/250 kHz) ist bit-genau gegen einen echten Heltec V3
+verifiziert** (868 MHz, beide Richtungen); die übrigen Presets stammen aus der
+Firmware-Tabelle, ihre Sync-Symbole sind extrapoliert (im Programm markiert).
 `pluto-tx` sendet eine Textnachricht als Broadcast auf dem Standardkanal
 (Kanalname/PSK, Hop-Limit und Node-ID einstellbar, PTT sendet genau ein
 Paket und löst danach selbst aus); `pluto-advanced-rx` zeigt jedes
@@ -170,7 +173,7 @@ Pakete anderer Kanäle als "other channel"). Nur ein Digimode gleichzeitig
 nicht über Soundkarte. MeshCore steht als deaktivierter Platzhalter im
 Preset-Kombo (Protokollschicht noch nicht implementiert).
 **Rechtlicher Hinweis, im Programm bei jedem Preset sichtbar:**
-*433,5 MHz* liegt im deutschen 70-cm-Amateurfunkband — dort greift die
+*433 MHz* (Band 433,0–434,0 MHz) liegt im deutschen 70-cm-Amateurfunkband — dort greift die
 Eigenbau-Ausnahme, es gilt aber Ham Mode (Rufzeichen Pflicht, keine
 Verschlüsselung; die App erzwingt beides). *869,525 MHz* ist reines
 ISM/SRD-Band ohne Amateurfunk-Sonderrecht: der Betrieb unzertifizierter
@@ -286,9 +289,11 @@ einstellbare Floor/Ceiling-Slider. RX-Bandbreiten-Presets bis 10 MHz
 - **Meshtastic ist ein Basis-Digimode, kein vollwertiger Mesh-Knoten**:
   gesendet wird eine Textnachricht als Broadcast (kein NodeInfo/Position,
   keine Empfangsbestätigungen, kein Weiterleiten fremder Pakete), nur der
-  Standard-LongFast-Preset (SF11/250 kHz), nur ein Kanal gleichzeitig.
-  Bit-genau verifiziert ist 868 MHz gegen einen echten Heltec V3; 433 MHz
-  (Ham Mode) wurde bisher nur im Selbst-Loopback getestet.
+  ein Kanal gleichzeitig. Bit-genau verifiziert ist nur LongFast auf 868 MHz
+  gegen einen echten Heltec V3; andere Presets und 433 MHz (Ham Mode) wurden
+  bisher nur im Selbst-Loopback getestet. Bei benutzerdefiniertem Kanalnamen
+  wählt die Firmware einen anderen Frequenz-Slot — dann Frequenz von Hand
+  einstellen. Ein Presetwechsel mit anderer SF/BW baut die TX-Kette neu auf.
 - **Datei-Wechsel** ("Choose File") baut den Flowgraph komplett neu auf
   (kein Live-Swap in dieser GNU-Radio-Version) — kurze, aber sichere
   Unterbrechung. Audiodatei loopt unabhängig von PTT weiter, Position

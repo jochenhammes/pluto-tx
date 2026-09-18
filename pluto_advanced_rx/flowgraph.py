@@ -710,7 +710,8 @@ class AdvancedRxFlowgraph(gr.top_block):
             lora_interp, lora_decim = lora_fs // g_lora, int(self.sample_rate) // g_lora
             self.meshtastic_rx_resampler = filter.rational_resampler_ccf(
                 interpolation=lora_interp, decimation=lora_decim,
-                taps=_lora_resampler_taps(lora_bw, float(lora_interp), self.sample_rate * lora_interp),
+                taps=_lora_resampler_taps(lora_bw, float(lora_interp), self.sample_rate * lora_interp,
+                                          min(self.sample_rate, lora_fs)),
             )
             self.meshtastic_decoder = LoraRxDecoder(
                 lp.spreading_factor, lora_bw, _lora_cr_index(lp.coding_rate),

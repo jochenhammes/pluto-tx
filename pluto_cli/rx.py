@@ -102,10 +102,15 @@ def add_common_args(parser):
         help="Swap which tone is Mark vs. Space, used when --digimode rtty",
     )
     parser.add_argument(
-        "--meshtastic-preset", choices=("eu433", "eu868"), default="eu868",
-        help="Meshtastic LongFast preset, used when --digimode meshtastic: retunes to the preset's "
-             "carrier (433.5 / 869.525 MHz), --freq is ignored (default: eu868). Needs --bandwidth "
-             "of at least 0.5 MS/s.",
+        "--meshtastic-region", choices=("eu433", "eu868"), default="eu868",
+        help="Region for --digimode meshtastic: retunes to the preset's carrier, --freq is ignored "
+             "(default: eu868).",
+    )
+    parser.add_argument(
+        "--meshtastic-modem-preset", choices=rx_config.MESHTASTIC_MODEM_NAMES, default="LongFast",
+        help="Meshtastic modem preset (SF/BW/CR), used when --digimode meshtastic (default: LongFast, "
+             "the only one verified against real hardware). The RX bandwidth must be at least twice "
+             "the preset's LoRa bandwidth.",
     )
     parser.add_argument(
         "--meshtastic-channel", default=None,
@@ -147,7 +152,11 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             filebroadcast_state.on_data_frame(frame["file_id"], frame["offset"], frame["payload"])
 
     meshtastic_state = MeshtasticState()
-    meshtastic_preset_index = 0 if args.meshtastic_preset == "eu433" else 1
+    try:
+        meshtastic_preset_index = rx_config.meshtastic_preset_index(args.meshtastic_modem_preset, args.meshtastic_region)
+    except ValueError as e:
+        emitter.error(str(e))
+        return 1
     meshtastic_preset = rx_config.MESHTASTIC_PRESETS[meshtastic_preset_index]
 
     def on_meshtastic_frame(raw):
@@ -174,7 +183,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         except ValueError as e:
             emitter.error(f"invalid --meshtastic-psk: {e}")
             return 1
-        name = args.meshtastic_channel or meshtastic_codec.DEFAULT_CHANNEL_NAME
+        name = args.meshtastic_channel or meshtastic_preset.default_channel_name
         channels = [(name, psk)]
         if meshtastic_preset.ham_mode_required and psk:
             channels.insert(0, (name, b""))  # amateur band: unencrypted first

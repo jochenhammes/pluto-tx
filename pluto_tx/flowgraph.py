@@ -591,9 +591,10 @@ class PlutoTxFlowgraph(gr.top_block):
         # phase-sensitive). The encoder has no stream input: it stays silent
         # until key_ptt() pushes a packet, so it is always built (when
         # available) and just drains into a null sink while another mode is
-        # active. PHY parameters come from the first Meshtastic preset; every
-        # preset in config.MESHTASTIC_PRESETS shares SF/BW/CR (only the
-        # frequency differs), asserted by the tests.
+        # active. The encoder is built for the PHY (SF/BW/CR) of the preset
+        # given at construction; presets with another PHY need a rebuilt
+        # flowgraph (meshtastic_phy_matches()), presets that only differ in
+        # frequency/region switch live.
         self.meshtastic_preset_index = int(meshtastic_preset_index)
         self.meshtastic_text = meshtastic_text
         if meshtastic_node_id is None and LORA_AVAILABLE:
@@ -609,14 +610,17 @@ class PlutoTxFlowgraph(gr.top_block):
         self._meshtastic_busy_until = 0.0  # monotonic; the previous frame is still draining until then
         self._meshtastic_duty = lora_airtime.DutyCycleLimiter(None)
         self._lora_rf_bandwidth_active = False
+        self._lora_phy = None
         if LORA_AVAILABLE:
-            lp = config.MESHTASTIC_PRESETS[0]
+            lp = config.MESHTASTIC_PRESETS[self.meshtastic_preset_index]
+            self._lora_phy = self._meshtastic_phy(lp)
             lora_bw = int(lp.bandwidth_hz)
             self.lora_encoder = LoraTxEncoder(lp.spreading_factor, lora_bw, lora_airtime.cr_index(lp.coding_rate))
             lora_fs = int(self.lora_encoder.samp_rate)
             g_lora = math.gcd(quad_rate, lora_fs)
             lora_interp, lora_decim = quad_rate // g_lora, lora_fs // g_lora
-            self._lora_tx_taps = lora_resampler_taps(lora_bw, lora_interp, lora_fs * lora_interp)
+            self._lora_tx_taps = lora_resampler_taps(lora_bw, lora_interp, lora_fs * lora_interp,
+                                                     min(lora_fs, quad_rate))
             self.lora_tx_resampler = filter.rational_resampler_ccf(
                 interpolation=lora_interp, decimation=lora_decim, taps=self._lora_tx_taps,
             )
@@ -1049,7 +1053,19 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.device.set_rf_bandwidth(self.device.default_bandwidth_hz)
             self._lora_rf_bandwidth_active = False
 
+    @staticmethod
+    def _meshtastic_phy(preset):
+        return (preset.spreading_factor, int(preset.bandwidth_hz), preset.coding_rate)
+
+    def meshtastic_phy_matches(self, index: int) -> bool:
+        """True if preset `index` can be selected live, i.e. has the same
+        SF/BW/CR the encoder was built for; otherwise the flowgraph has to
+        be rebuilt with that preset."""
+        return self._meshtastic_phy(config.MESHTASTIC_PRESETS[int(index)]) == self._lora_phy
+
     def set_meshtastic_preset(self, index: int):
+        if not self.meshtastic_phy_matches(index):
+            raise ValueError("preset has a different SF/BW/CR -- rebuild the flowgraph with it")
         self.meshtastic_preset_index = int(index)
         self._meshtastic_pending = None
         if self.mode == self.MODE_MESHTASTIC:
@@ -1102,7 +1118,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if now < self._meshtastic_busy_until:
             return False, "The previous frame is still being sent.", None
         callsign = self.meshtastic_callsign.strip().upper()
-        channel_name = self.meshtastic_channel_name or meshtastic_codec.DEFAULT_CHANNEL_NAME
+        channel_name = self.meshtastic_channel_name or preset.default_channel_name
         try:
             psk = meshtastic_codec.parse_psk(self.meshtastic_psk_b64)
         except ValueError as e:
@@ -1505,11 +1521,14 @@ class PlutoTxFlowgraph(gr.top_block):
             if stage_name in device_stage_names:
                 self.device.set_power(stage_name, value)
         if self.mode == self.MODE_MESHTASTIC:
-            packet, airtime_s, _preset = self._meshtastic_pending
+            packet, airtime_s, preset = self._meshtastic_pending
             self._meshtastic_pending = None
             now = time.monotonic()
             self.meshtastic_last_airtime_s = airtime_s
-            self.meshtastic_hold_s = airtime_s + config.MESHTASTIC_TX_TAIL_S
+            # the encoder's delay block shifts the frame by 10.1 symbols before it
+            # starts (see pluto_tx/lora.py, bug 2) -- RF must stay up for that too
+            lead_s = 10.1 * lora_airtime.symbol_time_s(preset.spreading_factor, preset.bandwidth_hz)
+            self.meshtastic_hold_s = lead_s + airtime_s + config.MESHTASTIC_TX_TAIL_S
             self._meshtastic_busy_until = now + self.meshtastic_hold_s
             self._meshtastic_duty.record(airtime_s, now)
             self.lora_encoder.send_payload_bytes(packet)
