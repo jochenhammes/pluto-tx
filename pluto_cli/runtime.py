@@ -204,23 +204,35 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                     emitter.emit("unkeyed", mode=mode)
                     _tail_wait_tx(tb, mode)
         else:
-            tb.key_ptt()
-            emitter.emit("keyed", mode=mode)
-            if mode == PlutoTxFlowgraph.MODE_DIGITEXT:
-                time.sleep(tb.digitext_duration_s)
-            elif mode == PlutoTxFlowgraph.MODE_PSK31:
-                time.sleep(tb.psk31_duration_s)
-            elif mode == PlutoTxFlowgraph.MODE_RTTY:
-                time.sleep(tb.rtty_duration_s)
-            elif mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
-                time.sleep(tb.meshtastic_hold_s)
-            elif mode == PlutoTxFlowgraph.MODE_POCSAG:
-                time.sleep(tb.pocsag_hold_s)
-            else:
-                time.sleep(args.duration)
-            tb.unkey_ptt()
-            emitter.emit("unkeyed", mode=mode)
-            _tail_wait_tx(tb, mode)
+            count = getattr(args, "repeat_count", 1) or 1
+            interval = getattr(args, "repeat_interval", 0.0)
+            for i in range(count):
+                if i:
+                    emitter.emit("repeat_wait", seconds=interval, next=i + 1, of=count)
+                    time.sleep(interval)
+                try:
+                    tb.key_ptt()
+                except ValueError as e:  # a refusal (e.g. Meshtastic duty cycle) ends a series, not the first call
+                    if i == 0:
+                        raise
+                    emitter.error(f"repeat stopped after {i} of {count}: {e}")
+                    break
+                emitter.emit("keyed", mode=mode, **({"repetition": i + 1, "of": count} if count > 1 else {}))
+                if mode == PlutoTxFlowgraph.MODE_DIGITEXT:
+                    time.sleep(tb.digitext_duration_s)
+                elif mode == PlutoTxFlowgraph.MODE_PSK31:
+                    time.sleep(tb.psk31_duration_s)
+                elif mode == PlutoTxFlowgraph.MODE_RTTY:
+                    time.sleep(tb.rtty_duration_s)
+                elif mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
+                    time.sleep(tb.meshtastic_hold_s)
+                elif mode == PlutoTxFlowgraph.MODE_POCSAG:
+                    time.sleep(tb.pocsag_hold_s)
+                else:
+                    time.sleep(args.duration)
+                tb.unkey_ptt()
+                emitter.emit("unkeyed", mode=mode)
+                _tail_wait_tx(tb, mode)
     finally:
         tb.shutdown_safe()
         emitter.emit("shutdown")

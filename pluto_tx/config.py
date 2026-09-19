@@ -439,6 +439,11 @@ RTTY_PREAMBLE_S = 1.0
 RTTY_TAIL_S = 0.2  # mirrors PSK31_TAIL_S's own real-hardware-motivated rationale
 RTTY_AUTO_UNKEY_WATCHDOG_S = 2.0  # mirrors PSK31_AUTO_UNKEY_WATCHDOG_S
 
+# --- Repeat series for the one-shot digimodes (GUI and CLI) ---
+REPEAT_COUNT_MAX = 999  # transmissions per PTT press (1 = send once)
+REPEAT_INTERVAL_RANGE_S = (1.0, 86400.0)  # pause between the end of one transmission and the start of the next
+REPEAT_INTERVAL_DEFAULT_S = 10.0
+
 # --- POCSAG paging (ITU-R M.584), see pluto_tx/pocsag.py / pocsag_codec.py ---
 POCSAG_BAUD_PRESETS = (512, 1200, 2400)
 POCSAG_BAUD_DEFAULT = 1200

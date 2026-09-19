@@ -75,6 +75,35 @@ def add_common_args(parser):
     parser.add_argument("--json", action="store_true", help="Emit one JSON object per line instead of plain text")
 
 
+def _repeat_count(text):
+    n = int(text)
+    if not 1 <= n <= tx_config.REPEAT_COUNT_MAX:
+        raise argparse.ArgumentTypeError(f"must be 1..{tx_config.REPEAT_COUNT_MAX}")
+    return n
+
+
+def _repeat_interval(text):
+    x = float(text)
+    lo, hi = tx_config.REPEAT_INTERVAL_RANGE_S
+    if not lo <= x <= hi:
+        raise argparse.ArgumentTypeError(f"must be {lo:g}..{hi:g} seconds")
+    return x
+
+
+def add_repeat_args(parser):
+    """Repeat series for the one-shot modes (digitext, psk31, rtty, pocsag, meshtastic)."""
+    parser.add_argument(
+        "--repeat-count", type=_repeat_count, default=1, metavar="N",
+        help=f"Transmit the message N times in total (1-{tx_config.REPEAT_COUNT_MAX}, default 1 = once). "
+             "Ctrl-C ends the series safely.",
+    )
+    parser.add_argument(
+        "--repeat-interval", type=_repeat_interval, default=tx_config.REPEAT_INTERVAL_DEFAULT_S, metavar="SECONDS",
+        help="Pause between the end of one transmission and the start of the next "
+             f"(default {tx_config.REPEAT_INTERVAL_DEFAULT_S:g}; the transmitter is off in between)",
+    )
+
+
 def _build(args, mode, connection, **mode_kwargs):
     source = PlutoTxFlowgraph.SRC_FILE if args.source == "file" else PlutoTxFlowgraph.SRC_MIC
     return PlutoTxFlowgraph(
@@ -256,6 +285,7 @@ def run_rade(args):
 def add_digitext_subparser(subparsers):
     p = subparsers.add_parser("digitext", help="Waterfall Writer text digimode", description=__doc__)
     add_common_args(p)
+    add_repeat_args(p)
     p.add_argument("--text", required=True, help="Text to draw into the waterfall")
     p.add_argument("--layout", choices=["horizontal", "vertical"], default="horizontal")
     p.add_argument("--zoom", type=int, default=1)
@@ -276,6 +306,7 @@ def run_digitext(args):
 def add_psk31_subparser(subparsers):
     p = subparsers.add_parser("psk31", help="BPSK31 keyboard-chat digimode", description=__doc__)
     add_common_args(p)
+    add_repeat_args(p)
     p.add_argument("--text", required=True, help="Text to send")
     p.add_argument("--tone-hz", type=float, default=tx_config.PSK31_DEFAULT_TONE_HZ,
                    help=f"Audio tone frequency in Hz (default: {tx_config.PSK31_DEFAULT_TONE_HZ:.0f})")
@@ -292,6 +323,7 @@ def run_psk31(args):
 def add_rtty_subparser(subparsers):
     p = subparsers.add_parser("rtty", help="RTTY (2-tone FSK Baudot) digimode", description=__doc__)
     add_common_args(p)
+    add_repeat_args(p)
     p.add_argument("--text", required=True, help="Text to send")
     p.add_argument("--mark-hz", type=float, default=tx_config.RTTY_MARK_HZ_DEFAULT,
                    help=f"Mark tone frequency in Hz (default: {tx_config.RTTY_MARK_HZ_DEFAULT:.0f})")
@@ -320,6 +352,7 @@ def add_pocsag_subparser(subparsers):
         description=__doc__,
     )
     add_common_args(p)
+    add_repeat_args(p)
     p.add_argument("--ric", type=int, default=tx_config.POCSAG_DEFAULT_RIC,
                    help=f"Pager address (RIC) 0-{tx_pocsag.RIC_MAX} (default: {tx_config.POCSAG_DEFAULT_RIC}, a test RIC)")
     p.add_argument("--kind", choices=("alpha", "numeric", "tone"), default="alpha",
@@ -364,6 +397,7 @@ def add_meshtastic_subparser(subparsers):
         description=__doc__,
     )
     add_common_args(p)
+    add_repeat_args(p)
     p.add_argument("--text", required=True, help="Message to broadcast")
     p.add_argument("--region", choices=("eu433", "eu868"), default="eu868",
                    help="Region/band; sets the carrier from the firmware's slot formula, --freq is "

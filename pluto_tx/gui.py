@@ -89,6 +89,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshtastic_ptt_epoch = 0
         # Same per-press staleness guard for POCSAG's one-shot call timers.
         self._pocsag_ptt_epoch = 0
+        # Repeat series state, see _repeat_begin()/_finish_one_shot().
+        self._repeat_active = False
+        self._repeat_total = 1
+        self._repeat_sent = 0
+        self._repeat_epoch = 0
+        self._repeat_next_time = 0.0
+        self._repeat_tick_timer = QtCore.QTimer(self)
+        self._repeat_tick_timer.setInterval(1000)
+        self._repeat_tick_timer.timeout.connect(self._repeat_update_button)
         # Carrier frequency (MHz) to restore when leaving Meshtastic mode, whose
         # presets retune the device to 433.5/869.525 MHz.
         self._freq_before_lora = None
@@ -532,6 +541,30 @@ class MainWindow(QtWidgets.QMainWindow):
         digimode_row.addWidget(self.digimode_combo)
         digimode_row.addStretch(1)
         digimodes_tab_layout.addLayout(digimode_row)
+
+        # Repeat: applies to every one-shot digimode on this tab (Waterfall Writer, PSK31, RTTY, POCSAG,
+        # Meshtastic). PTT starts the series; clicking PTT again ends it (also during the pauses).
+        repeat_row = QtWidgets.QHBoxLayout()
+        repeat_row.addWidget(QtWidgets.QLabel("Repeat:"))
+        self.repeat_count_spin = QtWidgets.QSpinBox()
+        self.repeat_count_spin.setRange(1, config.REPEAT_COUNT_MAX)
+        self.repeat_count_spin.setValue(1)
+        self.repeat_count_spin.setSuffix(" \u00d7")
+        self.repeat_count_spin.setToolTip(
+            f"Number of transmissions per PTT press (1-{config.REPEAT_COUNT_MAX}); 1 = send once. "
+            "Click PTT again to stop the series at any time.")
+        repeat_row.addWidget(self.repeat_count_spin)
+        repeat_row.addWidget(QtWidgets.QLabel("Interval:"))
+        self.repeat_interval_spin = QtWidgets.QDoubleSpinBox()
+        self.repeat_interval_spin.setRange(*config.REPEAT_INTERVAL_RANGE_S)
+        self.repeat_interval_spin.setDecimals(1)
+        self.repeat_interval_spin.setValue(config.REPEAT_INTERVAL_DEFAULT_S)
+        self.repeat_interval_spin.setSuffix(" s")
+        self.repeat_interval_spin.setToolTip(
+            "Pause between the end of one transmission and the start of the next (transmitter is off in between).")
+        repeat_row.addWidget(self.repeat_interval_spin)
+        repeat_row.addStretch(1)
+        digimodes_tab_layout.addLayout(repeat_row)
 
         # --- Digitext controls -- live in the "Digimodes" tab (not
         # audio_tab_layout like every mode above), per explicit request
@@ -1260,6 +1293,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_baseband_controls_enabled()
         self._subtone_connected = enabled
         self._update_subtone_controls_enabled()
+        self._repeat_connected = enabled
+        if not enabled:
+            self._repeat_cancel()
+        self._repeat_update_controls()
 
     def _update_subtone_controls_enabled(self):
         is_fm_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_FM
@@ -1437,8 +1474,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _finish_pocsag_auto_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._pocsag_ptt_epoch or not self.tb.keyed:
             return
-        self._reset_digitext_ptt_visual()
-        self._release_ptt()
+        self._finish_one_shot()
 
     def _update_rtty_controls_enabled(self):
         # Structural mirror of _update_psk31_controls_enabled() above.
@@ -1607,8 +1643,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _finish_meshtastic_auto_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._meshtastic_ptt_epoch or not self.tb.keyed:
             return
-        self._reset_digitext_ptt_visual()
-        self._release_ptt()
+        self._finish_one_shot()
         # a moment later, once the busy window has closed, refresh the verdict
         QtCore.QTimer.singleShot(300, self._update_meshtastic_info)
 
@@ -1853,6 +1888,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from _on_mode_tab_changed() when landing on a tab makes its own
         combo (or File-Transfer's fixed mode) live again without that
         combo's own value having changed."""
+        self._repeat_cancel()
         was_lora = self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC
         self._current_mode = mode
         is_lora = mode == PlutoTxFlowgraph.MODE_MESHTASTIC
@@ -2187,6 +2223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Rewire the PTT button between click-toggle and press-and-hold
         semantics. Switching modes while keyed would leave the RF on with no
         way to release it under the new mode's signals -- always unkey first."""
+        self._repeat_cancel()
         if self.tb is not None and self.tb.keyed:
             self._release_ptt()
 
@@ -2225,27 +2262,37 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_digitext_ptt_visual()
             return
         if checked:
-            self.tb.key_ptt()
+            self._key_and_schedule()
             self.ptt_button.setText("PTT (click to stop)")
-            self._set_indicator_on_air()
-            self._schedule_digitext_auto_unkey()
-            self._schedule_psk31_auto_unkey()
-            self._log_psk31_sent()
-            self._schedule_rtty_auto_unkey()
-            self._log_rtty_sent()
-            self._schedule_meshtastic_auto_unkey()
-            self._log_meshtastic_sent()
-            self._schedule_pocsag_auto_unkey()
-            self._log_pocsag_sent()
+            self._repeat_begin()
         else:
+            self._repeat_cancel("Repeat stopped.")
             self.ptt_button.setText("PTT (click to send)")
             self._release_ptt()
 
     def _on_ptt_pressed(self):
+        if self._repeat_active:  # a further press ends the series
+            self._repeat_cancel("Repeat stopped.")
+            if self.tb is not None and self.tb.keyed:
+                self._release_ptt()
+            self._reset_ptt_button_visual()
+            return
         if not self._armed or self.tb is None:
             return
         if not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed():
             return
+        self._key_and_schedule()
+        self._repeat_begin()
+
+    def _on_ptt_released(self):
+        if self._repeat_active:  # the series keeps running after the button is let go
+            return
+        if self.tb is None or not self.tb.keyed:
+            return
+        self._release_ptt()
+
+    def _key_and_schedule(self):
+        """Key the transmitter and start the per-mode auto-unkey timers/logs (one-shot modes)."""
         self.tb.key_ptt()
         self._set_indicator_on_air()
         self._schedule_digitext_auto_unkey()
@@ -2258,10 +2305,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self._schedule_pocsag_auto_unkey()
         self._log_pocsag_sent()
 
-    def _on_ptt_released(self):
-        if self.tb is None or not self.tb.keyed:
+    # --- Repeat series (one-shot digimodes) ------------------------------
+    _ONE_SHOT_MODES = (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
+                       PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_POCSAG)
+
+    def _repeat_begin(self):
+        """Called right after a user PTT press keyed the first transmission."""
+        count = self.repeat_count_spin.value()
+        if self._current_mode not in self._ONE_SHOT_MODES or count < 2:
             return
+        self._repeat_epoch += 1
+        self._repeat_active = True
+        self._repeat_total = count
+        self._repeat_sent = 1
+        self._repeat_update_controls()
+        self._repeat_update_button()
+
+    def _repeat_cancel(self, message=None):
+        """End a running series (no-op if none): timers become stale via the epoch, controls unlock."""
+        was_active = getattr(self, "_repeat_active", False)
+        self._repeat_active = False
+        if hasattr(self, "_repeat_epoch"):
+            self._repeat_epoch += 1
+            self._repeat_tick_timer.stop()
+            self._repeat_update_controls()
+        if was_active and message:
+            self.status_label.setText(f"{message} ({self._repeat_sent} of {self._repeat_total} sent)")
+
+    def _repeat_update_controls(self):
+        enabled = getattr(self, "_repeat_connected", True) and not self._repeat_active
+        self.repeat_count_spin.setEnabled(enabled)
+        self.repeat_interval_spin.setEnabled(enabled)
+
+    def _repeat_update_button(self):
+        if not self._repeat_active:
+            return
+        if self.tb is not None and self.tb.keyed:
+            text = f"Sending {self._repeat_sent}/{self._repeat_total} (click to stop)"
+        else:
+            wait = max(0, int(round(self._repeat_next_time - time.monotonic())))
+            text = f"Repeat {self._repeat_sent}/{self._repeat_total}, next in {wait} s (click to stop)"
+        self.ptt_button.setText(text)
+
+    def _finish_one_shot(self):
+        """A one-shot transmission has ended (normal end or watchdog): unkey, then either wait for the
+        next repetition or return the PTT button to idle."""
+        if self._repeat_active and self._repeat_sent < self._repeat_total:
+            self._release_ptt()
+            interval = self.repeat_interval_spin.value()
+            self._repeat_next_time = time.monotonic() + interval
+            epoch, token = self._repeat_epoch, self.tb
+            QtCore.QTimer.singleShot(int(interval * 1000), lambda: self._repeat_fire(token, epoch))
+            self._repeat_tick_timer.start()
+            self._repeat_update_button()
+            return
+        finished_series = self._repeat_active
+        total = self._repeat_total
+        self._repeat_cancel()
+        self._reset_digitext_ptt_visual()
         self._release_ptt()
+        if finished_series:
+            self.status_label.setText(f"Repeat finished ({total} sent).")
+
+    def _repeat_fire(self, token, epoch):
+        if not self._repeat_active or epoch != self._repeat_epoch or self.tb is not token or self.tb is None:
+            return
+        self._repeat_tick_timer.stop()
+        problem = None
+        if not self._armed:
+            problem = "not armed"
+        elif not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed():
+            problem = self.status_label.text() or "refused"
+        else:
+            try:
+                self._key_and_schedule()
+            except Exception as e:  # e.g. a refusal raised by key_ptt() itself
+                problem = str(e)
+        if problem is not None:
+            self._repeat_cancel()
+            self._reset_digitext_ptt_visual()
+            self.status_label.setText(f"Repeat stopped after {self._repeat_sent} of {self._repeat_total}: {problem}")
+            return
+        self._repeat_sent += 1
+        self._repeat_update_button()
 
     def _release_ptt(self):
         """Shared PTT-release handling (both PTT interaction modes, plus the
@@ -2354,15 +2480,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # released/re-keyed manually in the meantime (tb.keyed already False).
         if self.tb is not token or epoch != self._digitext_ptt_epoch or not self.tb.keyed:
             return
-        self._reset_digitext_ptt_visual()
-        self._release_ptt()
+        self._finish_one_shot()
 
     def _digitext_watchdog_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._digitext_ptt_epoch:
             return
         if self.tb.keyed:
-            self._reset_digitext_ptt_visual()
-            self._release_ptt()
+            self._finish_one_shot()
 
     def _log_psk31_sent(self):
         # Local echo only -- pluto_tx can never show what was received, see
@@ -2396,15 +2520,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _finish_psk31_auto_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._psk31_ptt_epoch or not self.tb.keyed:
             return
-        self._reset_digitext_ptt_visual()
-        self._release_ptt()
+        self._finish_one_shot()
 
     def _psk31_watchdog_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._psk31_ptt_epoch:
             return
         if self.tb.keyed:
-            self._reset_digitext_ptt_visual()
-            self._release_ptt()
+            self._finish_one_shot()
 
     def _log_rtty_sent(self):
         # Local echo only -- mirrors _log_psk31_sent()'s own reasoning.
@@ -2436,15 +2558,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _finish_rtty_auto_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._rtty_ptt_epoch or not self.tb.keyed:
             return
-        self._reset_digitext_ptt_visual()
-        self._release_ptt()
+        self._finish_one_shot()
 
     def _rtty_watchdog_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._rtty_ptt_epoch:
             return
         if self.tb.keyed:
-            self._reset_digitext_ptt_visual()
-            self._release_ptt()
+            self._finish_one_shot()
 
     def _reset_digitext_ptt_visual(self):
         if self._ptt_hold_mode:
@@ -2501,6 +2621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_indicator_idle()
 
     def _disconnect(self):
+        self._repeat_cancel()
         self.tb.shutdown_safe()
         self.tb = None
         self._embed_waterfall(None)
@@ -2534,6 +2655,7 @@ class MainWindow(QtWidgets.QMainWindow):
         next connect with 'Unable to create buffer' (the same class of bug
         run_gui() avoids by never holding a second reference to self.tb of
         its own)."""
+        self._repeat_cancel()
         if self.tb is not None:
             self.tb.shutdown_safe()
             self.tb = None
@@ -2637,6 +2759,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """checked=True: E-STOP triggered. checked=False: re-armed. One
         toggle button covers both directions instead of two separate ones."""
         if checked:
+            self._repeat_cancel("E-STOP: repeat stopped.")
             self.tb.unkey_ptt()
             self.tb.device.force_safe_state()
             self._armed = False

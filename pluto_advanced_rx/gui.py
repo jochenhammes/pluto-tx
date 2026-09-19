@@ -1679,10 +1679,15 @@ class MainWindow(QtWidgets.QMainWindow):
         recent = self._pocsag_last_activity_time > 0 and time.time() - self._pocsag_last_activity_time < 5.0
         if recent:
             total = best.codewords_ok + best.codewords_bad
+            calls, damaged, hidden = self._pocsag_state.counts()
+            extra = f", {calls - hidden} call(s) shown" + (f", {hidden} damaged hidden" if hidden else "")
             self.pocsag_signal_label.setText(
-                f"POCSAG {baud} Bd on {freq:.4f} MHz -- {best.batches} batches, {best.codewords_ok}/{total} codewords OK")
+                f"POCSAG {baud} Bd on {freq:.4f} MHz -- {best.batches} batches, {best.codewords_ok}/{total} codewords OK{extra}"
+                + ("" if calls else " (most batches carry no call: idle keep-alive)"))
         else:
-            self.pocsag_signal_label.setText(f"Listening on {freq:.4f} MHz for POCSAG (512/1200/2400 Bd).")
+            self.pocsag_signal_label.setText(
+                f"No POCSAG signal on {freq:.4f} MHz -- tune exactly to the channel centre (e.g. 466.075 / 465.970 / 466.230). "
+                f"Calls so far: {self._pocsag_state.counts()[0]}.")
 
     def _render_pocsag_table(self):
         version, rows = self._pocsag_state.get_snapshot()

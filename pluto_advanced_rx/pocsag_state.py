@@ -45,6 +45,12 @@ class PocsagState:
             del self._rows[:-MAX_ROWS]
             self._version += 1
 
+    def counts(self):
+        """-> (calls received, of which damaged, calls hidden in the table)"""
+        with self._lock:
+            damaged = sum(1 for m in self._rows if m["uncorrectable"])
+            return len(self._rows), damaged, damaged if self.hide_damaged else 0
+
     def clear(self):
         with self._lock:
             self._rows.clear()

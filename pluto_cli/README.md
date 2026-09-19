@@ -117,6 +117,7 @@ Common flags (every mode):
 | `--wav-file PATH` | WAV file, when `--source file` |
 | `--audio-device STR` | Mic device string, from `pluto-cli devices list-audio-inputs` |
 | `--duration SECONDS` | Seconds to stay keyed (default: 3.0); ignored for digitext/psk31/rtty (see below) and `--interactive` |
+| `--repeat-count N`, `--repeat-interval SECONDS` | One-shot modes only (digitext, psk31, rtty, pocsag, meshtastic): transmit N times in total (1-999, default 1) with the given pause (default 10 s, transmitter off in between) between the end of one transmission and the start of the next; Ctrl-C ends the series safely; a refusal (e.g. Meshtastic duty cycle) ends it too |
 | `--interactive` | Enter to key, Enter again to unkey, repeatedly; Ctrl-C to quit |
 | `--yes` | Skip the `Type YES to key up` confirmation prompt |
 | `--json` | One JSON object per line instead of text |
@@ -273,6 +274,7 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `interactive_ready` | TX `--interactive`: ready for input | `hint` |
 | `shutdown` | TX or RX: safe shutdown has completed | -- |
 | `started` | RX: flowgraph is running and unmuted | -- |
+| `repeat_wait` | TX with `--repeat-count` > 1: pause before the next transmission (`keyed` then also carries `repetition` and `of`) | `seconds`, `next`, `of` |
 | `psk31_char` | RX `--digimode psk31`: one decoded character (RX-only; TX `psk31` prints nothing) | `char` (single character string) |
 | `meshtastic_listen` | RX `--digimode meshtastic`: once at startup | `preset`, `freq_hz`, `regulatory` |
 | `meshtastic_frame` | TX `meshtastic`: the frame about to be sent (`preset`, `freq_hz`, `text`, `bytes`, `airtime_s`). RX: one received frame | RX: `kind`, `bytes`, and for decodable frames `from`, `to` (hex), `id`, `hop_limit`, `hop_start`, `text` |

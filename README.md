@@ -162,6 +162,15 @@ aber nur einer der Digimodes (PSK31, RTTY, POCSAG **oder** Meshtastic) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
+**Wiederholte Aussendung.** Im Digimodes-Reiter der TX-App (Waterfall Writer,
+PSK31, RTTY, POCSAG, Meshtastic) gibt es „Repeat“: Anzahl der Aussendungen (1–999)
+und Intervall in Sekunden (Pause zwischen Ende der einen und Beginn der nächsten
+Aussendung, der Sender ist dazwischen aus). PTT startet die Serie, ein erneuter
+Klick auf PTT beendet sie sofort, auch während der Pausen; E-STOP, Trennen und
+Moduswechsel ebenfalls. Vor jeder Wiederholung laufen die Prüfungen erneut
+(z. B. Meshtastic-Duty-Cycle, leerer Text): schlägt eine fehl, endet die Serie.
+CLI: `--repeat-count N --repeat-interval SEKUNDEN` bei `tx digitext|psk31|rtty|pocsag|meshtastic`.
+
 **RTTY.** Klassisches 2-Ton-FSK-Fernschreiben (Baudot/ITA2), ebenfalls
 im Digimodes-Reiter. Baudrate (45.45/50/75/100) und Shift
 (170/425/850Hz) frei einstellbar, inkl. Normal/Reverse-Umschalter für
