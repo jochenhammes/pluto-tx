@@ -1066,3 +1066,4 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.wait()
         except Exception as e:
             print(f"WARNING: flowgraph stop() failed: {e}", file=sys.stderr)
+        self.device.close()

@@ -194,6 +194,24 @@ jederzeit einsteigen können, ohne den Sendebeginn abzuwarten.
 `pluto-advanced-rx` empfängt File Broadcast ebenfalls immer parallel im
 Hintergrund und speichert vollständig empfangene Dateien automatisch.
 
+**RTL-SDR über das Netzwerk.** Ein RTL-SDR an einem anderen Rechner (z.B.
+Raspberry Pi am Dachboden) läuft dort über den Standard-Server
+`rtl_tcp -a 0.0.0.0 -p 1234` (Paket `rtl-sdr`). In `pluto-advanced-rx` den
+Gerätetyp „RTL-SDR“ wählen und im Verbindungsfeld neben dem Scan-Button
+`192.168.178.34:1234` (oder nur die IP, Port-Default 1234) eintragen —
+Serien­nummern für lokale USB-Sticks funktionieren wie bisher. Gleich per
+CLI: `pluto-cli rx fm --device rtlsdr --uri 192.168.178.34:1234`. Hinweise:
+`rtl_tcp` bedient nur einen Client gleichzeitig und hat keine
+Authentifizierung (nur im vertrauenswürdigen LAN betreiben); bei 2,4 MS/s
+fließen ~4,8 MB/s, über WLAN eine niedrigere RX-Bandbreite wählen (gemessen: bei 2,4 MS/s
+verliert die WLAN-Strecke Daten, bis ~1 MS/s ist sie verlustfrei).
+`rtl_tcp` liefert den Strom in 256-kB-Blöcken (bei niedrigen Raten Pausen bis
+~0,5 s); ein selbstanpassender Puffer glättet das und hält den Ton
+ruckelfrei, kostet aber entsprechend Latenz (Abstimmen wirkt ~0,5–1 s
+verzögert; Puffer/Unterläufe stehen im HW-Status). Bricht die
+Verbindung ab, verbindet sich die App selbst neu und sendet die Einstellungen
+erneut (Statuszeile zeigt „lost“/„restored“).
+
 **Baseband-Modus + fldigi.** Roher, unverarbeiteter Audio-Durchgriff
 (kein Noise-Gate/Kompressor/Limiter, breiter als normales 3kHz-SSB-
 Audio) — macht beide Apps zu einem Input/Output für externe
@@ -220,7 +238,7 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 |---|---|---|
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
-| **RTL-SDR** | — (kein TX-fähiges Gerät) | alle Modi |
+| **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
 | **Soundkarte / externes Funkgerät** | RADE, Waterfall Writer, PSK31, RTTY | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und

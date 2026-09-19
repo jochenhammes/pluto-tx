@@ -85,6 +85,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshtastic_last_frames = 0
         self._meshtastic_last_activity_time = 0.0
         self._meshtastic_psk_error = None
+        self._link_state = None  # (id(tb), status) of the last network-link status shown, see _update_link_status()
         # Carrier (Hz) to restore when leaving Meshtastic, whose presets retune the receiver.
         self._freq_before_lora = None
         # Which digimode (None/"psk31"/"rtty") the CURRENT self.tb was
@@ -922,6 +923,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Scan will report 0 devices found; enter a name manually if the "
                 "default isn't the right one."
             )
+        elif device_cls.device_type == "rtlsdr":
+            self.device_label.setText("RTL-SDR (serial, or host[:port] of an rtl_tcp server):")
+            self.uri_combo.setToolTip(
+                "Blank = the only USB-attached RTL-SDR; a serial number picks a specific one "
+                "(Scan lists attached dongles). To use a dongle on another machine, run "
+                "'rtl_tcp -a 0.0.0.0 -p 1234' there and enter its address here, e.g. "
+                "192.168.178.34:1234 (port defaults to 1234; a prefix rtl_tcp:// also works). "
+                "rtl_tcp serves one client at a time and has no authentication -- trusted "
+                "network only. At 2.4 MS/s the stream is ~4.8 MB/s; pick a lower RX bandwidth "
+                "over WLAN."
+            )
+            self.uri_combo.lineEdit().setPlaceholderText("serial or 192.168.178.34:1234")
         else:
             self.device_label.setText(f"{device_cls.display_name} Serial (blank = auto):")
             self.uri_combo.setToolTip(
@@ -1204,9 +1217,29 @@ class MainWindow(QtWidgets.QMainWindow):
             half_bw = self.tb.baseband_width_hz / 2
             self.waterfall.set_demod_band(freq - half_bw, freq + half_bw)
 
+    def _update_link_status(self):
+        """Surface a dropping/returning network link (rtl_tcp) in the status line --
+        only on a state CHANGE, so it never overwrites other status messages."""
+        status = self.tb.device.connection_status()
+        state = (id(self.tb), status)
+        if status is None or state == self._link_state:
+            self._link_state = state
+            return
+        previous = self._link_state[1] if self._link_state and self._link_state[0] == id(self.tb) else None
+        self._link_state = state
+        label = self.tb.device.connection or "auto-detect"
+        if status == "lost":
+            self.status_label.setText(f"Connection to {label} lost -- reconnecting...")
+        elif status == "connecting":
+            self.status_label.setText(f"Waiting for the rtl_tcp server at {label}...")
+        elif status == "connected":
+            self.status_label.setText(
+                f"Connection to {label} restored." if previous == "lost" else f"Connected to RTL-SDR ({label}).")
+
     def _poll_fft(self):
         if self.tb is None:
             return
+        self._update_link_status()
         row, self._fft_gen = self.tb.fft_probe.get_latest_row(self._fft_gen)
         if row is not None:
             if self.tb.device.is_audio_only():

@@ -76,6 +76,9 @@ instead: `python3 -m pluto_cli.app ...`.
 pluto-cli devices scan --tx --device pluto
 pluto-cli devices scan --rx --device rtlsdr
 
+# RTL-SDR on another machine (there: rtl_tcp -a 0.0.0.0 -p 1234):
+pluto-cli rx fm --device rtlsdr --uri 192.168.178.34:1234 --freq 100000000 --duration 10
+
 # Transmit 3 seconds of FM voice from the default mic, at -20 dB (Pluto's
 # safe default power ceiling), asking for confirmation before keying:
 pluto-cli tx fm --freq 432150000
@@ -139,7 +142,7 @@ Common flags (every mode):
 | flag | meaning |
 |---|---|
 | `--device {pluto,hackrf,rtlsdr,audio}` | RX hardware backend (default: `pluto`) |
-| `--uri URI` | Connection string; ignored for `audio` |
+| `--uri URI` | Connection string; ignored for `audio`. For `--device rtlsdr`: a USB serial, or `host[:port]` of an `rtl_tcp` server (e.g. `192.168.178.34:1234`, port default 1234) to use a dongle on another machine |
 | `--freq HZ` | Receive frequency in Hz |
 | `--bandwidth HZ` | One of `1000000/2500000/5000000/8000000/10000000` -- device sample rate ("zoom" span); omit for the device default |
 | `--gain-mode {manual,slow_attack,fast_attack,hybrid}` | AGC mode |

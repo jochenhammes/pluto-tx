@@ -104,6 +104,17 @@ class RxDevice(abc.ABC):
         completely unable to connect."""
         return cls.frequency_range_hz == (0.0, 0.0)
 
+    def close(self):
+        """Release resources that outlive the flowgraph (e.g. a network
+        connection to a single-client server). No-op by default; called by
+        AdvancedRxFlowgraph.shutdown()."""
+        pass
+
+    def connection_status(self):
+        """None if this backend has no notion of a link that can drop, else a
+        short string ("connected" / "connecting" / "lost") the GUI surfaces."""
+        return None
+
     @abc.abstractmethod
     def build_source(self):
         """Construct and configure the GNU Radio source block and return it

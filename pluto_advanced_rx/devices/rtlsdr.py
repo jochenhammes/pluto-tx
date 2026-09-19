@@ -27,6 +27,7 @@ curated subset of the upper range; the 225-300kHz range is omitted
 """
 from gnuradio import soapy
 
+from .. import rtl_tcp
 from .base import GainStage, RxDevice
 
 FREQUENCY_RANGE_HZ = (24_000_000, 1_764_000_000)
@@ -64,11 +65,23 @@ class RtlSdrDevice(RxDevice):
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)
         self._source = None
+        # (host, port) when `connection` names an rtl_tcp server (see rtl_tcp.parse_connection),
+        # None for a local USB dongle. A malformed network form raises ValueError here.
+        self._tcp = rtl_tcp.parse_connection(connection)
+        self._agc = False
+        self._tuner_gain_db = DEFAULT_TUNER_GAIN_DB
 
     def _device_arg(self):
         return f"driver=rtlsdr,serial={self.connection}" if self.connection else "driver=rtlsdr"
 
     def build_source(self):
+        if self._tcp is not None:
+            # remote dongle behind a standard rtl_tcp server -- no Soapy involved
+            self._source = rtl_tcp.RtlTcpSource(*self._tcp, sample_rate_hz=self.sample_rate_hz)
+            self._source.set_frequency(int(self.frequency_hz))
+            self._source.set_gain_mode(False)
+            self._source.set_gain(DEFAULT_TUNER_GAIN_DB)
+            return self._source
         self._source = soapy.source(self._device_arg(), "fc32", 1, "", "", [""], [""])
         self._source.set_sample_rate(0, self.sample_rate_hz)
         if self.bandwidth_hz:
@@ -80,18 +93,51 @@ class RtlSdrDevice(RxDevice):
 
     def set_frequency(self, freq_hz):
         self.frequency_hz = freq_hz
-        self._source.set_frequency(0, int(freq_hz))
+        if self._tcp is not None:
+            self._source.set_frequency(int(freq_hz))
+        else:
+            self._source.set_frequency(0, int(freq_hz))
 
     def set_gain(self, stage_name, value):
         assert stage_name == "TUNER", f"RtlSdrDevice has no gain stage {stage_name!r}"
-        self._source.set_gain(0, "TUNER", float(value))
+        self._tuner_gain_db = float(value)
+        if self._tcp is not None:
+            self._source.set_gain(float(value))
+        else:
+            self._source.set_gain(0, "TUNER", float(value))
 
     def set_gain_mode(self, mode):
-        self._source.set_gain_mode(0, mode == "agc")
+        self._agc = mode == "agc"
+        if self._tcp is not None:
+            self._source.set_gain_mode(self._agc)
+            if not self._agc:
+                self._source.set_gain(self._tuner_gain_db)  # AGC off: re-assert the manual gain
+        else:
+            self._source.set_gain_mode(0, self._agc)
+
+    def close(self):
+        if self._tcp is not None and self._source is not None:
+            self._source.client.close()
+
+    def connection_status(self):
+        if self._tcp is None or self._source is None:
+            return None
+        return self._source.status
 
     def read_hw_state(self) -> dict:
         if self._source is None:
             return {}
+        if self._tcp is not None:
+            client = self._source.client
+            return {
+                "rtl_tcp": f"{self._tcp[0]}:{self._tcp[1]} {client.status}",
+                "net_buffer_s": f"{client.buffered_s:.2f}/{client.target_s:.2f}",
+                "underruns": client.underruns,
+                "tuner": rtl_tcp.TUNER_NAMES.get(client.tuner_type, client.tuner_type),
+                "tuner_gain_db": self._tuner_gain_db,
+                "agc_enabled": self._agc,
+                "dropped_bytes": client.dropped_bytes,
+            }
         return {
             "tuner_gain_db": self._source.get_gain(0, "TUNER"),
             "agc_enabled": self._source.get_gain_mode(0),
@@ -102,6 +148,12 @@ class RtlSdrDevice(RxDevice):
         """Constructing the source itself already fails fast if no RTL-SDR is
         attached (or the given serial doesn't match) -- same reasoning as
         HackRFDevice.probe_with_timeout()."""
+        try:
+            tcp = rtl_tcp.parse_connection(connection)
+        except ValueError as e:
+            return e
+        if tcp is not None:
+            return rtl_tcp.probe(*tcp, timeout_s=timeout_s)
         try:
             device_arg = f"driver=rtlsdr,serial={connection}" if connection else "driver=rtlsdr"
             soapy.source(device_arg, "fc32", 1, "", "", [""], [""])
