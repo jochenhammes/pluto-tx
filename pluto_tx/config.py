@@ -452,6 +452,7 @@ POCSAG_DEFAULT_RIC = 1234567  # test RIC, not a real subscriber
 POCSAG_MAX_TEXT_LEN = 120
 POCSAG_TX_TAIL_S = 0.4  # hold after the audio ends (resampler/sink latency), then unkey
 POCSAG_AUTO_UNKEY_WATCHDOG_S = 2.0
+POCSAG_SOUNDCARD_LEVEL = 0.7  # output level to a sound card (radio data/mic input); set the radio's input for +-4.5 kHz
 
 # --- LoRa Mesh (Meshtastic/MeshCore interop, PHY not yet built -- Phase 0
 # of /home/hammesj/.claude/plans/swirling-waddling-noodle.md) -- via

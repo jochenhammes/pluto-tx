@@ -167,8 +167,6 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode == self.MODE_MESHTASTIC and (not LORA_AVAILABLE or device_cls.is_audio_only()):
             # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
-        if mode == self.MODE_POCSAG and device_cls.is_audio_only():
-            mode = self.MODE_FM  # POCSAG is direct RF FM here; no soundcard path
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
         # "FM" regardless of what mode the flowgraph was actually built with.
@@ -788,6 +786,14 @@ class PlutoTxFlowgraph(gr.top_block):
         self.pocsag_mod = analog.frequency_modulator_fc(2 * math.pi * config.POCSAG_DEVIATION_HZ / quad_rate)
         self.connect(self.pocsag_source, self.pocsag_resampler)
         self.connect(self.pocsag_resampler, self.pocsag_mod)
+        # Soundcard device: the same NRZ stream goes to the sound card instead (into the data/mic input of an
+        # FM radio, which does the FM modulation). Only built for audio-only devices; starts muted like tx_gain.
+        self.pocsag_audio_gain = None
+        if self.device.is_audio_only():
+            self.pocsag_audio_gain = blocks.multiply_const_ff(0.0)
+            self.pocsag_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
+            self.connect(self.pocsag_source, self.pocsag_audio_gain)
+            self.connect(self.pocsag_audio_gain, self.pocsag_audio_sink)
 
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
@@ -1133,6 +1139,22 @@ class PlutoTxFlowgraph(gr.top_block):
         if len(self.pocsag_text) > config.POCSAG_MAX_TEXT_LEN:
             return f"message is longer than {config.POCSAG_MAX_TEXT_LEN} characters"
         return None
+
+    def _pocsag_start_source(self):
+        """Swap in a fresh one-shot source with the rendered call. Done only after the output path is unmuted
+        and powered: the source is unthrottled, so starting it earlier would run the first samples (part of
+        the preamble) through the muted chain."""
+        self.lock()
+        try:
+            self.disconnect(self.pocsag_source, self.pocsag_resampler)
+            if self.pocsag_audio_gain is not None:
+                self.disconnect(self.pocsag_source, self.pocsag_audio_gain)
+            self.pocsag_source = blocks.vector_source_f(self._pocsag_audio.tolist(), repeat=False)
+            self.connect(self.pocsag_source, self.pocsag_resampler)
+            if self.pocsag_audio_gain is not None:
+                self.connect(self.pocsag_source, self.pocsag_audio_gain)
+        finally:
+            self.unlock()
 
     def _ensure_pocsag_audio(self):
         problem = self.pocsag_problem()
@@ -1641,14 +1663,13 @@ class PlutoTxFlowgraph(gr.top_block):
                 self._keyed = True
                 return
         if self.mode == self.MODE_POCSAG:
-            self._ensure_pocsag_audio()  # raises ValueError before any RF action
-            self.lock()
-            try:
-                self.disconnect(self.pocsag_source, self.pocsag_resampler)
-                self.pocsag_source = blocks.vector_source_f(self._pocsag_audio.tolist(), repeat=False)
-                self.connect(self.pocsag_source, self.pocsag_resampler)
-            finally:
-                self.unlock()
+            self._ensure_pocsag_audio()  # raises ValueError before any RF action; the source starts last
+            if self.device.is_audio_only():
+                self.tx_gain.set_k(1.0 + 0j)
+                self.pocsag_audio_gain.set_k(config.POCSAG_SOUNDCARD_LEVEL)
+                self._keyed = True
+                self._pocsag_start_source()
+                return
         if self.mode == self.MODE_RTTY:
             # Exact structural mirror of the MODE_PSK31 branch just above.
             self._ensure_rtty_audio()
@@ -1695,6 +1716,8 @@ class PlutoTxFlowgraph(gr.top_block):
             self._meshtastic_duty.record(airtime_s, now)
             self.lora_encoder.send_payload_bytes(packet)
         self._keyed = True
+        if self.mode == self.MODE_POCSAG:
+            self._pocsag_start_source()
 
     def unkey_ptt(self):
         """PTT release. FM/SSB: mute tx_gain FIRST (severs the actual RF
@@ -1759,6 +1782,11 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.mode == self.MODE_RTTY and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.rtty_audio_gain.set_k(0.0)
+            self._keyed = False
+            return
+        if self.mode == self.MODE_POCSAG and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.pocsag_audio_gain.set_k(0.0)
             self._keyed = False
             return
         if self.mode == self.MODE_M17:

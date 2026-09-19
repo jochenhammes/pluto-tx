@@ -1756,7 +1756,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # SSB-injectable tone, see psk31.py/rtty.py) -- no extra shifting needed.
     _AUDIO_ONLY_CAPABLE_MODES = (
         PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
-        PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
+        PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
     )
 
     def _sync_mode_combo_availability(self):
@@ -1793,12 +1793,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if LORA_AVAILABLE and not is_rf:
             lora_item.setToolTip("LoRa needs an RF device -- a 48 kHz soundcard cannot carry it")
             if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_MESHTASTIC:
-                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
-        pocsag_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_POCSAG))
-        pocsag_item.setEnabled(is_rf)
-        if not is_rf:
-            pocsag_item.setToolTip("POCSAG needs an RF device (direct FM) -- not available on the soundcard")
-            if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_POCSAG:
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
         if not is_rf and self._current_mode not in self._AUDIO_ONLY_CAPABLE_MODES:
             if RADE_AVAILABLE:

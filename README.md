@@ -177,8 +177,14 @@ im Digimodes-Reiter. Baudrate (45.45/50/75/100) und Shift
 Gegenstationen mit vertauschter Ton-Zuordnung.
 
 **POCSAG (Funkruf).** Standardkonformer POCSAG-Digimode nach ITU-R M.584
-(2-FSK, ±4,5 kHz Hub, 512/1200/2400 Bit/s, Logik 1 = niedrigere Frequenz), nur
-mit Pluto/HackRF/RTL-SDR. **RX:** Kanalmitte einstellen, alle drei Baudraten
+(2-FSK, ±4,5 kHz Hub, 512/1200/2400 Bit/s, Logik 1 = niedrigere Frequenz), mit
+Pluto/HackRF/RTL-SDR und über die Soundkarte. Soundkarte: TX gibt das geformte
+NRZ-Signal (±1, Pegel 0,7) am Ausgang aus, um es in den Daten-/Mikrofoneingang eines
+FM-Funkgeräts zu speisen (das Gerät moduliert, Eingangspegel auf ±4,5 kHz Hub
+einstellen; DC-gekoppelter Datenanschluss ist ideal, ein wechselstromgekoppelter
+Mikrofoneingang verformt lange gleiche Bitfolgen); RX liest das demodulierte
+Diskriminator-/Datensignal eines Funkgeräts vom Audio-Eingang (Pegel beliebig, AGC).
+**RX:** Kanalmitte einstellen, alle drei Baudraten
 werden parallel dekodiert (Autobaud, beide Polaritäten, BCH-Fehlerkorrektur bis
 2 Bit); Tabelle mit Zeit, Baud, RIC, Funktion, Text und Fehleranzeige,
 Darstellung „Auto/Alpha/Numerisch“ und optional deutscher Zeichensatz
@@ -286,7 +292,7 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | RADE, Waterfall Writer, PSK31, RTTY | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **Soundkarte / externes Funkgerät** | RADE, Waterfall Writer, PSK31, RTTY, POCSAG | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und
 Connect/Disconnect-Buttons. **Nur `pluto-tx`** hat zusätzlich ein

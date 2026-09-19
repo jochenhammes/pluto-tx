@@ -348,7 +348,7 @@ def run_rtty(args):
 
 def add_pocsag_subparser(subparsers):
     p = subparsers.add_parser(
-        "pocsag", help="POCSAG paging call (ITU-R M.584, FM +-4.5 kHz, 512/1200/2400 baud) to a RIC",
+        "pocsag", help="POCSAG paging call (ITU-R M.584, FM +-4.5 kHz, 512/1200/2400 baud) to a RIC; with --device soundcard the NRZ audio goes to the sound card (radio data input)",
         description=__doc__,
     )
     add_common_args(p)
@@ -369,9 +369,6 @@ def add_pocsag_subparser(subparsers):
 
 def run_pocsag(args):
     emitter = runtime.Emitter(args.json)
-    if args.device == "soundcard":
-        emitter.error("POCSAG needs an RF device (pluto or hackrf), not the soundcard")
-        return 1
 
     def preflight(tb):
         problem = tb.pocsag_problem()

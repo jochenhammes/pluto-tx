@@ -753,14 +753,28 @@ class AdvancedRxFlowgraph(gr.top_block):
             pocsag_branches.append((lowpass, sync, slicer, deframer))
         if active_digimode == "pocsag":
             if self.device.is_audio_only():
-                raise ValueError("POCSAG needs an RF device, not a soundcard")
-            self.connect(self.if_filter, self.pocsag_channel_filter)
-            self.connect(self.pocsag_channel_filter, self.pocsag_demod)
-            self.connect(self.pocsag_demod, (self.pocsag_dc_sub, 0))
-            self.connect(self.pocsag_demod, self.pocsag_dc_iir)
-            self.connect(self.pocsag_dc_iir, (self.pocsag_dc_sub, 1))
+                # Sound card fed by an FM radio's discriminator/data output: the audio already IS the
+                # demodulated signal, so no channel filter/FM demod (nor the audio tuning rotator) -- real part, DC removal, then an AGC
+                # (the audio level is unknown) ahead of the same per-baud branches.
+                self.pocsag_audio_real = blocks.complex_to_real()
+                self.pocsag_agc = analog.agc_ff(1e-4, 1.0, 1.0)
+                self.pocsag_clip = analog.rail_ff(-1.5, 1.5)  # AGC start-up spikes must not upset the timing loops
+                self.connect(self.pluto_source, self.pocsag_audio_real)  # before the tuning rotator: plain audio
+                self.connect(self.pocsag_audio_real, (self.pocsag_dc_sub, 0))
+                self.connect(self.pocsag_audio_real, self.pocsag_dc_iir)
+                self.connect(self.pocsag_dc_iir, (self.pocsag_dc_sub, 1))
+                self.connect(self.pocsag_dc_sub, self.pocsag_agc)
+                self.connect(self.pocsag_agc, self.pocsag_clip)
+                branch_input = self.pocsag_clip
+            else:
+                self.connect(self.if_filter, self.pocsag_channel_filter)
+                self.connect(self.pocsag_channel_filter, self.pocsag_demod)
+                self.connect(self.pocsag_demod, (self.pocsag_dc_sub, 0))
+                self.connect(self.pocsag_demod, self.pocsag_dc_iir)
+                self.connect(self.pocsag_dc_iir, (self.pocsag_dc_sub, 1))
+                branch_input = self.pocsag_dc_sub
             for lowpass, sync, slicer, deframer in pocsag_branches:
-                self.connect(self.pocsag_dc_sub, lowpass)
+                self.connect(branch_input, lowpass)
                 self.connect(lowpass, sync)
                 self.connect(sync, slicer)
                 self.connect(slicer, deframer)

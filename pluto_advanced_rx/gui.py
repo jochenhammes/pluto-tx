@@ -1109,12 +1109,6 @@ class MainWindow(QtWidgets.QMainWindow):
             lora_item.setToolTip("LoRa needs an RF device, not a soundcard")
             if self.digimode_combo.currentData() == "meshtastic":
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
-        pocsag_item = self.digimode_combo.model().item(self.digimode_combo.findData("pocsag"))
-        pocsag_item.setEnabled(has_frequency)
-        if not has_frequency:
-            pocsag_item.setToolTip("POCSAG needs an RF device, not a soundcard")
-            if self.digimode_combo.currentData() == "pocsag":
-                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
         self.audio_tune_label.setVisible(has_audio_tuning)
         self.audio_tune_spin.setVisible(has_audio_tuning)
         self.fine_slider.setVisible(has_frequency or has_audio_tuning)
@@ -1675,19 +1669,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if batches > self._pocsag_last_batches:
             self._pocsag_last_activity_time = time.time()
         self._pocsag_last_batches = batches
+        audio_only = self.tb.device.is_audio_only()
         freq = (self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6
+        where = "the audio input" if audio_only else f"{freq:.4f} MHz"
         recent = self._pocsag_last_activity_time > 0 and time.time() - self._pocsag_last_activity_time < 5.0
         if recent:
             total = best.codewords_ok + best.codewords_bad
             calls, damaged, hidden = self._pocsag_state.counts()
             extra = f", {calls - hidden} call(s) shown" + (f", {hidden} damaged hidden" if hidden else "")
             self.pocsag_signal_label.setText(
-                f"POCSAG {baud} Bd on {freq:.4f} MHz -- {best.batches} batches, {best.codewords_ok}/{total} codewords OK{extra}"
+                f"POCSAG {baud} Bd on {where} -- {best.batches} batches, {best.codewords_ok}/{total} codewords OK{extra}"
                 + ("" if calls else " (most batches carry no call: idle keep-alive)"))
         else:
             self.pocsag_signal_label.setText(
-                f"No POCSAG signal on {freq:.4f} MHz right now (paging channels are used in bursts; tune exactly to the channel "
-                f"centre, e.g. 466.075 / 465.970 / 466.230). "
+                (f"No POCSAG signal on the audio input right now (connect the radio's discriminator/data output). "
+                 if audio_only else
+                 f"No POCSAG signal on {freq:.4f} MHz right now (paging channels are used in bursts; tune exactly to the "
+                 f"channel centre, e.g. 466.075 / 465.970 / 466.230). ") +
                 f"Calls so far: {self._pocsag_state.counts()[0]}.")
 
     def _render_pocsag_table(self):

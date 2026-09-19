@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pluto_tx import config, pocsag_codec as codec
+from pluto_tx import config, pocsag, pocsag_codec as codec
 from pluto_tx import flowgraph as txf
 
 RATE = 2_500_000
@@ -117,9 +117,14 @@ class TxTests(unittest.TestCase):
         fg.set_pocsag_ric(codec.RIC_MAX + 1)
         self.assertIn("RIC", fg.pocsag_problem())
 
-    def test_soundcard_falls_back_to_fm(self):
-        fg = txf.PlutoTxFlowgraph(device_type="soundcard", mode=POCSAG)
-        self.assertEqual(fg.mode, fg.MODE_FM)
+    def test_soundcard_keeps_pocsag_and_has_an_audio_output_branch(self):
+        fg = txf.PlutoTxFlowgraph(device_type="soundcard", mode=POCSAG, pocsag_text="DA2JH", pocsag_baud=1200)
+        self.assertEqual(fg.mode, POCSAG)
+        self.assertIsNotNone(fg.pocsag_audio_gain)                            # NRZ audio goes to the sound card
+        fg._ensure_pocsag_audio()
+        self.assertAlmostEqual(fg.pocsag_duration_s, pocsag.estimate_duration(1234567, 3, "alpha", "DA2JH", 1200), delta=0.01)
+        rf = txf.PlutoTxFlowgraph(device_type="fake", mode=POCSAG)
+        self.assertIsNone(rf.pocsag_audio_gain)                               # RF devices never open an audio output
 
 
 class LoopbackTests(unittest.TestCase):
@@ -147,10 +152,58 @@ class LoopbackTests(unittest.TestCase):
         out, _rx = rx_messages(iq)
         self.assertEqual(codec.decode_message(out[0], "auto", "de"), "Grüße")
 
-    def test_rx_refuses_audio_only_device(self):
+    def test_rx_from_the_audio_input(self):
+        """A radio's demodulated audio (here: the TX encoder's NRZ stream, any level, with DC offset and noise,
+        either polarity) straight into the audio device."""
+        from gnuradio import blocks
+        from pluto_advanced_rx import devices as rx_devices
         from pluto_advanced_rx import flowgraph as rxf
-        with self.assertRaises(ValueError):
-            rxf.AdvancedRxFlowgraph(uri="", device_type="audio", active_digimode="pocsag")
+        from pluto_advanced_rx.devices.base import RxDevice
+        for baud in codec.BAUD_RATES:
+            for level, sign in ((0.05, 1), (0.8, -1)):
+                with self.subTest(baud=baud, level=level, sign=sign):
+                    audio, _ = pocsag.encode_message(1234567, 3, "alpha", f"Audio {baud}", baud)
+                    x = sign * level * audio + 0.02 * level * np.random.randn(len(audio)) + 0.1 * level
+                    x = np.concatenate([np.zeros(24000), x, np.zeros(24000)]).astype(np.float32)
+
+                    class FakeAudio(RxDevice):
+                        device_type = "fake"
+                        display_name = "fake audio"
+                        connection_kind = "audio_device"
+                        DEFAULT_CONNECTION = ""
+                        frequency_range_hz = (0.0, 0.0)
+                        audio_tuning_range_hz = (0.0, 24000.0)
+                        sample_rate_hz_choices = (48000,)
+                        default_sample_rate_hz = 48000
+                        default_bandwidth_hz = None
+                        gain_stages = ()
+                        supports_agc_mode = False
+                        agc_modes = ()
+                        default_gain_mode = None
+                        max_waterfall_zoom = 8
+                        supports_dc_iq_correction = False
+
+                        def build_source(self):
+                            return blocks.vector_source_c((x.astype(np.complex64)).tolist(), False)
+
+                        def set_frequency(self, hz): pass
+                        def set_gain(self, name, value): pass
+                        def read_hw_state(self): return {}
+                        @staticmethod
+                        def probe_with_timeout(connection, timeout_s=5): return None
+                        @staticmethod
+                        def scan_devices_with_timeout(timeout_s=5): return {}, None
+
+                    rx_devices.DEVICE_REGISTRY["fake"] = FakeAudio
+                    out = []
+                    rx = rxf.AdvancedRxFlowgraph(uri="", sample_rate=48000, device_type="fake", active_digimode="pocsag",
+                                                 on_pocsag_message=out.append)
+                    rx.start()
+                    time.sleep(len(x) / 48000 * 0.7 + 3)
+                    rx.stop()
+                    rx.wait()
+                    self.assertEqual([(m["baud"], m["ric"], codec.decode_message(m)) for m in out],
+                                     [(baud, 1234567, f"Audio {baud}")])
 
 
 class GuiTests(unittest.TestCase):
