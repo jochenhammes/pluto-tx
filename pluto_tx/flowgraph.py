@@ -1385,7 +1385,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self._digitext_audio, self.digitext_duration_s = digitext.encode_text(
                 self.digitext_text, self.digitext_layout, config.DIGITEXT_FONT_SIZE_PX,
                 config.DIGITEXT_SAMPLE_RATE, config.DIGITEXT_HZ_PER_COL, config.DIGITEXT_ROW_DWELL_S,
-                min_freq_hz=self.digitext_min_freq_hz, tail_s=config.DIGITEXT_TAIL_S,
+                min_freq_hz=self.digitext_min_freq_hz, tail_s=config.DIGITEXT_TAIL_S + self.device.tx_end_loss_s,
                 col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
             )
             self._digitext_audio_dirty = False
@@ -1407,7 +1407,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if self._psk31_audio_dirty or self._psk31_audio is None:
             self._psk31_audio, self.psk31_duration_s = psk31.encode_text(
                 self.psk31_text, config.AUDIO_RATE, self.psk31_tone_hz,
-                tail_s=config.PSK31_TAIL_S, preamble_chars=config.PSK31_PREAMBLE_CHARS,
+                tail_s=config.PSK31_TAIL_S + self.device.tx_end_loss_s, preamble_chars=config.PSK31_PREAMBLE_CHARS,
             )
             self._psk31_audio_dirty = False
 
@@ -1440,7 +1440,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self._rtty_audio, self.rtty_duration_s = rtty.encode_text(
                 self.rtty_text, config.AUDIO_RATE, self.rtty_mark_hz, self.rtty_shift_hz,
                 self.rtty_baud_rate, reverse=self.rtty_reverse,
-                tail_s=config.RTTY_TAIL_S, preamble_s=config.RTTY_PREAMBLE_S,
+                tail_s=config.RTTY_TAIL_S + self.device.tx_end_loss_s, preamble_s=config.RTTY_PREAMBLE_S,
                 stop_bits=config.RTTY_STOP_BITS,
             )
             self._rtty_audio_dirty = False

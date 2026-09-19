@@ -85,6 +85,23 @@ class TxTests(unittest.TestCase):
         finally:
             fakes.FakeTxDevice.tx_end_loss_s = 0.0
 
+    def test_end_padding_applies_to_the_other_one_shot_digimodes(self):
+        from tests import fakes
+        durations = {}
+        for pad in (0.0, 0.5):
+            fakes.FakeTxDevice.tx_end_loss_s = pad
+            try:
+                fg = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_RTTY, rtty_text="TEST",
+                                          psk31_text="TEST", digitext_text="TEST")
+                fg._ensure_rtty_audio()
+                fg._ensure_psk31_audio()
+                fg._ensure_digitext_audio()
+                durations[pad] = (fg.rtty_duration_s, fg.psk31_duration_s, fg.digitext_duration_s)
+            finally:
+                fakes.FakeTxDevice.tx_end_loss_s = 0.0
+        for plain, padded in zip(durations[0.0], durations[0.5]):
+            self.assertAlmostEqual(padded - plain, 0.5, delta=0.02)
+
     def test_refusals_before_any_rf_action(self):
         fg = txf.PlutoTxFlowgraph(device_type="fake", mode=POCSAG, pocsag_text="")
         self.assertIn("empty", fg.pocsag_problem())
