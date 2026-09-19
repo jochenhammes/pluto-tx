@@ -54,6 +54,8 @@ def make_fake_rx(iq, rate):
         display_name = "fake"
         DEFAULT_CONNECTION = "x"
         default_sample_rate_hz = rate
+        _source = None
+
         def __init__(self, *a, **k): RxDevice.__init__(self, *a, **k)
         def build_source(self): return blocks.vector_source_c(iq.tolist(), False)
         def set_frequency(self, hz): pass

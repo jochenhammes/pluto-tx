@@ -52,7 +52,7 @@ class PlutoDevice(RxDevice):
     def build_source(self):
         buffer_size = self.buffer_size or config.PLUTO_RX_BUFFER_SIZE_DEFAULT
         self._source = iio.fmcomms2_source_fc32(self.connection, [True, True], buffer_size)
-        self._source.set_frequency(int(self.frequency_hz))
+        self._source.set_frequency(int(self._hw_frequency(self.frequency_hz)))
         self._source.set_samplerate(int(self.sample_rate_hz))
         self._source.set_quadrature(True)
         self._source.set_rfdc(True)
@@ -62,7 +62,11 @@ class PlutoDevice(RxDevice):
 
     def set_frequency(self, freq_hz):
         self.frequency_hz = freq_hz
-        self._source.set_frequency(int(freq_hz))
+        self._source.set_frequency(int(self._hw_frequency(freq_hz)))
+
+    def _apply_frequency(self):
+        if self._source is not None:
+            self._source.set_frequency(int(self._hw_frequency(self.frequency_hz)))
 
     def set_gain(self, stage_name, value):
         assert stage_name == "gain", f"PlutoDevice has no gain stage {stage_name!r}"

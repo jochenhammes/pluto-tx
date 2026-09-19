@@ -86,25 +86,14 @@ class HackRFDevice(TxDevice):
     # SoapyHackRF driver (confirmed: has_frequency_correction(0) is False,
     # list_frequencies(0) only shows a single "RF" component, no separate
     # "CORR" tuning element) -- yet a real, consistent offset was observed
-    # on real hardware, presumably that unit's crystal/TCXO tolerance.
-    # Since SoapySDR/gr-soapy offer no automatic correction for this
-    # driver, frequency_correction_hz is a manual, operator-tuned
-    # compensation applied in software before every set_frequency() call --
-    # not a calibrated value, just an additive offset the operator dials in
-    # empirically (GUI spinbox, only shown for this device type) until
-    # their receiver shows the frequency they asked for.
-    supports_frequency_correction = True
-    # Measured on the operator's specific HackRF unit (432.15MHz, ~24200Hz
-    # low) -- a per-unit crystal/TCXO characteristic, NOT a general HackRF
-    # property. A different unit would need its own value; this is a
-    # starting-point default for THIS project's hardware, not a universal
-    # constant, and the GUI spinbox lets it be overridden per session.
-    DEFAULT_FREQUENCY_CORRECTION_HZ = 24_200.0
+    # on a HackRF without TCXO (~56 ppm low). So the correction is a manual,
+    # operator-tuned ppm value applied in software to the LO frequency (see
+    # TxDevice._hw_frequency() / freq_correction.py); default 0 -- a per-unit
+    # characteristic, never a built-in constant.
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz)
         self._sink = None
-        self._frequency_correction_hz = self.DEFAULT_FREQUENCY_CORRECTION_HZ
 
     def _device_arg(self):
         return f"driver=hackrf,serial={self.connection}" if self.connection else "driver=hackrf"
@@ -119,19 +108,18 @@ class HackRFDevice(TxDevice):
         self._sink.set_sample_rate(0, self.sample_rate_hz)
         if self.bandwidth_hz:
             self._sink.set_bandwidth(0, self.bandwidth_hz)
-        self._sink.set_frequency(0, int(self.frequency_hz + self._frequency_correction_hz))
+        self._sink.set_frequency(0, int(self._hw_frequency(self.frequency_hz)))
         self._sink.set_gain(0, "VGA", 0.0)
         self._sink.set_gain(0, "AMP", 0.0)
         return self._sink
 
     def set_frequency(self, freq_hz):
         self.frequency_hz = freq_hz
-        self._sink.set_frequency(0, int(freq_hz + self._frequency_correction_hz))
+        self._sink.set_frequency(0, int(self._hw_frequency(freq_hz)))
 
-    def set_frequency_correction(self, hz):
-        self._frequency_correction_hz = hz
+    def _apply_frequency(self):
         if self._sink is not None:
-            self._sink.set_frequency(0, int(self.frequency_hz + self._frequency_correction_hz))
+            self._sink.set_frequency(0, int(self._hw_frequency(self.frequency_hz)))
 
     def set_power(self, stage_name, value):
         if stage_name == "AMP":
@@ -166,7 +154,7 @@ class HackRFDevice(TxDevice):
         return {
             "vga_gain_db": self._sink.get_gain(0, "VGA"),
             "amp_on": self._sink.get_gain(0, "AMP") > 0,
-            "freq_correction_hz": self._frequency_correction_hz,
+            "freq_correction_ppm": self._frequency_correction_ppm,
         }
 
     @staticmethod

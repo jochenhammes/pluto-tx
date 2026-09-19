@@ -13,6 +13,8 @@ import abc
 from dataclasses import dataclass
 from typing import Optional, Union
 
+from .. import freq_correction
+
 
 @dataclass(frozen=True)
 class PowerStage:
@@ -67,13 +69,11 @@ class TxDevice(abc.ABC):
     # for mode switching) on every unkey/E-STOP, not just on Connect/
     # Disconnect.
     supports_persistent_sink: bool = True
-    # True only for backends whose real hardware oscillator can be off by an
-    # operator-noticeable amount with no automatic correction available
-    # (confirmed for HackRF: no frequency-correction capability exposed by
-    # this system's SoapyHackRF driver -- has_frequency_correction() is
-    # False -- yet a real ~25kHz offset was observed on real hardware).
-    # False (Pluto): no such issue reported, no correction control shown.
-    supports_frequency_correction: bool = False
+    # Manual oscillator correction in ppm (see freq_correction.py for the sign
+    # convention): applied in software to the LO frequency of every RF backend
+    # (Pluto and HackRF both have crystals that can be off -- confirmed ~56 ppm
+    # on a HackRF without TCXO). False only for backends with no LO at all.
+    supports_frequency_correction: bool = True
 
     def __init__(self, connection: str, frequency_hz: float, sample_rate_hz: float,
                  bandwidth_hz: Optional[float]):
@@ -81,6 +81,11 @@ class TxDevice(abc.ABC):
         self.frequency_hz = frequency_hz
         self.sample_rate_hz = sample_rate_hz
         self.bandwidth_hz = bandwidth_hz
+        self._frequency_correction_ppm = 0.0
+
+    def _hw_frequency(self, wanted_hz: float) -> float:
+        """The LO frequency to program for `wanted_hz`, with the ppm correction."""
+        return freq_correction.hardware_frequency(wanted_hz, self._frequency_correction_ppm)
 
     @property
     def primary_stage(self) -> PowerStage:
@@ -104,11 +109,14 @@ class TxDevice(abc.ABC):
         hasattr() check."""
         pass
 
-    def set_frequency_correction(self, hz: float):
-        """No-op unless supports_frequency_correction=True (see HackRFDevice
-        for the one backend that currently overrides this) -- concrete
-        default here so callers don't need an extra hasattr()/isinstance()
-        check for backends that don't need it."""
+    def set_frequency_correction_ppm(self, ppm: float):
+        """Store the correction and retune (if the sink already exists)."""
+        self._frequency_correction_ppm = float(ppm)
+        self._apply_frequency()
+
+    def _apply_frequency(self):
+        """Re-issue the current frequency to the hardware after a correction
+        change. Backends with a sink override this; default is a no-op."""
         pass
 
     @abc.abstractmethod

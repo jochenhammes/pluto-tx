@@ -15,6 +15,7 @@ from . import config
 from . import devices
 from . import digitext
 from . import filebroadcast
+from . import freq_correction
 from .devices import pluto as pluto_device
 from .flowgraph import (
     PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, _default_wav_path,
@@ -199,19 +200,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fine_label.setMinimumWidth(70)
         freq_row.addWidget(self.fine_label)
 
-        # Manual, operator-tuned frequency offset -- only shown for backends
-        # with supports_frequency_correction=True (currently just HackRF: a
-        # real ~25kHz offset was observed on real hardware, and this
-        # system's SoapyHackRF driver exposes no automatic correction to
-        # compensate for it in software). Not a calibrated value -- the
-        # operator dials it in empirically against their own receiver.
-        self.freq_correction_label = QtWidgets.QLabel("Freq. Correction (Hz):")
+        # Manual oscillator correction in ppm (a ratio, so a known error scales
+        # with the tuned frequency) -- shown for every RF backend
+        # (supports_frequency_correction), default 0. Sign convention: see
+        # pluto_tx/freq_correction.py (the device's error; positive = runs high).
+        self.freq_correction_label = QtWidgets.QLabel("Freq. correction (ppm):")
         self.freq_correction_label.setVisible(False)
         freq_row.addWidget(self.freq_correction_label)
-        self.freq_correction_spin = QtWidgets.QSpinBox()
-        self.freq_correction_spin.setRange(-200_000, 200_000)
-        self.freq_correction_spin.setSingleStep(100)
-        self.freq_correction_spin.setValue(0)
+        self.freq_correction_spin = QtWidgets.QDoubleSpinBox()
+        self.freq_correction_spin.setDecimals(2)
+        self.freq_correction_spin.setRange(*freq_correction.PPM_RANGE)
+        self.freq_correction_spin.setSingleStep(0.1)
+        self.freq_correction_spin.setValue(0.0)
+        self.freq_correction_spin.setToolTip(
+            "Oscillator error of this device in ppm, scaling with the tuned frequency. "
+            "Positive = the device runs too HIGH (it transmits above the frequency shown); "
+            "the app tunes the hardware lower to compensate. Example: a receiver shows your "
+            "432.150 MHz carrier at 432.125 MHz -> the device is ~58 ppm low -> enter -58. "
+            "Default 0 (use it once a TCXO is fitted or the error is measured)."
+        )
         self.freq_correction_spin.valueChanged.connect(self._on_freq_correction_changed)
         self.freq_correction_spin.setVisible(False)
         freq_row.addWidget(self.freq_correction_spin)
@@ -1478,7 +1485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # type switch (see _on_device_type_changed()) or once at startup,
         # never on a plain reconnect within the same type, so it never
         # clobbers a value the operator already tuned this session.
-        self.freq_correction_spin.setValue(int(getattr(device_cls, "DEFAULT_FREQUENCY_CORRECTION_HZ", 0)))
+        self.freq_correction_spin.setValue(0.0)
         self._sync_mode_combo_availability()
 
     # Modes whose IQ/audio output is directly SSB-injectable, so they make
@@ -1567,7 +1574,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_freq_correction_changed(self, value):
         if self.tb is not None:
-            self.tb.device.set_frequency_correction(float(value))
+            self.tb.device.set_frequency_correction_ppm(float(value))
 
     def _on_nf_gain_changed(self, value):
         if self.tb is not None:
@@ -2353,7 +2360,7 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
         new_tb.set_secondary_power("AMP", self.amp_checkbox.isChecked())
-        new_tb.device.set_frequency_correction(float(self.freq_correction_spin.value()))
+        new_tb.device.set_frequency_correction_ppm(float(self.freq_correction_spin.value()))
         # Reapply dynamics-processing settings -- a fresh flowgraph starts at
         # config.py's defaults, which would otherwise silently diverge from
         # what these controls still visually show after any rebuild (device

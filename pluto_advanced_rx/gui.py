@@ -24,6 +24,7 @@ import time
 from PyQt5 import QtCore, QtWidgets
 
 from pluto_tx import audio_devices
+from pluto_tx import freq_correction
 
 from . import config
 from . import devices
@@ -37,6 +38,10 @@ if LORA_AVAILABLE:
 from .psk31_state import Psk31ChatState
 from .rtty_state import RttyChatState
 from .waterfall_widget import AdvancedWaterfallWidget
+from .devices.rtlsdr import DIRECT_SAMPLING_NYQUIST_HZ, DIRECT_SAMPLING_RANGE_HZ
+
+DIRECT_SAMPLING_MHZ = (DIRECT_SAMPLING_RANGE_HZ[0] / 1e6, DIRECT_SAMPLING_RANGE_HZ[1] / 1e6)
+DIRECT_SAMPLING_DEFAULT_MHZ = 7.1  # start frequency when direct sampling is switched on out of range
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -136,6 +141,48 @@ class MainWindow(QtWidgets.QMainWindow):
         device_group_layout = QtWidgets.QVBoxLayout(device_group)
         device_row = QtWidgets.QHBoxLayout()
         device_group_layout.addLayout(device_row)
+
+        # --- Second device row: oscillator correction (all RF backends) and, for the
+        # RTL-SDR only, direct sampling. Defaults: 0 ppm, direct sampling off.
+        correction_row = QtWidgets.QHBoxLayout()
+        device_group_layout.addLayout(correction_row)
+        self.ppm_label = QtWidgets.QLabel("Freq. correction (ppm):")
+        correction_row.addWidget(self.ppm_label)
+        self.ppm_spin = QtWidgets.QDoubleSpinBox()
+        self.ppm_spin.setDecimals(2)
+        self.ppm_spin.setRange(*freq_correction.PPM_RANGE)
+        self.ppm_spin.setSingleStep(0.1)
+        self.ppm_spin.setValue(0.0)
+        self.ppm_spin.setToolTip(
+            "Oscillator error of this device in ppm, scaling with the tuned frequency. "
+            "Positive = the device runs too HIGH (signals appear above their true frequency); "
+            "the app tunes the hardware lower to compensate. Example: a 100.000 MHz broadcast "
+            "carrier appears at 100.003 MHz -> +30 ppm. Default 0."
+        )
+        self.ppm_spin.valueChanged.connect(self._on_ppm_changed)
+        correction_row.addWidget(self.ppm_spin)
+        self.direct_checkbox = QtWidgets.QCheckBox("Direct sampling")
+        self.direct_checkbox.setToolTip(
+            "RTL-SDR only: bypass the tuner and sample the antenna input directly (HF, "
+            f"{DIRECT_SAMPLING_MHZ[0]:g}-{DIRECT_SAMPLING_MHZ[1]:g} MHz). The tuner gain has no effect "
+            "in this mode. Pick the branch your dongle's HF input is wired to. Above "
+            f"{DIRECT_SAMPLING_NYQUIST_HZ / 1e6:g} MHz the reception is aliased: the band you tune is "
+            "mixed with the mirror image of (28.8 MHz - frequency), so use a band-pass filter there."
+        )
+        self.direct_checkbox.toggled.connect(self._on_direct_changed)
+        correction_row.addWidget(self.direct_checkbox)
+        self.direct_branch_combo = QtWidgets.QComboBox()
+        self.direct_branch_combo.addItem("Q branch", 2)  # RTL-SDR Blog V3 and most HF-mod dongles
+        self.direct_branch_combo.addItem("I branch", 1)
+        self.direct_branch_combo.setEnabled(False)
+        self.direct_branch_combo.currentIndexChanged.connect(self._on_direct_changed)
+        correction_row.addWidget(self.direct_branch_combo)
+        correction_row.addStretch(1)
+        self.direct_checkbox.setVisible(False)  # RTL-SDR only, shown by _sync_device_dependent_widgets()
+        self.direct_branch_combo.setVisible(False)
+        self._direct_active = False
+        self._freq_before_direct = None  # frequency (MHz) to restore when direct sampling is switched off
+
         device_row.addWidget(QtWidgets.QLabel("Device Type:"))
         self.device_type_combo = QtWidgets.QComboBox()
         for dtype, device_cls in devices.DEVICE_REGISTRY.items():
@@ -958,6 +1005,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uri_combo.clear()
         self.uri_combo.clearEditText()
         self.uri_combo.blockSignals(False)
+        # a new device type starts with the defaults: 0 ppm, direct sampling off
+        self.ppm_spin.blockSignals(True)
+        self.ppm_spin.setValue(0.0)
+        self.ppm_spin.blockSignals(False)
+        self.direct_checkbox.blockSignals(True)
+        self.direct_checkbox.setChecked(False)
+        self.direct_checkbox.blockSignals(False)
+        self.direct_branch_combo.setEnabled(False)
+        self._direct_active = False
+        self._freq_before_direct = None
         self._sync_device_dependent_widgets()
 
     def _sync_device_dependent_widgets(self):
@@ -984,6 +1041,10 @@ class MainWindow(QtWidgets.QMainWindow):
         has_frequency = device_cls.frequency_range_hz != (0.0, 0.0)
         has_audio_tuning = device_cls.audio_tuning_range_hz is not None
         self.freq_spin.setVisible(has_frequency)
+        self.ppm_label.setVisible(has_frequency)
+        self.ppm_spin.setVisible(has_frequency)
+        self.direct_checkbox.setVisible(device_cls.supports_direct_sampling)
+        self.direct_branch_combo.setVisible(device_cls.supports_direct_sampling)
         # LoRa needs a real RF front end -- a sound card can't carry it.
         lora_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshtastic"))
         lora_item.setEnabled(LORA_AVAILABLE and has_frequency)
@@ -1095,6 +1156,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.device.set_gain(stage_name, value)
 
+    def _direct_mode(self):
+        """0 = off, 1 = I branch, 2 = Q branch."""
+        return self.direct_branch_combo.currentData() if self.direct_checkbox.isChecked() else 0
+
+    def _on_ppm_changed(self, value):
+        if self.tb is not None:
+            self.tb.set_frequency_correction_ppm(float(value))
+
+    def _on_direct_changed(self, *_):
+        """Direct-sampling checkbox / I-Q dropdown. Switches the tuning range of freq_spin to
+        the HF range (and back), remembering the previous frequency, then re-tunes."""
+        mode = self._direct_mode()
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        self.direct_branch_combo.setEnabled(self.direct_checkbox.isChecked())
+        enabling, disabling = bool(mode) and not self._direct_active, not mode and self._direct_active
+        self._direct_active = bool(mode)
+        if enabling or disabling:
+            self.freq_spin.blockSignals(True)
+            if enabling:
+                self._freq_before_direct = self.freq_spin.value()
+                lo, hi = device_cls.direct_sampling_range_hz
+                self.freq_spin.setRange(lo / 1e6, hi / 1e6)
+                if not lo / 1e6 <= self._freq_before_direct <= hi / 1e6:
+                    self.freq_spin.setValue(DIRECT_SAMPLING_DEFAULT_MHZ)
+            else:
+                lo, hi = device_cls.frequency_range_hz
+                self.freq_spin.setRange(lo / 1e6, hi / 1e6)
+                if self._freq_before_direct is not None:
+                    self.freq_spin.setValue(self._freq_before_direct)
+                self._freq_before_direct = None
+            self.freq_spin.blockSignals(False)
+        if self.tb is not None:
+            self.tb.set_direct_sampling(mode)
+            self.tb.set_frequency(self.freq_spin.value() * 1e6)
+            self._sync_waterfall()
+
     def _current_gain_kwargs(self, device_cls):
         """gain_mode/manual_gain_db for an AGC-capable device (Pluto/
         RTL-SDR, read from gain_mode_combo/gain_slider), or gain_values for
@@ -1103,12 +1200,16 @@ class MainWindow(QtWidgets.QMainWindow):
         unused one is simply inert for that backend (see its own
         docstring) -- so the caller doesn't need to branch on device_cls
         itself, just call this and pass the result through."""
+        # also carries the device options of the second device row (ppm correction, direct
+        # sampling), which every rebuild has to re-apply to the fresh flowgraph
+        options = dict(frequency_correction_ppm=float(self.ppm_spin.value()),
+                       direct_sampling=self._direct_mode() if device_cls.supports_direct_sampling else 0)
         if device_cls.supports_agc_mode:
             return dict(gain_mode=self.gain_mode_combo.currentData(),
-                        manual_gain_db=float(self.gain_slider.value()), gain_values=None)
+                        manual_gain_db=float(self.gain_slider.value()), gain_values=None, **options)
         gain_values = {name: (widget.isChecked() if stage.kind == "bool" else float(widget.value()))
                        for name, (widget, _label, stage) in self._manual_gain_controls.items()}
-        return dict(gain_mode=config.DEFAULT_GAIN_MODE, manual_gain_db=0.0, gain_values=gain_values)
+        return dict(gain_mode=config.DEFAULT_GAIN_MODE, manual_gain_db=0.0, gain_values=gain_values, **options)
 
     def _digimode_kwargs(self, active_digimode):
         """PSK31/RTTY callback+setting kwargs shared by every

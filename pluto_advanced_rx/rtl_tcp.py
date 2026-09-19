@@ -49,8 +49,9 @@ CMD_SET_SAMPLE_RATE = 0x02
 CMD_SET_GAIN_MODE = 0x03  # 0 = tuner AGC, 1 = manual
 CMD_SET_GAIN = 0x04  # tenth of a dB
 CMD_SET_AGC_MODE = 0x08  # RTL2832 digital AGC
+CMD_SET_DIRECT_SAMPLING = 0x09  # 0 = off, 1 = I branch, 2 = Q branch
 # order the remembered parameters are replayed in after a (re)connect
-_REPLAY_ORDER = (CMD_SET_SAMPLE_RATE, CMD_SET_FREQ, CMD_SET_GAIN_MODE, CMD_SET_AGC_MODE, CMD_SET_GAIN)
+_REPLAY_ORDER = (CMD_SET_SAMPLE_RATE, CMD_SET_DIRECT_SAMPLING, CMD_SET_FREQ, CMD_SET_GAIN_MODE, CMD_SET_AGC_MODE, CMD_SET_GAIN)
 
 # jitter buffer (seconds of stream)
 MIN_TARGET_S = 0.3
@@ -320,6 +321,9 @@ class RtlTcpSource(gr.sync_block):
 
     def set_sample_rate(self, hz):
         self.client.send_command(CMD_SET_SAMPLE_RATE, int(hz))
+
+    def set_direct_sampling(self, mode: int):
+        self.client.send_command(CMD_SET_DIRECT_SAMPLING, int(mode))
 
     def set_gain_mode(self, auto: bool):
         """auto=True: tuner AGC + RTL AGC (mirrors SoapyRTLSDR setGainMode)."""

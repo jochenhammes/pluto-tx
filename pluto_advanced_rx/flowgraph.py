@@ -93,7 +93,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_rtty_char=None, rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
                  rtty_reverse=False, active_digimode=None, buffer_size=None,
-                 on_meshtastic_frame=None, meshtastic_preset_index=0):
+                 on_meshtastic_frame=None, meshtastic_preset_index=0,
+                 frequency_correction_ppm=0.0, direct_sampling=0):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -149,6 +150,11 @@ class AdvancedRxFlowgraph(gr.top_block):
         )
         self.uri = self.device.connection  # the actual (possibly defaulted) connection string
         self.sample_rate = self.device.sample_rate_hz  # the actual (possibly defaulted) sample rate
+        # Oscillator correction (ppm, device-error convention) and RTL-SDR direct
+        # sampling are stored on the device BEFORE the source exists, so
+        # build_source() already programs the corrected/right tuning path.
+        self.device.set_frequency_correction_ppm(frequency_correction_ppm)
+        self.device.set_direct_sampling(direct_sampling)
         # Constructed first, gain configured right after -- mirrors
         # TxDevice.build_sink()'s "construct, then configure power" split.
         self.pluto_source = self.device.build_source()
@@ -776,6 +782,15 @@ class AdvancedRxFlowgraph(gr.top_block):
     def set_frequency(self, freq_hz: float):
         self.nominal_freq_hz = freq_hz
         self._retune()
+
+    def set_frequency_correction_ppm(self, ppm: float):
+        """Live change of the oscillator correction; retunes the hardware, the
+        TRUE frequency (nominal_freq_hz) and everything downstream stay as is."""
+        self.device.set_frequency_correction_ppm(ppm)
+
+    def set_direct_sampling(self, mode: int):
+        """RTL-SDR only (0 off / 1 I / 2 Q); no-op for other backends."""
+        self.device.set_direct_sampling(mode)
 
     def set_fine_offset(self, offset_hz: float):
         self.fine_offset_hz = offset_hz

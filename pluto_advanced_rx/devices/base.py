@@ -10,6 +10,8 @@ import abc
 from dataclasses import dataclass
 from typing import Optional, Union
 
+from pluto_tx import freq_correction
+
 from ..fft_probe import FftProbe
 
 
@@ -79,6 +81,10 @@ class RxDevice(abc.ABC):
     # supports_agc_mode's own capability-flag idiom rather than a
     # hardcoded device_type == "pluto" check.
     supports_buffer_size: bool = False
+    # RTL-SDR only: bypass the tuner and sample the antenna input directly (HF).
+    # direct_sampling_range_hz is the tunable range in that mode.
+    supports_direct_sampling: bool = False
+    direct_sampling_range_hz: Optional[tuple] = None
 
     def __init__(self, connection: str, frequency_hz: float, sample_rate_hz: float,
                  bandwidth_hz: Optional[float], buffer_size: Optional[int] = None):
@@ -89,6 +95,7 @@ class RxDevice(abc.ABC):
         # Harmless no-op for backends with supports_buffer_size=False --
         # only PlutoDevice.build_source() actually reads this.
         self.buffer_size = buffer_size
+        self._frequency_correction_ppm = 0.0
 
     @classmethod
     def is_audio_only(cls) -> bool:
@@ -103,6 +110,26 @@ class RxDevice(abc.ABC):
         IndexError at construction time and making Soundcard mode
         completely unable to connect."""
         return cls.frequency_range_hz == (0.0, 0.0)
+
+    def _hw_frequency(self, wanted_hz: float) -> float:
+        """The LO frequency to program for `wanted_hz`, with the ppm correction
+        (device-error convention, see pluto_tx/freq_correction.py)."""
+        return freq_correction.hardware_frequency(wanted_hz, self._frequency_correction_ppm)
+
+    def set_frequency_correction_ppm(self, ppm: float):
+        """Store the correction and retune (if the source already exists).
+        `frequency_hz` stays the TRUE frequency, so waterfall/demod are unaffected."""
+        self._frequency_correction_ppm = float(ppm)
+        self._apply_frequency()
+
+    def _apply_frequency(self):
+        """Re-issue the current frequency after a correction change. Backends with
+        a source override this; default is a no-op."""
+        pass
+
+    def set_direct_sampling(self, mode: int):
+        """0 = off, 1 = I branch, 2 = Q branch. No-op unless supports_direct_sampling."""
+        pass
 
     def close(self):
         """Release resources that outlive the flowgraph (e.g. a network

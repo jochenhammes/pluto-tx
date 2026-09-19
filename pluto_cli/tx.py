@@ -31,6 +31,12 @@ def add_common_args(parser):
         help=f"Transmit frequency in Hz (default: {tx_config.DEFAULT_FREQUENCY:.0f})",
     )
     parser.add_argument(
+        "--freq-correction-ppm", type=float, default=0.0, metavar="PPM",
+        help="Oscillator error of the device in ppm (default: 0). Positive = the device runs too "
+             "HIGH, the tool tunes the hardware lower to compensate; scales with --freq. Example: a "
+             "receiver shows 432.150 MHz at 432.125 MHz -> device is ~58 ppm low -> -58.",
+    )
+    parser.add_argument(
         "--power-ceiling", type=float, default=None,
         help="Maximum TX power/attenuation in dB (device-specific meaning -- e.g. Pluto's "
              "attenuation, negative dB). Omit for the device's own safe default.",
@@ -86,6 +92,8 @@ def _run(args, mode, emitter, post_construct=None, **mode_kwargs):
         post_construct(tb)
     if args.power is not None:
         tb.set_target_power(args.power)
+    if args.freq_correction_ppm:
+        tb.device.set_frequency_correction_ppm(args.freq_correction_ppm)
     tb.start()
     runtime.confirm_or_exit(args.yes, emitter)
     runtime.run_tx_session(tb, mode, args, emitter)

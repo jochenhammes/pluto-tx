@@ -39,6 +39,7 @@ class SoundcardDevice(TxDevice):
     sample_rate_range_hz = (2_500_000, 2_500_000)
     default_sample_rate_hz = 2_500_000  # only sizes the (unused, null-sinked) FM/SSB/M17/FreeDV/RADE-SDR resamplers
     default_bandwidth_hz = None
+    supports_frequency_correction = False  # no LO
     # A single no-op stage, not an empty tuple: primary_stage/
     # devices.primary_power_stage() do next(s for s in power_stages if
     # s.is_primary), which would raise StopIteration on an empty tuple --

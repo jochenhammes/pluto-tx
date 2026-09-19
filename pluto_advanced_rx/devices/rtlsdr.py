@@ -41,6 +41,15 @@ DEFAULT_SAMPLE_RATE_HZ = 2_400_000
 # particular antenna/band, same spirit as HackRF's DEFAULT_LNA/VGA_GAIN_DB.
 DEFAULT_TUNER_GAIN_DB = 20.0
 
+# Direct sampling: the RTL2832U's 28.8 MHz ADC samples the antenna input without the
+# tuner -> HF. The first Nyquist zone ends at 14.4 MHz; the DDC still tunes up to the
+# 28.8 MHz sample clock, but above 14.4 MHz every signal is ALIASED: what is tuned there is
+# a mix of the wanted band and the mirror image of 28.8 MHz - f (measured: the spectrum at
+# 21.0 MHz correlates +0.72 with the mirrored spectrum at 7.8 MHz) -- a band-pass in front
+# of the dongle is advisable.
+DIRECT_SAMPLING_NYQUIST_HZ = 14_400_000
+DIRECT_SAMPLING_RANGE_HZ = (100_000, 28_800_000)
+
 
 class RtlSdrDevice(RxDevice):
     device_type = "rtlsdr"
@@ -61,6 +70,8 @@ class RtlSdrDevice(RxDevice):
     agc_modes = ("manual", "agc")
     default_gain_mode = "manual"
     supports_dc_iq_correction = False  # confirmed: has_dc_offset_mode/has_iq_balance_mode both False
+    supports_direct_sampling = True
+    direct_sampling_range_hz = DIRECT_SAMPLING_RANGE_HZ
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)
@@ -70,6 +81,7 @@ class RtlSdrDevice(RxDevice):
         self._tcp = rtl_tcp.parse_connection(connection)
         self._agc = False
         self._tuner_gain_db = DEFAULT_TUNER_GAIN_DB
+        self._direct_sampling = 0
 
     def _device_arg(self):
         return f"driver=rtlsdr,serial={self.connection}" if self.connection else "driver=rtlsdr"
@@ -78,7 +90,8 @@ class RtlSdrDevice(RxDevice):
         if self._tcp is not None:
             # remote dongle behind a standard rtl_tcp server -- no Soapy involved
             self._source = rtl_tcp.RtlTcpSource(*self._tcp, sample_rate_hz=self.sample_rate_hz)
-            self._source.set_frequency(int(self.frequency_hz))
+            self._source.set_direct_sampling(self._direct_sampling)
+            self._source.set_frequency(int(self._hw_frequency(self.frequency_hz)))
             self._source.set_gain_mode(False)
             self._source.set_gain(DEFAULT_TUNER_GAIN_DB)
             return self._source
@@ -86,17 +99,36 @@ class RtlSdrDevice(RxDevice):
         self._source.set_sample_rate(0, self.sample_rate_hz)
         if self.bandwidth_hz:
             self._source.set_bandwidth(0, self.bandwidth_hz)
-        self._source.set_frequency(0, int(self.frequency_hz))
+        if self._direct_sampling:
+            self._source.write_setting("direct_samp", str(self._direct_sampling))
+        self._source.set_frequency(0, int(self._hw_frequency(self.frequency_hz)))
         self._source.set_gain_mode(0, False)  # manual by default -- caller (flowgraph.py) overrides right after
         self._source.set_gain(0, "TUNER", DEFAULT_TUNER_GAIN_DB)
         return self._source
 
     def set_frequency(self, freq_hz):
         self.frequency_hz = freq_hz
+        self._apply_frequency()
+
+    def _apply_frequency(self):
+        if self._source is None:
+            return
+        hw = int(self._hw_frequency(self.frequency_hz))
         if self._tcp is not None:
-            self._source.set_frequency(int(freq_hz))
+            self._source.set_frequency(hw)
         else:
-            self._source.set_frequency(0, int(freq_hz))
+            self._source.set_frequency(0, hw)
+
+    def set_direct_sampling(self, mode):
+        """0 = off, 1 = I branch, 2 = Q branch (SoapyRTLSDR `direct_samp` / rtl_tcp cmd 0x09).
+        Re-applies the frequency afterwards: the tuning path changes with the mode."""
+        self._direct_sampling = int(mode)
+        if self._source is not None:
+            if self._tcp is not None:
+                self._source.set_direct_sampling(self._direct_sampling)
+            else:
+                self._source.write_setting("direct_samp", str(self._direct_sampling))
+            self._apply_frequency()
 
     def set_gain(self, stage_name, value):
         assert stage_name == "TUNER", f"RtlSdrDevice has no gain stage {stage_name!r}"
@@ -136,11 +168,15 @@ class RtlSdrDevice(RxDevice):
                 "tuner": rtl_tcp.TUNER_NAMES.get(client.tuner_type, client.tuner_type),
                 "tuner_gain_db": self._tuner_gain_db,
                 "agc_enabled": self._agc,
+                "direct_sampling": self._direct_sampling,
+                "freq_correction_ppm": self._frequency_correction_ppm,
                 "dropped_bytes": client.dropped_bytes,
             }
         return {
             "tuner_gain_db": self._source.get_gain(0, "TUNER"),
             "agc_enabled": self._source.get_gain_mode(0),
+            "direct_sampling": self._direct_sampling,
+            "freq_correction_ppm": self._frequency_correction_ppm,
         }
 
     @staticmethod

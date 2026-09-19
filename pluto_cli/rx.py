@@ -59,6 +59,18 @@ def add_common_args(parser):
         help=f"Manual gain in dB, used when --gain-mode manual (default: {rx_config.DEFAULT_MANUAL_GAIN_DB:.0f})",
     )
     parser.add_argument(
+        "--freq-correction-ppm", type=float, default=0.0, metavar="PPM",
+        help="Oscillator error of the device in ppm (default: 0). Positive = the device runs too HIGH "
+             "(signals appear above their true frequency); the tool tunes the hardware lower to "
+             "compensate. Scales with --freq. Example: a 100.000 MHz carrier appears at 100.003 MHz -> +30.",
+    )
+    parser.add_argument(
+        "--direct-sampling", choices=("off", "i", "q"), default="off",
+        help="RTL-SDR only: bypass the tuner and sample the antenna input directly (HF up to "
+             "28.8 MHz, aliased above 14.4 MHz; the tuner gain has no effect). Choose the branch your dongle's HF input is "
+             "wired to (RTL-SDR Blog V3: q). Default: off.",
+    )
+    parser.add_argument(
         "--audio-out", default="",
         help="Demodulated-audio output device string, from 'pluto-cli devices "
              "list-audio-outputs' (real ALSA device or the persistent qpwgraph loopback node). "
@@ -171,6 +183,10 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     def on_m17_fields(fields):
         emitter.emit("m17_fields", **runtime.json_safe(fields))
 
+    direct_sampling = {"off": 0, "i": 1, "q": 2}[args.direct_sampling]
+    if direct_sampling and not rx_devices.DEVICE_REGISTRY[args.device].supports_direct_sampling:
+        emitter.error(f"--direct-sampling is only available for --device rtlsdr, not {args.device}")
+        return 1
     frequency = args.freq
     if args.digimode == "meshtastic":
         if not LORA_AVAILABLE:
@@ -210,6 +226,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             rtty_baud_rate=args.rtty_baud_rate, rtty_reverse=args.rtty_reverse,
             on_rtty_char=on_rtty_char,
             on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
+            frequency_correction_ppm=args.freq_correction_ppm, direct_sampling=direct_sampling,
             **mode_kwargs,
         )
 

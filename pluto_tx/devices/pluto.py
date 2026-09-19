@@ -96,14 +96,18 @@ class PlutoDevice(TxDevice):
         # is ever called).
         self._sink = iio.fmcomms2_sink_fc32(self.connection, [True, True], 0x8000, False)
         self._sink.set_bandwidth(int(self.bandwidth_hz))
-        self._sink.set_frequency(int(self.frequency_hz))
+        self._sink.set_frequency(int(self._hw_frequency(self.frequency_hz)))
         self._sink.set_samplerate(int(self.sample_rate_hz))
         self._sink.set_attenuation(0, _pluto_atten_arg(config.MIN_ATTEN))
         return self._sink
 
     def set_frequency(self, freq_hz):
         self.frequency_hz = freq_hz
-        self._sink.set_frequency(int(freq_hz))
+        self._sink.set_frequency(int(self._hw_frequency(freq_hz)))
+
+    def _apply_frequency(self):
+        if self._sink is not None:
+            self._sink.set_frequency(int(self._hw_frequency(self.frequency_hz)))
 
     def set_rf_bandwidth(self, hz):
         self.bandwidth_hz = int(hz)

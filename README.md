@@ -212,6 +212,20 @@ verzögert; Puffer/Unterläufe stehen im HW-Status). Bricht die
 Verbindung ab, verbindet sich die App selbst neu und sendet die Einstellungen
 erneut (Statuszeile zeigt „lost“/„restored“).
 
+**Frequenzkorrektur (ppm) und Direct Sampling.** Beide Apps haben für alle
+RF-Geräte (Pluto, HackRF, RTL-SDR) ein Feld „Freq. correction (ppm)“, Default 0.
+Der Wert ist die **Abweichung des Geräts** (wie bei rtl_test/Kalibrate/gqrx):
+positiv = das Gerät läuft zu hoch, die App stimmt die Hardware entsprechend
+tiefer ab. Da es ein Verhältnis ist, skaliert eine einmal bekannte Abweichung
+mit der Frequenz (Beispiel: zeigt ein Empfänger deinen 432,150-MHz-Träger bei
+432,125 MHz, ist das Gerät ~58 ppm zu tief → −58 eintragen). In
+`pluto-advanced-rx` steht die Zeile direkt unter der Geräteauswahl; für den
+RTL-SDR gibt es dort zusätzlich **Direct sampling** (Tuner wird umgangen, HF
+0,1–28,8 MHz (über 14,4 MHz aliased: das Band mischt sich mit dem Spiegelbild von 28,8 MHz − f, Bandpass empfehlenswert), Dropdown Q-/I-Zweig — je nach Verdrahtung des HF-Eingangs, beim
+RTL-SDR Blog V3 Q); beim Einschalten wechselt der Frequenzbereich auf HF, beim
+Ausschalten kommt die vorherige Frequenz zurück. Der Tuner-Gain wirkt im
+Direct-Modus nicht. AM und LSB (typisch für HF) kann die RX-App noch nicht.
+
 **Baseband-Modus + fldigi.** Roher, unverarbeiteter Audio-Durchgriff
 (kein Noise-Gate/Kompressor/Limiter, breiter als normales 3kHz-SSB-
 Audio) — macht beide Apps zu einem Input/Output für externe

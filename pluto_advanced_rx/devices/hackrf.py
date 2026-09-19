@@ -78,7 +78,7 @@ class HackRFDevice(RxDevice):
         self._source.set_sample_rate(0, self.sample_rate_hz)
         if self.bandwidth_hz:
             self._source.set_bandwidth(0, self.bandwidth_hz)
-        self._source.set_frequency(0, int(self.frequency_hz))
+        self._source.set_frequency(0, int(self._hw_frequency(self.frequency_hz)))
         self._source.set_gain(0, "LNA", DEFAULT_LNA_GAIN_DB)
         self._source.set_gain(0, "AMP", 0.0)
         self._source.set_gain(0, "VGA", DEFAULT_VGA_GAIN_DB)
@@ -86,7 +86,11 @@ class HackRFDevice(RxDevice):
 
     def set_frequency(self, freq_hz):
         self.frequency_hz = freq_hz
-        self._source.set_frequency(0, int(freq_hz))
+        self._source.set_frequency(0, int(self._hw_frequency(freq_hz)))
+
+    def _apply_frequency(self):
+        if self._source is not None:
+            self._source.set_frequency(0, int(self._hw_frequency(self.frequency_hz)))
 
     def set_gain(self, stage_name, value):
         assert stage_name in {"LNA", "AMP", "VGA"}, f"HackRFDevice has no gain stage {stage_name!r}"
