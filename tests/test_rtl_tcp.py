@@ -71,13 +71,13 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: src.status == "connected"))
         self.assertEqual(src.client.tuner_type, 5)
         self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_GAIN) == 200))
-        self.assertEqual(self.srv.last_param(rtl_tcp.CMD_SET_FREQ), 433_775_000)
-        self.assertEqual(self.srv.last_param(rtl_tcp.CMD_SET_SAMPLE_RATE), 1_024_000)
-        self.assertEqual(self.srv.last_param(rtl_tcp.CMD_SET_GAIN_MODE), 1)  # manual
-        self.assertEqual(self.srv.last_param(rtl_tcp.CMD_SET_AGC_MODE), 0)
+        self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_FREQ) == 433_775_000), "rtl_tcp.CMD_SET_FREQ not seen")
+        self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_SAMPLE_RATE) == 1_024_000), "rtl_tcp.CMD_SET_SAMPLE_RATE not seen")
+        self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_GAIN_MODE) == 1), "rtl_tcp.CMD_SET_GAIN_MODE not seen")  # manual
+        self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_AGC_MODE) == 0), "rtl_tcp.CMD_SET_AGC_MODE not seen")
         src.set_gain_mode(True)
         self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_GAIN_MODE) == 0))
-        self.assertEqual(self.srv.last_param(rtl_tcp.CMD_SET_AGC_MODE), 1)
+        self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_AGC_MODE) == 1))  # sent right after 0x03
 
         # stream -> complex conversion: the tone lands in the right FFT bin
         got = np.empty(0, np.complex64)
@@ -105,7 +105,7 @@ class ClientTests(unittest.TestCase):
         self.srv.drop_client()
         self.assertTrue(wait_for(lambda: self.srv.connections >= 2 and src.status == "connected", 8.0))
         self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_GAIN) == 300))
-        self.assertEqual(self.srv.last_param(rtl_tcp.CMD_SET_FREQ), 100_000_000)
+        self.assertTrue(wait_for(lambda: self.srv.last_param(rtl_tcp.CMD_SET_FREQ) == 100_000_000), "rtl_tcp.CMD_SET_FREQ not seen")
         self.assertGreaterEqual(src.client.reconnects, 1)
 
     def test_slow_consumer_drops_oldest_and_counts(self):

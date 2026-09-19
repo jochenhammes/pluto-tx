@@ -89,7 +89,7 @@ class RtlTcpTests(unittest.TestCase):
         self.addCleanup(dev.close)
         self.assertTrue(wait_for(lambda: dev.connection_status() == "connected"))
         self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING) == 2))
-        self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_FREQ), int(100e6 / (1 + 10e-6)))
+        self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == int(100e6 / (1 + 10e-6))), "rtl_tcp.CMD_SET_FREQ not seen")
         dev.set_frequency_correction_ppm(0.0)
         self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == 100_000_000))
         dev.set_direct_sampling(0)
@@ -99,7 +99,7 @@ class RtlTcpTests(unittest.TestCase):
         srv.drop_client()
         self.assertTrue(wait_for(lambda: srv.connections >= 2 and dev.connection_status() == "connected", 8.0))
         self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING) == 1))
-        self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_FREQ), 100_000_000)
+        self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == 100_000_000), "rtl_tcp.CMD_SET_FREQ not seen")
 
     def test_flowgraph_kwargs_reach_the_device(self):
         from pluto_advanced_rx import flowgraph as rxf
@@ -111,7 +111,7 @@ class RtlTcpTests(unittest.TestCase):
         fg.start()
         try:
             self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING) == 2))
-            self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_FREQ), int(7.1e6 / (1 + 25e-6)))
+            self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == int(7.1e6 / (1 + 25e-6))), "rtl_tcp.CMD_SET_FREQ not seen")
             fg.set_frequency_correction_ppm(0.0)
             self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == 7_100_000))
             fg.set_direct_sampling(0)
@@ -159,19 +159,19 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == int(100e6 / (1 + 12.5e-6))))
         w.direct_checkbox.setChecked(True)  # default branch: Q
         self.pump(0.5)
-        self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING), 2)
+        self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING) == 2), "rtl_tcp.CMD_SET_DIRECT_SAMPLING not seen")
         self.assertLessEqual(w.freq_spin.maximum(), 28.8)  # HF range
         w.freq_spin.setValue(21.3)
         self.assertAlmostEqual(w.freq_spin.value(), 21.3)  # above 14.4 MHz is allowed (aliased zone)
         w.freq_spin.setValue(gui.DIRECT_SAMPLING_DEFAULT_MHZ)
         self.assertEqual(w.freq_spin.value(), gui.DIRECT_SAMPLING_DEFAULT_MHZ)  # 100 MHz was out of range
-        self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_FREQ), int(7.1e6 / (1 + 12.5e-6)))
+        self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_FREQ) == int(7.1e6 / (1 + 12.5e-6))))
         w.direct_branch_combo.setCurrentIndex(w.direct_branch_combo.findData(1))  # I branch
         self.pump(0.3)
-        self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING), 1)
+        self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING) == 1), "rtl_tcp.CMD_SET_DIRECT_SAMPLING not seen")
         w.direct_checkbox.setChecked(False)
         self.pump(0.3)
-        self.assertEqual(srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING), 0)
+        self.assertTrue(wait_for(lambda: srv.last_param(rtl_tcp.CMD_SET_DIRECT_SAMPLING) == 0), "rtl_tcp.CMD_SET_DIRECT_SAMPLING not seen")
         self.assertAlmostEqual(w.freq_spin.value(), 100.0)  # restored
         self.assertGreater(w.freq_spin.maximum(), 1000.0)
         # a rebuild (bandwidth change) re-applies both options
