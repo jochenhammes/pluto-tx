@@ -40,6 +40,7 @@ from .filebroadcast_deframer import FileBroadcastDeframer
 from .psk31_deframer import PSK31VaricodeDeframer
 from .rtty_deframer import RTTYBaudotDeframer
 from .meshtastic_deframer import MeshtasticDeframer
+from .pocsag_deframer import PocsagDeframer
 from pluto_tx.lora_airtime import cr_index as _lora_cr_index
 
 # LoRa/Meshtastic is optional, same reasoning as M17/RADE above: gr-lora_sdr
@@ -95,7 +96,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
                  rtty_reverse=False, active_digimode=None, buffer_size=None,
                  on_meshtastic_frame=None, meshtastic_preset_index=0,
-                 frequency_correction_ppm=0.0, direct_sampling=0):
+                 frequency_correction_ppm=0.0, direct_sampling=0, on_pocsag_message=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -727,7 +728,44 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.connect(self.meshtastic_rx_resampler, self.meshtastic_decoder)
             self.msg_connect(self.meshtastic_decoder, "msg", self.meshtastic_deframer, "msg")
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic"):
+        # --- POCSAG paging RX (25 kHz channel, 2-FSK +-4.5 kHz, 512/1200/2400 Bd). Taps the 50 kHz
+        # if_filter like RTTY/PSK31: channel low-pass -> FM discriminator (+-1 = +-4.5 kHz) -> DC removal
+        # (carrier offset) -> three parallel per-baud branches (low-pass -> symbol_sync_ff -> slicer ->
+        # PocsagDeframer), so the bit rate needs no setting. The deframers always exist (the GUI reads
+        # their counters); the chain is only wired when active, like every digimode above.
+        self.pocsag_channel_filter = filter.fir_filter_ccc(1, firdes.low_pass(
+            1.0, self.if_rate, config.POCSAG_CHANNEL_CUTOFF_HZ, config.POCSAG_CHANNEL_TRANS_HZ, window.WIN_HAMMING))
+        self.pocsag_demod = analog.quadrature_demod_cf(self.if_rate / (2 * math.pi * config.POCSAG_DEVIATION_HZ))
+        self.pocsag_dc_iir = filter.single_pole_iir_filter_ff(1.0 - math.exp(-1.0 / (config.POCSAG_DC_TAU_S * self.if_rate)))
+        self.pocsag_dc_sub = blocks.sub_ff()
+        self.pocsag_deframers = {}
+        pocsag_branches = []
+        for baud in config.POCSAG_BAUD_RATES:
+            lowpass = filter.fir_filter_fff(1, firdes.low_pass(
+                1.0, self.if_rate, config.POCSAG_LOWPASS_BAUD_FACTOR * baud, 0.5 * baud, window.WIN_HAMMING))
+            sync = digital.symbol_sync_ff(
+                digital.TED_MUELLER_AND_MULLER, self.if_rate / baud, config.POCSAG_LOOP_BW, 1.0, 1.0, 0.05, 1,
+                digital.constellation_bpsk().base(), digital.IR_MMSE_8TAP, 128, [],
+            )
+            slicer = digital.binary_slicer_fb()
+            deframer = PocsagDeframer(on_pocsag_message or (lambda msg: None), baud)
+            self.pocsag_deframers[baud] = deframer
+            pocsag_branches.append((lowpass, sync, slicer, deframer))
+        if active_digimode == "pocsag":
+            if self.device.is_audio_only():
+                raise ValueError("POCSAG needs an RF device, not a soundcard")
+            self.connect(self.if_filter, self.pocsag_channel_filter)
+            self.connect(self.pocsag_channel_filter, self.pocsag_demod)
+            self.connect(self.pocsag_demod, (self.pocsag_dc_sub, 0))
+            self.connect(self.pocsag_demod, self.pocsag_dc_iir)
+            self.connect(self.pocsag_dc_iir, (self.pocsag_dc_sub, 1))
+            for lowpass, sync, slicer, deframer in pocsag_branches:
+                self.connect(self.pocsag_dc_sub, lowpass)
+                self.connect(lowpass, sync)
+                self.connect(sync, slicer)
+                self.connect(slicer, deframer)
+
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "pocsag"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the

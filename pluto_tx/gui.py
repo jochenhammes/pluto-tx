@@ -16,6 +16,8 @@ from . import dcs
 from . import devices
 from . import digitext
 from . import filebroadcast
+from . import pocsag
+from . import pocsag_codec
 from . import freq_correction
 from .devices import pluto as pluto_device
 from .flowgraph import (
@@ -70,7 +72,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_audio_mode = (
             mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
                                   PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
-                                  PlutoTxFlowgraph.MODE_MESHTASTIC)
+                                  PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_POCSAG)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -85,6 +87,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rtty_ptt_epoch = 0
         # Same per-press staleness guard for Meshtastic's one-shot frame timers.
         self._meshtastic_ptt_epoch = 0
+        # Same per-press staleness guard for POCSAG's one-shot call timers.
+        self._pocsag_ptt_epoch = 0
         # Carrier frequency (MHz) to restore when leaving Meshtastic mode, whose
         # presets retune the device to 433.5/869.525 MHz.
         self._freq_before_lora = None
@@ -511,6 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("Waterfall Writer", PlutoTxFlowgraph.MODE_DIGITEXT)
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
         self.digimode_combo.addItem("RTTY", PlutoTxFlowgraph.MODE_RTTY)
+        self.digimode_combo.addItem("POCSAG (Paging)", PlutoTxFlowgraph.MODE_POCSAG)
         self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
         if not LORA_AVAILABLE:
             lora_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHTASTIC))
@@ -745,6 +750,70 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(rtty_group)
         self.rtty_group_widget = rtty_group
 
+        # --- POCSAG (paging) controls -- own group widget, same pattern as rtty_group above.
+        # One-shot: PTT builds one paging call from the fields below, sends it (direct FM,
+        # +-4.5 kHz) and auto-unkeys after its duration.
+        pocsag_group = QtWidgets.QWidget()
+        pocsag_layout = QtWidgets.QVBoxLayout(pocsag_group)
+        pocsag_layout.setContentsMargins(0, 0, 0, 0)
+        pocsag_row1 = QtWidgets.QHBoxLayout()
+        pocsag_row1.addWidget(QtWidgets.QLabel("RIC:"))
+        self.pocsag_ric_spin = QtWidgets.QSpinBox()
+        self.pocsag_ric_spin.setRange(0, pocsag_codec.RIC_MAX)
+        self.pocsag_ric_spin.setValue(config.POCSAG_DEFAULT_RIC)
+        self.pocsag_ric_spin.setToolTip("Pager address 0-2097151. The default is a test RIC, not a real subscriber.")
+        pocsag_row1.addWidget(self.pocsag_ric_spin)
+        pocsag_row1.addWidget(QtWidgets.QLabel("Type:"))
+        self.pocsag_kind_combo = QtWidgets.QComboBox()
+        self.pocsag_kind_combo.addItem("Alphanumeric", "alpha")
+        self.pocsag_kind_combo.addItem("Numeric", "numeric")
+        self.pocsag_kind_combo.addItem("Tone only", "tone")
+        pocsag_row1.addWidget(self.pocsag_kind_combo)
+        pocsag_row1.addWidget(QtWidgets.QLabel("Function:"))
+        self.pocsag_function_combo = QtWidgets.QComboBox()
+        for fn in range(4):
+            self.pocsag_function_combo.addItem(str(fn), fn)
+        self.pocsag_function_combo.setCurrentIndex(3)
+        self.pocsag_function_combo.setToolTip(
+            "Two function bits in the address codeword. Networks usually use 3 for text and 0 for numeric.")
+        pocsag_row1.addWidget(self.pocsag_function_combo)
+        pocsag_row1.addWidget(QtWidgets.QLabel("Baud:"))
+        self.pocsag_baud_combo = QtWidgets.QComboBox()
+        for baud in config.POCSAG_BAUD_PRESETS:
+            self.pocsag_baud_combo.addItem(str(baud), baud)
+        self.pocsag_baud_combo.setCurrentIndex(self.pocsag_baud_combo.findData(config.POCSAG_BAUD_DEFAULT))
+        pocsag_row1.addWidget(self.pocsag_baud_combo)
+        self.pocsag_charset_checkbox = QtWidgets.QCheckBox("German charset")
+        self.pocsag_charset_checkbox.setToolTip(
+            "DIN 66003 mapping used by German paging networks: [ \\ ] { | } ~ carry \u00c4 \u00d6 \u00dc \u00e4 \u00f6 \u00fc \u00df. "
+            "Off = plain 7-bit ASCII.")
+        pocsag_row1.addWidget(self.pocsag_charset_checkbox)
+        pocsag_row1.addStretch(1)
+        pocsag_layout.addLayout(pocsag_row1)
+        pocsag_row2 = QtWidgets.QHBoxLayout()
+        pocsag_row2.addWidget(QtWidgets.QLabel("Text:"))
+        self.pocsag_text_edit = QtWidgets.QLineEdit()
+        self.pocsag_text_edit.setMaxLength(config.POCSAG_MAX_TEXT_LEN)
+        self.pocsag_text_edit.setPlaceholderText("Message text, then press PTT to send the call")
+        self.pocsag_text_edit.setMinimumWidth(420)
+        self.pocsag_text_edit.setStyleSheet("font-size: 13pt;")
+        pocsag_row2.addWidget(self.pocsag_text_edit)
+        pocsag_layout.addLayout(pocsag_row2)
+        self.pocsag_info_label = QtWidgets.QLabel("")
+        pocsag_layout.addWidget(self.pocsag_info_label)
+        self.pocsag_sent_log = QtWidgets.QTextEdit()
+        self.pocsag_sent_log.setReadOnly(True)
+        self.pocsag_sent_log.setMaximumHeight(120)
+        self.pocsag_sent_log.setToolTip("Local echo of the calls THIS station has sent.")
+        pocsag_layout.addWidget(self.pocsag_sent_log)
+        digimodes_tab_layout.addWidget(pocsag_group)
+        self.pocsag_group_widget = pocsag_group
+        self.pocsag_kind_combo.currentIndexChanged.connect(self._on_pocsag_kind_changed)
+        for signal_ in (self.pocsag_function_combo.currentIndexChanged, self.pocsag_baud_combo.currentIndexChanged,
+                        self.pocsag_ric_spin.valueChanged, self.pocsag_text_edit.textChanged,
+                        self.pocsag_charset_checkbox.toggled):
+            signal_.connect(self._on_pocsag_changed)
+
         # --- Meshtastic (LoRa) controls -- own group widget, same pattern as
         # rtty_group above. One-shot: PTT builds one real Meshtastic packet from
         # the fields below, sends it, and auto-unkeys after its airtime.
@@ -856,6 +925,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
+        self._update_pocsag_controls_enabled()
+        self._update_pocsag_info()
         self._update_meshtastic_controls_enabled()
 
         # --- File Broadcast rotation list -- lives in the "File-Transfer"
@@ -1097,7 +1168,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # "sync before wiring the signal" ordering as both combos.
         if self._current_mode == PlutoTxFlowgraph.MODE_FILEBROADCAST:
             self.mode_tab_widget.setCurrentIndex(2)
-        elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31):
+        elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31,
+                                    PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
+                                    PlutoTxFlowgraph.MODE_MESHTASTIC):
             self.mode_tab_widget.setCurrentIndex(1)
         # Connected AFTER the initial sync above (and after every widget it
         # touches exists) -- bidirectional counterpart to _on_mode_changed()/
@@ -1179,6 +1252,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_controls_enabled()
         self._meshtastic_connected = enabled
         self._update_meshtastic_controls_enabled()
+        self._pocsag_connected = enabled
+        self._update_pocsag_controls_enabled()
         self._filebroadcast_connected = enabled
         self._update_filebroadcast_controls_enabled()
         self._baseband_connected = enabled
@@ -1286,6 +1361,84 @@ class MainWindow(QtWidgets.QMainWindow):
         connected = getattr(self, "_psk31_connected", True)
         self.psk31_text_edit.setEnabled(connected)
         self.psk31_tone_slider.setEnabled(connected)
+
+    def _update_pocsag_controls_enabled(self):
+        self.pocsag_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_POCSAG)
+        connected = getattr(self, "_pocsag_connected", True)
+        kind = self.pocsag_kind_combo.currentData()
+        for w in (self.pocsag_ric_spin, self.pocsag_kind_combo, self.pocsag_function_combo,
+                  self.pocsag_baud_combo, self.pocsag_charset_checkbox):
+            w.setEnabled(connected)
+        self.pocsag_text_edit.setEnabled(connected and kind != "tone")
+
+    def _pocsag_settings(self):
+        return (self.pocsag_ric_spin.value(), self.pocsag_function_combo.currentData(),
+                self.pocsag_kind_combo.currentData(), self.pocsag_text_edit.text(),
+                self.pocsag_baud_combo.currentData(),
+                "de" if self.pocsag_charset_checkbox.isChecked() else "ascii")
+
+    def _apply_pocsag(self, tb):
+        ric, function, kind, text, baud, charset = self._pocsag_settings()
+        tb.set_pocsag_ric(ric)
+        tb.set_pocsag_function(function)
+        tb.set_pocsag_kind(kind)
+        tb.set_pocsag_text(text)
+        tb.set_pocsag_baud(baud)
+        tb.set_pocsag_charset(charset)
+
+    def _update_pocsag_info(self):
+        ric, function, kind, text, baud, charset = self._pocsag_settings()
+        if kind != "tone" and not text.strip():
+            self.pocsag_info_label.setText("Enter a message text to send.")
+            return
+        seconds = pocsag.estimate_duration(ric, function, kind, text, baud, charset)
+        self.pocsag_info_label.setText(f"Call to RIC {ric}, {baud} baud: {seconds:.2f} s on air")
+
+    def _on_pocsag_kind_changed(self, _idx):
+        kind = self.pocsag_kind_combo.currentData()
+        self.pocsag_function_combo.blockSignals(True)
+        self.pocsag_function_combo.setCurrentIndex(0 if kind == "numeric" else 3 if kind == "alpha" else 0)
+        self.pocsag_function_combo.blockSignals(False)
+        self._update_pocsag_controls_enabled()
+        self._on_pocsag_changed()
+
+    def _on_pocsag_changed(self, *_):
+        self._update_pocsag_info()
+        if self.tb is not None:
+            self._apply_pocsag(self.tb)
+
+    def _pocsag_ptt_allowed(self):
+        """Pre-flight for a POCSAG PTT press (True outside POCSAG mode): refuses BEFORE any RF action."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_POCSAG:
+            return True
+        problem = self.tb.pocsag_problem()
+        if problem:
+            self.status_label.setText(f"Not sent: {problem}")
+        return problem is None
+
+    def _log_pocsag_sent(self):
+        if self._current_mode != PlutoTxFlowgraph.MODE_POCSAG:
+            return
+        ric, function, kind, text, baud, _charset = self._pocsag_settings()
+        what = "tone" if kind == "tone" else text
+        self.pocsag_sent_log.append(f"[{time.strftime('%H:%M:%S')}] RIC {ric} f{function} {baud} Bd: {what}")
+
+    def _schedule_pocsag_auto_unkey(self):
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_POCSAG:
+            return
+        token = self.tb
+        self._pocsag_ptt_epoch += 1
+        epoch = self._pocsag_ptt_epoch
+        hold_s = self.tb.pocsag_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._finish_pocsag_auto_unkey(token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.POCSAG_AUTO_UNKEY_WATCHDOG_S) * 1000),
+                                 lambda: self._finish_pocsag_auto_unkey(token, epoch))
+
+    def _finish_pocsag_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._pocsag_ptt_epoch or not self.tb.keyed:
+            return
+        self._reset_digitext_ptt_visual()
+        self._release_ptt()
 
     def _update_rtty_controls_enabled(self):
         # Structural mirror of _update_psk31_controls_enabled() above.
@@ -1606,6 +1759,12 @@ class MainWindow(QtWidgets.QMainWindow):
             lora_item.setToolTip("LoRa needs an RF device -- a 48 kHz soundcard cannot carry it")
             if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_MESHTASTIC:
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
+        pocsag_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_POCSAG))
+        pocsag_item.setEnabled(is_rf)
+        if not is_rf:
+            pocsag_item.setToolTip("POCSAG needs an RF device (direct FM) -- not available on the soundcard")
+            if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_POCSAG:
+                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
         if not is_rf and self._current_mode not in self._AUDIO_ONLY_CAPABLE_MODES:
             if RADE_AVAILABLE:
                 self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE))
@@ -1716,6 +1875,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_digitext_controls_enabled()
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
+        self._update_pocsag_controls_enabled()
         self._update_baseband_controls_enabled()
         self._update_subtone_controls_enabled()
 
@@ -2061,7 +2221,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ptt_button.setChecked(False)
             self.ptt_button.blockSignals(False)
             return
-        if checked and not self._meshtastic_ptt_allowed():
+        if checked and (not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed()):
             self._reset_digitext_ptt_visual()
             return
         if checked:
@@ -2075,6 +2235,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log_rtty_sent()
             self._schedule_meshtastic_auto_unkey()
             self._log_meshtastic_sent()
+            self._schedule_pocsag_auto_unkey()
+            self._log_pocsag_sent()
         else:
             self.ptt_button.setText("PTT (click to send)")
             self._release_ptt()
@@ -2082,7 +2244,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_ptt_pressed(self):
         if not self._armed or self.tb is None:
             return
-        if not self._meshtastic_ptt_allowed():
+        if not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed():
             return
         self.tb.key_ptt()
         self._set_indicator_on_air()
@@ -2093,6 +2255,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_rtty_sent()
         self._schedule_meshtastic_auto_unkey()
         self._log_meshtastic_sent()
+        self._schedule_pocsag_auto_unkey()
+        self._log_pocsag_sent()
 
     def _on_ptt_released(self):
         if self.tb is None or not self.tb.keyed:
@@ -2421,6 +2585,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 meshtastic_psk_b64=self.meshtastic_psk_edit.text(),
                 meshtastic_hop_limit=self.meshtastic_hop_spin.value(),
                 meshtastic_callsign=self.meshtastic_callsign_edit.text().strip().upper(),
+                pocsag_ric=self.pocsag_ric_spin.value(),
+                pocsag_function=self.pocsag_function_combo.currentData(),
+                pocsag_kind=self.pocsag_kind_combo.currentData(),
+                pocsag_text=self.pocsag_text_edit.text(),
+                pocsag_baud=self.pocsag_baud_combo.currentData(),
+                pocsag_charset="de" if self.pocsag_charset_checkbox.isChecked() else "ascii",
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")

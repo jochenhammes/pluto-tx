@@ -439,6 +439,15 @@ RTTY_PREAMBLE_S = 1.0
 RTTY_TAIL_S = 0.2  # mirrors PSK31_TAIL_S's own real-hardware-motivated rationale
 RTTY_AUTO_UNKEY_WATCHDOG_S = 2.0  # mirrors PSK31_AUTO_UNKEY_WATCHDOG_S
 
+# --- POCSAG paging (ITU-R M.584), see pluto_tx/pocsag.py / pocsag_codec.py ---
+POCSAG_BAUD_PRESETS = (512, 1200, 2400)
+POCSAG_BAUD_DEFAULT = 1200
+POCSAG_DEVIATION_HZ = 4500.0  # standard: +-4.5 kHz on 25 kHz channels; logic 1 = lower frequency
+POCSAG_DEFAULT_RIC = 1234567  # test RIC, not a real subscriber
+POCSAG_MAX_TEXT_LEN = 120
+POCSAG_TX_TAIL_S = 0.4  # hold after the audio ends (resampler/sink latency), then unkey
+POCSAG_AUTO_UNKEY_WATCHDOG_S = 2.0
+
 # --- LoRa Mesh (Meshtastic/MeshCore interop, PHY not yet built -- Phase 0
 # of /home/hammesj/.claude/plans/swirling-waddling-noodle.md) -- via
 # gr-lora_sdr (install-lora.sh, optional GPL-3.0 dependency, gated like

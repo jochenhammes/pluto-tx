@@ -18,6 +18,7 @@ from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
 from pluto_advanced_rx.meshtastic_state import MeshtasticState
+from pluto_advanced_rx.pocsag_state import PocsagState
 from pluto_advanced_rx.psk31_state import Psk31ChatState
 from pluto_advanced_rx.rtty_state import RttyChatState
 
@@ -81,12 +82,22 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "pocsag"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
              "simplification (see pluto_cli/README.md). Omit to disable digimode decoding "
              "entirely.",
+    )
+    parser.add_argument(
+        "--pocsag-charset", choices=("ascii", "de"), default="ascii",
+        help="Text charset for --digimode pocsag: ascii = plain 7-bit ASCII, de = DIN 66003 German "
+             "umlaut mapping (default: ascii)",
+    )
+    parser.add_argument(
+        "--pocsag-show-damaged", action="store_true",
+        help="With --digimode pocsag also report calls that contain unrecoverable codewords "
+             "(default: only clean calls; damaged ones are usually junk from a weak signal)",
     )
     parser.add_argument(
         "--psk31-tone-hz", type=float, default=rx_config.PSK31_DEFAULT_TONE_HZ,
@@ -180,6 +191,18 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                            "hop_limit": row["hop_limit"], "hop_start": row["hop_start"], "text": row["text"]})
         emitter.emit("meshtastic_frame", **fields)
 
+    pocsag_state = PocsagState()
+    pocsag_state.set_charset(args.pocsag_charset)
+    pocsag_state.set_hide_damaged(False)  # damaged calls are filtered by on_pocsag_message()
+
+    def on_pocsag_message(msg):
+        if msg["uncorrectable"] and not args.pocsag_show_damaged:
+            return
+        pocsag_state.on_message(msg)
+        row = pocsag_state.get_snapshot()[1][-1]
+        emitter.emit("pocsag_message", baud=row["baud"], ric=row["ric"], function=row["function"],
+                     text=row["text"], corrected=row["corrected"], uncorrectable=row["uncorrectable"])
+
     def on_m17_fields(fields):
         emitter.emit("m17_fields", **runtime.json_safe(fields))
 
@@ -226,6 +249,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             rtty_baud_rate=args.rtty_baud_rate, rtty_reverse=args.rtty_reverse,
             on_rtty_char=on_rtty_char,
             on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
+            on_pocsag_message=on_pocsag_message,
             frequency_correction_ppm=args.freq_correction_ppm, direct_sampling=direct_sampling,
             **mode_kwargs,
         )

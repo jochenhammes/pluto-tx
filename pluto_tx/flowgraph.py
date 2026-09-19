@@ -33,6 +33,8 @@ from . import dynamics
 from . import filebroadcast
 from .filebroadcast_source import FileBroadcastSource
 from . import psk31
+from . import pocsag
+from . import pocsag_codec
 from . import rtty
 from . import lora_airtime
 
@@ -114,6 +116,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_RTTY = 9
     MODE_MESHTASTIC = 10
     MODE_LSB = 11
+    MODE_POCSAG = 12
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -128,7 +131,9 @@ class PlutoTxFlowgraph(gr.top_block):
                  rtty_reverse=False,
                  meshtastic_preset_index=0, meshtastic_text="", meshtastic_node_id=None,
                  meshtastic_channel_name=None, meshtastic_psk_b64=config.MESHTASTIC_DEFAULT_PSK_B64,
-                 meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign=""):
+                 meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign="",
+                 pocsag_ric=config.POCSAG_DEFAULT_RIC, pocsag_function=3, pocsag_kind="alpha", pocsag_text="",
+                 pocsag_baud=config.POCSAG_BAUD_DEFAULT, pocsag_charset="ascii"):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -160,6 +165,8 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode == self.MODE_MESHTASTIC and (not LORA_AVAILABLE or device_cls.is_audio_only()):
             # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
+        if mode == self.MODE_POCSAG and device_cls.is_audio_only():
+            mode = self.MODE_FM  # POCSAG is direct RF FM here; no soundcard path
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
         # "FM" regardless of what mode the flowgraph was actually built with.
@@ -759,6 +766,27 @@ class PlutoTxFlowgraph(gr.top_block):
         self.baseband_mod = analog.frequency_modulator_fc(self.baseband_sensitivity)
         self.connect(self.baseband_resampler, self.baseband_mod)
 
+        # --- POCSAG branch (paging, pluto_tx/pocsag.py): a shaped +-1 NRZ stream at AUDIO_RATE goes
+        # straight into its own frequency modulator (+-POCSAG_DEVIATION_HZ). Like RTTY/PSK31 the
+        # source is one-shot and rebuilt on every key_ptt(); tx_gain stays muted until then.
+        self.pocsag_ric = int(pocsag_ric)
+        self.pocsag_function = int(pocsag_function)
+        self.pocsag_kind = pocsag_kind
+        self.pocsag_text = pocsag_text
+        self.pocsag_baud = int(pocsag_baud)
+        self.pocsag_charset = pocsag_charset
+        self._pocsag_audio = None
+        self._pocsag_audio_dirty = True
+        self.pocsag_duration_s = 0.0
+        self.pocsag_source = blocks.vector_source_f([0.0], repeat=False)
+        self.pocsag_resampler = filter.rational_resampler_fff(
+            interpolation=quad_rate // g_baseband, decimation=config.AUDIO_RATE // g_baseband,
+            taps=[], fractional_bw=0.47,
+        )
+        self.pocsag_mod = analog.frequency_modulator_fc(2 * math.pi * config.POCSAG_DEVIATION_HZ / quad_rate)
+        self.connect(self.pocsag_source, self.pocsag_resampler)
+        self.connect(self.pocsag_resampler, self.pocsag_mod)
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -821,6 +849,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self._null_sink_lora = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
+        self._null_sink_pocsag = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see POCSAG branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -999,6 +1028,7 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_MESHTASTIC] = self.lora_tx_resampler
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
+        producers[self.MODE_POCSAG] = self.pocsag_mod  # always available, see its branch above
         return producers
 
     def _null_sink_for(self, producer):
@@ -1022,6 +1052,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_filebroadcast
         if producer is self.baseband_mod:
             return self._null_sink_baseband
+        if producer is self.pocsag_mod:
+            return self._null_sink_pocsag
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def set_mode(self, mode: int):
@@ -1051,7 +1083,7 @@ class PlutoTxFlowgraph(gr.top_block):
 
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
                     self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
-                    self.MODE_MESHTASTIC):
+                    self.MODE_MESHTASTIC, self.MODE_POCSAG):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
@@ -1061,6 +1093,58 @@ class PlutoTxFlowgraph(gr.top_block):
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[preset]
         taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter.set_taps(taps)
+
+    # --- POCSAG ---------------------------------------------------------
+
+    def set_pocsag_ric(self, ric: int):
+        self.pocsag_ric = int(ric)
+        self._pocsag_audio_dirty = True
+
+    def set_pocsag_function(self, function: int):
+        self.pocsag_function = int(function)
+        self._pocsag_audio_dirty = True
+
+    def set_pocsag_kind(self, kind: str):
+        self.pocsag_kind = kind
+        self._pocsag_audio_dirty = True
+
+    def set_pocsag_text(self, text: str):
+        self.pocsag_text = text
+        self._pocsag_audio_dirty = True
+
+    def set_pocsag_baud(self, baud: int):
+        self.pocsag_baud = int(baud)
+        self._pocsag_audio_dirty = True
+
+    def set_pocsag_charset(self, charset: str):
+        self.pocsag_charset = charset
+        self._pocsag_audio_dirty = True
+
+    def pocsag_problem(self):
+        """None if the current POCSAG settings can be sent, else a short reason."""
+        if not 0 <= self.pocsag_ric <= pocsag_codec.RIC_MAX:
+            return f"RIC must be 0..{pocsag_codec.RIC_MAX}"
+        if self.pocsag_ric == 0 and self.pocsag_function == 0:
+            return "RIC 0 with function 0 is the all-zero codeword (choose another function)"
+        if self.pocsag_kind != "tone" and not self.pocsag_text.strip():
+            return "message text is empty"
+        if len(self.pocsag_text) > config.POCSAG_MAX_TEXT_LEN:
+            return f"message is longer than {config.POCSAG_MAX_TEXT_LEN} characters"
+        return None
+
+    def _ensure_pocsag_audio(self):
+        problem = self.pocsag_problem()
+        if problem:
+            raise ValueError(problem)
+        if self._pocsag_audio_dirty or self._pocsag_audio is None:
+            self._pocsag_audio, self.pocsag_duration_s = pocsag.encode_message(
+                self.pocsag_ric, self.pocsag_function, self.pocsag_kind, self.pocsag_text,
+                self.pocsag_baud, self.pocsag_charset)
+            self._pocsag_audio_dirty = False
+
+    @property
+    def pocsag_hold_s(self):
+        return self.pocsag_duration_s + config.POCSAG_TX_TAIL_S
 
     # --- FM sub-audible tone (CTCSS / DCS) --------------------------------
 
@@ -1551,6 +1635,15 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.psk31_audio_gain.set_k(1.0)
                 self._keyed = True
                 return
+        if self.mode == self.MODE_POCSAG:
+            self._ensure_pocsag_audio()  # raises ValueError before any RF action
+            self.lock()
+            try:
+                self.disconnect(self.pocsag_source, self.pocsag_resampler)
+                self.pocsag_source = blocks.vector_source_f(self._pocsag_audio.tolist(), repeat=False)
+                self.connect(self.pocsag_source, self.pocsag_resampler)
+            finally:
+                self.unlock()
         if self.mode == self.MODE_RTTY:
             # Exact structural mirror of the MODE_PSK31 branch just above.
             self._ensure_rtty_audio()

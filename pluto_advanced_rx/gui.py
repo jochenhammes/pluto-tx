@@ -33,6 +33,7 @@ from .fft_probe import FftProbe
 from .filebroadcast_state import FileBroadcastState
 from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_AVAILABLE
 from .meshtastic_state import MeshtasticState
+from .pocsag_state import PocsagState
 if LORA_AVAILABLE:
     from pluto_tx import meshtastic_codec
 from .psk31_state import Psk31ChatState
@@ -90,6 +91,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshtastic_last_frames = 0
         self._meshtastic_last_activity_time = 0.0
         self._meshtastic_psk_error = None
+        # POCSAG paging calls -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._pocsag_state = PocsagState()
+        self._pocsag_rendered_version = -1
+        self._pocsag_last_batches = 0
+        self._pocsag_last_activity_time = 0.0
         self._link_state = None  # (id(tb), status) of the last network-link status shown, see _update_link_status()
         # Carrier (Hz) to restore when leaving Meshtastic, whose presets retune the receiver.
         self._freq_before_lora = None
@@ -239,6 +245,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo = QtWidgets.QComboBox()
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", "psk31")
         self.digimode_combo.addItem("RTTY", "rtty")
+        self.digimode_combo.addItem("POCSAG (Paging)", "pocsag")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
         if not LORA_AVAILABLE:
             lora_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshtastic"))
@@ -426,6 +433,54 @@ class MainWindow(QtWidgets.QMainWindow):
         meshtastic_group_layout.addLayout(meshtastic_clear_row)
         digimodes_tab_layout.addWidget(meshtastic_group)
         self.meshtastic_group_widget = meshtastic_group
+        # --- POCSAG (paging) RX: tune the carrier of a 25 kHz paging channel; 512/1200/2400 Bd are
+        # decoded in parallel. Rows keep the raw payload, so charset/interpretation re-render the table.
+        pocsag_group = QtWidgets.QWidget()
+        pocsag_layout = QtWidgets.QVBoxLayout(pocsag_group)
+        pocsag_layout.setContentsMargins(0, 0, 0, 0)
+        pocsag_row = QtWidgets.QHBoxLayout()
+        pocsag_row.addWidget(QtWidgets.QLabel("Show as:"))
+        self.pocsag_interp_combo = QtWidgets.QComboBox()
+        self.pocsag_interp_combo.addItem("Auto (function 0 = numeric)", "auto")
+        self.pocsag_interp_combo.addItem("Alphanumeric", "alpha")
+        self.pocsag_interp_combo.addItem("Numeric", "numeric")
+        self.pocsag_interp_combo.currentIndexChanged.connect(
+            lambda _i: self._pocsag_state.set_interpretation(self.pocsag_interp_combo.currentData()))
+        pocsag_row.addWidget(self.pocsag_interp_combo)
+        self.pocsag_charset_checkbox = QtWidgets.QCheckBox("German charset")
+        self.pocsag_charset_checkbox.setToolTip(
+            "DIN 66003 mapping used by German paging networks: [ \\ ] { | } ~ = \u00c4 \u00d6 \u00dc \u00e4 \u00f6 \u00fc \u00df.")
+        self.pocsag_charset_checkbox.toggled.connect(
+            lambda on: self._pocsag_state.set_charset("de" if on else "ascii"))
+        pocsag_row.addWidget(self.pocsag_charset_checkbox)
+        self.pocsag_hide_damaged_checkbox = QtWidgets.QCheckBox("Hide damaged calls")
+        self.pocsag_hide_damaged_checkbox.setChecked(True)
+        self.pocsag_hide_damaged_checkbox.setToolTip(
+            "Hide calls with codewords the error correction could not recover -- on a weak signal these are mostly junk.")
+        self.pocsag_hide_damaged_checkbox.toggled.connect(self._pocsag_state.set_hide_damaged)
+        pocsag_row.addWidget(self.pocsag_hide_damaged_checkbox)
+        pocsag_row.addStretch(1)
+        self.pocsag_clear_button = QtWidgets.QPushButton("Clear")
+        self.pocsag_clear_button.clicked.connect(self._on_pocsag_clear_clicked)
+        pocsag_row.addWidget(self.pocsag_clear_button)
+        pocsag_layout.addLayout(pocsag_row)
+        self.pocsag_signal_label = QtWidgets.QLabel()
+        pocsag_layout.addWidget(self.pocsag_signal_label)
+        self.pocsag_table = QtWidgets.QTableWidget(0, 6)
+        self.pocsag_table.setHorizontalHeaderLabels(["Time", "Baud", "RIC", "Fn", "Message", "Errors"])
+        self.pocsag_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.pocsag_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.pocsag_table.verticalHeader().setVisible(False)
+        self.pocsag_table.horizontalHeader().setStretchLastSection(True)
+        self.pocsag_table.setMinimumHeight(160)
+        self.pocsag_table.setToolTip(
+            "Errors = bit errors corrected by the BCH code / codewords that could not be recovered "
+            "(the message text is incomplete then).")
+        pocsag_layout.addWidget(self.pocsag_table)
+        digimodes_tab_layout.addWidget(pocsag_group)
+        self.pocsag_group_widget = pocsag_group
+        self._update_pocsag_signal_label()
+
         self._apply_meshtastic_channels()
         self._update_meshtastic_regulatory_label()
         self._update_meshtastic_signal_label()
@@ -952,6 +1007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_group_widget.setVisible(selected == "psk31")
         self.rtty_group_widget.setVisible(selected == "rtty")
         self.meshtastic_group_widget.setVisible(selected == "meshtastic")
+        self.pocsag_group_widget.setVisible(selected == "pocsag")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -1052,6 +1108,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if LORA_AVAILABLE and not has_frequency:
             lora_item.setToolTip("LoRa needs an RF device, not a soundcard")
             if self.digimode_combo.currentData() == "meshtastic":
+                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
+        pocsag_item = self.digimode_combo.model().item(self.digimode_combo.findData("pocsag"))
+        pocsag_item.setEnabled(has_frequency)
+        if not has_frequency:
+            pocsag_item.setToolTip("POCSAG needs an RF device, not a soundcard")
+            if self.digimode_combo.currentData() == "pocsag":
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
         self.audio_tune_label.setVisible(has_audio_tuning)
         self.audio_tune_spin.setVisible(has_audio_tuning)
@@ -1230,6 +1292,7 @@ class MainWindow(QtWidgets.QMainWindow):
             rtty_reverse=self.rtty_reverse_checkbox.isChecked(),
             on_meshtastic_frame=self._meshtastic_state.on_frame,
             meshtastic_preset_index=self._meshtastic_preset_index(),
+            on_pocsag_message=self._pocsag_state.on_message,
         )
 
     def _sync_waterfall(self):
@@ -1594,6 +1657,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshtastic_state.clear()
         self._render_meshtastic_table()
 
+    def _on_pocsag_clear_clicked(self):
+        self._pocsag_state.clear()
+        self._render_pocsag_table()
+
+    def _update_pocsag_signal_label(self):
+        if self.tb is None:
+            self.pocsag_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "pocsag":
+            self.pocsag_signal_label.setText("Not listening.")
+            return
+        deframers = self.tb.pocsag_deframers
+        baud = max(deframers, key=lambda b: (deframers[b].codewords_ok, b))
+        best = deframers[baud]
+        batches = sum(d.batches for d in deframers.values())
+        if batches > self._pocsag_last_batches:
+            self._pocsag_last_activity_time = time.time()
+        self._pocsag_last_batches = batches
+        freq = (self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6
+        recent = self._pocsag_last_activity_time > 0 and time.time() - self._pocsag_last_activity_time < 5.0
+        if recent:
+            total = best.codewords_ok + best.codewords_bad
+            self.pocsag_signal_label.setText(
+                f"POCSAG {baud} Bd on {freq:.4f} MHz -- {best.batches} batches, {best.codewords_ok}/{total} codewords OK")
+        else:
+            self.pocsag_signal_label.setText(f"Listening on {freq:.4f} MHz for POCSAG (512/1200/2400 Bd).")
+
+    def _render_pocsag_table(self):
+        version, rows = self._pocsag_state.get_snapshot()
+        self._pocsag_rendered_version = version
+        table = self.pocsag_table
+        scrollbar = table.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            errors = f"{row['corrected']} fixed" + (f", {row['uncorrectable']} lost" if row["uncorrectable"] else "")
+            cells = [row["time"], str(row["baud"]), str(row["ric"]), str(row["function"]), row["text"], errors]
+            for c, text in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+        table.resizeColumnsToContents()
+        if at_bottom:
+            table.scrollToBottom()
+
     def _update_meshtastic_signal_label(self):
         if self._meshtastic_psk_error:
             self.meshtastic_signal_label.setText(
@@ -1682,8 +1788,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_signal_label()
         self._update_rtty_signal_label()
         self._update_meshtastic_signal_label()
+        self._update_pocsag_signal_label()
         if self._meshtastic_state.version != self._meshtastic_rendered_version:
             self._render_meshtastic_table()
+        if self._pocsag_state.version != self._pocsag_rendered_version:
+            self._render_pocsag_table()
         # Independent of self.tb's connection state (unlike the AFC step
         # below) -- each transcript lives on MainWindow and should keep
         # showing whatever was already received even across a rebuild,

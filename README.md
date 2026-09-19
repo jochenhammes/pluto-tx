@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY, Meshtastic/LoRa) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, Meshtastic/LoRa) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -27,7 +27,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR, MeshCore als Platzhalter) |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR, MeshCore als Platzhalter) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
@@ -158,7 +158,7 @@ Ziel) direkt in der GUI einstellbar.
 Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
 gewählten primären Empfangsmodus (man kann z.B. FM hören und
 gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
-aber nur einer der Digimodes (PSK31, RTTY **oder** Meshtastic) kann
+aber nur einer der Digimodes (PSK31, RTTY, POCSAG **oder** Meshtastic) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
@@ -166,6 +166,21 @@ Digimodes-Reiter umschaltbar.
 im Digimodes-Reiter. Baudrate (45.45/50/75/100) und Shift
 (170/425/850Hz) frei einstellbar, inkl. Normal/Reverse-Umschalter für
 Gegenstationen mit vertauschter Ton-Zuordnung.
+
+**POCSAG (Funkruf).** Standardkonformer POCSAG-Digimode nach ITU-R M.584
+(2-FSK, ±4,5 kHz Hub, 512/1200/2400 Bit/s, Logik 1 = niedrigere Frequenz), nur
+mit Pluto/HackRF/RTL-SDR. **RX:** Kanalmitte einstellen, alle drei Baudraten
+werden parallel dekodiert (Autobaud, beide Polaritäten, BCH-Fehlerkorrektur bis
+2 Bit); Tabelle mit Zeit, Baud, RIC, Funktion, Text und Fehleranzeige,
+Darstellung „Auto/Alpha/Numerisch“ und optional deutscher Zeichensatz
+(DIN 66003). **TX:** Aussendung eines Rufs an eine RIC (0–2097151; Vorgabe ist
+eine Test-RIC) als Alpha-, Numerisch- oder Nur-Ton-Nachricht mit Funktionsbits
+0–3, Direktmodulation des Trägers mit Gauß-geformtem NRZ. Nur in Amateurfunk-
+bändern senden (nicht auf kommerziellen Funkrufkanälen oder dem DAPNET-Kanal).
+Die Inhalte fremder, nichtöffentlicher Funkrufe sind nicht für den Empfänger
+bestimmt: die App zeigt sie an, speichert sie aber nicht.
+CLI: `pluto-cli tx pocsag --ric 1234567 --text "DA2JH Test" --baud 1200`,
+`pluto-cli rx fm --digimode pocsag`.
 
 **Meshtastic (LoRa).** Sendet und empfängt echte Meshtastic-Pakete
 (alle neun Modem-Presets LongFast … ShortTurbo, je EU433/EU868; Träger und
@@ -302,6 +317,7 @@ pluto_tx/                 # Sende-App
 ├── dynamics.py                # Kompressor/Limiter
 ├── lora.py / lora_airtime.py    # LoRa-PHY (gr-lora_sdr), Airtime-Formel + Duty-Cycle-Begrenzer
 ├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
+├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
 ├── gui.py / app.py
 └── da2jh-test.wav              # Standard-Testaufnahme
 pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall

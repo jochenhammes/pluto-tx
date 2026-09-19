@@ -113,7 +113,7 @@ Common flags (every mode):
 | `--freq-correction-ppm PPM` | Oscillator error of the device in ppm (default 0; positive = the device transmits too high, the hardware is tuned lower; scales with `--freq`; ignored for soundcard) |
 | `--power-ceiling DB` | Max TX power/attenuation (device-specific meaning); omit for the device's own safe default |
 | `--power DB` | Target power within `--power-ceiling` (default: equal to the ceiling) |
-| `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/rtty/filebroadcast |
+| `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/rtty/pocsag/filebroadcast |
 | `--wav-file PATH` | WAV file, when `--source file` |
 | `--audio-device STR` | Mic device string, from `pluto-cli devices list-audio-inputs` |
 | `--duration SECONDS` | Seconds to stay keyed (default: 3.0); ignored for digitext/psk31/rtty (see below) and `--interactive` |
@@ -131,6 +131,7 @@ Common flags (every mode):
 | `digitext` | `--text` (required), `--layout {horizontal,vertical}`, `--zoom`, `--min-freq-hz` | waterfall-drawn text; `--duration` is ignored -- the transmission runs exactly once for however long the rendered text takes |
 | `psk31` | `--text` (required), `--tone-hz` | BPSK31 chat; `--duration` ignored, same reason as digitext |
 | `rtty` | `--text` (required), `--mark-hz`, `--shift-hz`, `--baud-rate`, `--reverse` | 2-tone FSK Baudot; `--duration` ignored, same reason as digitext |
+| `pocsag` | `--ric`, `--kind {alpha,numeric,tone}`, `--text`, `--function 0-3`, `--baud {512,1200,2400}`, `--charset {ascii,de}` | POCSAG paging call (ITU-R M.584, direct FM +-4.5 kHz, RF devices only); `--duration` ignored; emits a `pocsag_message` event before keying |
 | `meshtastic` | `--text` (required), `--region {eu433,eu868}`, `--modem-preset NAME`, `--callsign`, `--node-id HEX`, `--channel`, `--psk`, `--hop-limit` | One Meshtastic (LoRa) broadcast frame; `--freq`/`--duration` ignored (carrier from the preset, hold time from the frame's airtime). carrier and default channel name follow the preset (firmware slot formula); `eu433` = Ham Mode (callsign required, unencrypted); `eu868` = ISM/SRD, 10 % duty cycle enforced. Requires gr-lora_sdr, see `install-lora.sh` |
 | `filebroadcast` | `--file PATH` (repeatable, >=1 required) | round-robin file broadcast; each `--file` is read from disk once at startup |
 | `baseband` | `--deviation-hz` | raw wideband FM passthrough, no audio processing -- see [Recipes](#7-recipes) |
@@ -157,12 +158,14 @@ Common flags (every mode):
 | `--gain DB` | Manual gain, used when `--gain-mode manual` |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
-| `--digimode {psk31,rtty,meshtastic}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
+| `--digimode {psk31,rtty,meshtastic,pocsag}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
 | `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency, used with `--digimode psk31` |
 | `--rtty-mark-hz HZ` | RTTY mark tone frequency, used with `--digimode rtty` |
 | `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
 | `--rtty-baud-rate BAUD` | RTTY baud rate, used with `--digimode rtty` (presets: 45.45/50/75/100) |
 | `--rtty-reverse` | Swap which tone is Mark vs. Space, used with `--digimode rtty` |
+| `--pocsag-show-damaged` | Also report POCSAG calls with unrecoverable codewords (default: only clean calls) |
+| `--pocsag-charset {ascii,de}` | Text charset for `--digimode pocsag` (`de` = DIN 66003 umlaut mapping) |
 | `--meshtastic-region {eu433,eu868}` / `--meshtastic-modem-preset NAME` | Region (default `eu868`) and Meshtastic modem preset (LongFast, LongModerate, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo, LongTurbo; default LongFast, the only one verified against real hardware) for `--digimode meshtastic`; retunes to the preset's carrier, `--freq` is ignored; RX `--bandwidth` must be at least twice the preset's LoRa bandwidth. Requires gr-lora_sdr, see `install-lora.sh` |
 | `--meshtastic-channel NAME` / `--meshtastic-psk B64` | Channel name (default `LongFast`) and key (default `AQ==` = stock channel; empty = unencrypted) used to read frames |
 | `--filebroadcast-save-dir DIR` | Also watch for File Broadcast files in parallel and save each as soon as it's complete (see below) |
@@ -273,6 +276,7 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `psk31_char` | RX `--digimode psk31`: one decoded character (RX-only; TX `psk31` prints nothing) | `char` (single character string) |
 | `meshtastic_listen` | RX `--digimode meshtastic`: once at startup | `preset`, `freq_hz`, `regulatory` |
 | `meshtastic_frame` | TX `meshtastic`: the frame about to be sent (`preset`, `freq_hz`, `text`, `bytes`, `airtime_s`). RX: one received frame | RX: `kind`, `bytes`, and for decodable frames `from`, `to` (hex), `id`, `hop_limit`, `hop_start`, `text` |
+| `pocsag_message` | TX `pocsag`: the call about to be sent (`ric`, `function`, `kind`, `baud`, `text`, `duration_s`). RX `--digimode pocsag`: one decoded call | RX: `baud`, `ric`, `function`, `text`, `corrected` (bit errors fixed), `uncorrectable` (codewords lost) |
 | `rtty_char` | RX `--digimode rtty`: one decoded character (RX-only; TX `rtty` prints nothing) | `char` (single character string) |
 | `m17_fields` | RX `m17` mode: one decoded M17 frame | the decoded LSF fields dict as reported by `gr-m17` (`dst`, `src`, `type`, `meta`, ...; numpy arrays are converted to plain lists) |
 | `filebroadcast_added` | TX `filebroadcast`: a `--file` was registered at startup | `file_id`, `filename`, `bytes` |
@@ -357,7 +361,7 @@ of it, same as PSK31).
   digitext composition, use the GUI apps (`pluto-tx`, `pluto-advanced-rx`).
 - **One process per physical device at a time** -- see the hardware-
   exclusivity note in [section 1](#1-overview--philosophy).
-- `tx digitext`/`tx psk31`/`tx rtty` ignore `--duration`: their transmission
+- `tx digitext`/`tx psk31`/`tx rtty`/`tx pocsag` ignore `--duration`: their transmission
   length is computed from the rendered text and cannot be shortened or
   extended.
 - **Only one of PSK31/RTTY can decode at a time** (`--digimode`) -- see

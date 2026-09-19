@@ -11,11 +11,12 @@ import sys
 from pluto_tx.flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE
 from pluto_tx import config as tx_config
 from pluto_tx import dcs as tx_dcs
+from pluto_tx import pocsag_codec as tx_pocsag
 from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "meshtastic", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "meshtastic", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -62,7 +63,7 @@ def add_common_args(parser):
     )
     parser.add_argument(
         "--duration", type=float, default=3.0,
-        help="Seconds to stay keyed (default: 3.0). Ignored for digitext/psk31/rtty, which "
+        help="Seconds to stay keyed (default: 3.0). Ignored for digitext/psk31/rtty/pocsag, which "
              "transmit their text exactly once and compute their own duration; ignored with "
              "--interactive.",
     )
@@ -313,6 +314,49 @@ def run_rtty(args):
     )
 
 
+def add_pocsag_subparser(subparsers):
+    p = subparsers.add_parser(
+        "pocsag", help="POCSAG paging call (ITU-R M.584, FM +-4.5 kHz, 512/1200/2400 baud) to a RIC",
+        description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--ric", type=int, default=tx_config.POCSAG_DEFAULT_RIC,
+                   help=f"Pager address (RIC) 0-{tx_pocsag.RIC_MAX} (default: {tx_config.POCSAG_DEFAULT_RIC}, a test RIC)")
+    p.add_argument("--kind", choices=("alpha", "numeric", "tone"), default="alpha",
+                   help="Message type: alphanumeric text, numeric (0-9 * U space - [ ]) or tone only (default: alpha)")
+    p.add_argument("--text", default="", help="Message text (not needed for --kind tone)")
+    p.add_argument("--function", type=int, choices=(0, 1, 2, 3), default=3,
+                   help="Function bits of the address codeword (default: 3; networks usually use 3 for text, 0 for numeric)")
+    p.add_argument("--baud", type=int, choices=tx_pocsag.BAUD_RATES, default=tx_config.POCSAG_BAUD_DEFAULT,
+                   help=f"Bit rate (default: {tx_config.POCSAG_BAUD_DEFAULT})")
+    p.add_argument("--charset", choices=tx_pocsag.CHARSETS, default="ascii",
+                   help="ascii = plain 7-bit ASCII; de = DIN 66003 German umlaut mapping (default: ascii)")
+    p.set_defaults(func=run_pocsag)
+
+
+def run_pocsag(args):
+    emitter = runtime.Emitter(args.json)
+    if args.device == "soundcard":
+        emitter.error("POCSAG needs an RF device (pluto or hackrf), not the soundcard")
+        return 1
+
+    def preflight(tb):
+        problem = tb.pocsag_problem()
+        if problem:  # before any RF action
+            emitter.error(problem)
+            tb.shutdown_safe()
+            sys.exit(1)
+        tb._ensure_pocsag_audio()
+        emitter.emit("pocsag_message", ric=args.ric, function=args.function, kind=args.kind, baud=args.baud,
+                     text=args.text if args.kind != "tone" else "", duration_s=round(tb.pocsag_duration_s, 3))
+
+    return _run(
+        args, PlutoTxFlowgraph.MODE_POCSAG, emitter, post_construct=preflight,
+        pocsag_ric=args.ric, pocsag_function=args.function, pocsag_kind=args.kind, pocsag_text=args.text,
+        pocsag_baud=args.baud, pocsag_charset=args.charset,
+    )
+
+
 def add_meshtastic_subparser(subparsers):
     p = subparsers.add_parser(
         "meshtastic",
@@ -439,6 +483,7 @@ def add_subparsers(tx_subparsers):
     add_digitext_subparser(tx_subparsers)
     add_psk31_subparser(tx_subparsers)
     add_rtty_subparser(tx_subparsers)
+    add_pocsag_subparser(tx_subparsers)
     add_meshtastic_subparser(tx_subparsers)
     add_filebroadcast_subparser(tx_subparsers)
     add_baseband_subparser(tx_subparsers)

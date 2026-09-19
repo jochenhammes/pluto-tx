@@ -374,6 +374,16 @@ PSK31_AFC_DEADBAND_HZ = 120.0
 # quadrature-discriminator demod has no continuous carrier-tracking loop
 # of its own -- see pluto_advanced_rx/flowgraph.py's RTTY branch and
 # rtty_deframer.py's own docstring for why it uses open-loop UART-style
+
+# --- POCSAG paging RX (see pluto_advanced_rx/pocsag_deframer.py, pluto_tx/pocsag_codec.py) ---
+POCSAG_BAUD_RATES = (512, 1200, 2400)  # decoded in parallel
+POCSAG_DEVIATION_HZ = 4500.0  # discriminator scaling: +-4.5 kHz -> +-1
+POCSAG_CHANNEL_CUTOFF_HZ = 9000.0  # channel low-pass at the ~50 kHz IF (25 kHz channel spacing)
+POCSAG_CHANNEL_TRANS_HZ = 3000.0
+POCSAG_DC_TAU_S = 0.05  # discriminator DC (carrier offset) removal time constant
+POCSAG_LOWPASS_BAUD_FACTOR = 0.6  # per-baud symbol low-pass cutoff = factor * baud
+POCSAG_LOOP_BW = 2 * math.pi / 100
+
 # framing instead of PSK31's symbol_sync_ff approach.
 RTTY_MARK_HZ_DEFAULT = 2125.0
 RTTY_MARK_HZ_RANGE = (300.0, 2700.0)
