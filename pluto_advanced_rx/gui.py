@@ -1686,7 +1686,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 + ("" if calls else " (most batches carry no call: idle keep-alive)"))
         else:
             self.pocsag_signal_label.setText(
-                f"No POCSAG signal on {freq:.4f} MHz -- tune exactly to the channel centre (e.g. 466.075 / 465.970 / 466.230). "
+                f"No POCSAG signal on {freq:.4f} MHz right now (paging channels are used in bursts; tune exactly to the channel "
+                f"centre, e.g. 466.075 / 465.970 / 466.230). "
                 f"Calls so far: {self._pocsag_state.counts()[0]}.")
 
     def _render_pocsag_table(self):

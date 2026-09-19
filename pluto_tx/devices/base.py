@@ -73,6 +73,10 @@ class TxDevice(abc.ABC):
     # convention): applied in software to the LO frequency of every RF backend
     # (Pluto and HackRF both have crystals that can be off -- confirmed ~56 ppm
     # on a HackRF without TCXO). False only for backends with no LO at all.
+    # Seconds of audio at the END of a one-shot burst that a device swallows without ever transmitting
+    # (measured on HackRF: ~1.25 s of samples still queued when the source ends are dropped). One-shot
+    # digimodes append this much unmodulated padding so the real signal is transmitted completely.
+    tx_end_loss_s: float = 0.0
     supports_frequency_correction: bool = True
 
     def __init__(self, connection: str, frequency_hz: float, sample_rate_hz: float,

@@ -82,6 +82,7 @@ class HackRFDevice(TxDevice):
     )
     default_power_ceiling = DEFAULT_VGA_CEILING_DB
     supports_persistent_sink = False  # see module docstring -- confirmed on real hardware
+    tx_end_loss_s = 1.6  # measured ~1.25 s of a one-shot burst never reaches the air, plus margin
     # No frequency-correction capability is exposed by this system's
     # SoapyHackRF driver (confirmed: has_frequency_correction(0) is False,
     # list_frequencies(0) only shows a single "RF" component, no separate

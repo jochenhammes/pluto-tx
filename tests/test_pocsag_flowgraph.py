@@ -70,6 +70,21 @@ class TxTests(unittest.TestCase):
         on_air = float((np.abs(iq) > 1e-3).sum()) / RATE
         self.assertAlmostEqual(on_air, fg.pocsag_duration_s, delta=0.06)
 
+    def test_devices_that_swallow_the_burst_end_get_carrier_padding(self):
+        from tests import fakes
+        fakes.FakeTxDevice.tx_end_loss_s = 0.5
+        try:
+            iq, fg = tx_iq(2400, "PAD")
+            base = txf.PlutoTxFlowgraph(device_type="fake", mode=POCSAG, pocsag_text="PAD", pocsag_baud=2400)
+            base.device.tx_end_loss_s = 0.0
+            base._ensure_pocsag_audio()
+            self.assertAlmostEqual(fg.pocsag_duration_s - base.pocsag_duration_s, 0.5, delta=0.01)
+            self.assertAlmostEqual(float((np.abs(iq) > 1e-3).sum()) / RATE, fg.pocsag_duration_s, delta=0.06)
+            inst = np.angle(iq[1:] * np.conj(iq[:-1])) * RATE / (2 * np.pi)
+            self.assertLess(float(np.abs(inst[-int(0.3 * RATE):]).max()), 50)   # the padding is an unmodulated carrier
+        finally:
+            fakes.FakeTxDevice.tx_end_loss_s = 0.0
+
     def test_refusals_before_any_rf_action(self):
         fg = txf.PlutoTxFlowgraph(device_type="fake", mode=POCSAG, pocsag_text="")
         self.assertIn("empty", fg.pocsag_problem())

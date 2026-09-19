@@ -20,6 +20,8 @@ import sys
 import time
 import wave
 
+import numpy as np
+
 from gnuradio import gr, blocks, filter, analog, qtgui, digital
 from gnuradio.filter import firdes
 from gnuradio.fft import window
@@ -1137,9 +1139,12 @@ class PlutoTxFlowgraph(gr.top_block):
         if problem:
             raise ValueError(problem)
         if self._pocsag_audio_dirty or self._pocsag_audio is None:
-            self._pocsag_audio, self.pocsag_duration_s = pocsag.encode_message(
+            audio, duration_s = pocsag.encode_message(
                 self.pocsag_ric, self.pocsag_function, self.pocsag_kind, self.pocsag_text,
                 self.pocsag_baud, self.pocsag_charset)
+            pad = int(self.device.tx_end_loss_s * config.AUDIO_RATE)  # unmodulated carrier the device may swallow
+            self._pocsag_audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
+            self.pocsag_duration_s = duration_s + pad / config.AUDIO_RATE
             self._pocsag_audio_dirty = False
 
     @property
