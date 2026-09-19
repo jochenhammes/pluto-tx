@@ -26,6 +26,7 @@ from gnuradio.fft import window
 
 from . import audio_devices
 from . import config
+from . import dcs
 from . import devices
 from . import digitext
 from . import dynamics
@@ -112,6 +113,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_BASEBAND = 8
     MODE_RTTY = 9
     MODE_MESHTASTIC = 10
+    MODE_LSB = 11
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -227,7 +229,7 @@ class PlutoTxFlowgraph(gr.top_block):
         # --- PTT audio mute, NF band-pass filter, AGC, manual NF gain ---
         self.ptt_mute = blocks.multiply_const_ff(0.0)
 
-        initial_preset = "SSB" if mode == self.MODE_SSB else "FM"
+        initial_preset = "SSB" if mode in (self.MODE_SSB, self.MODE_LSB) else "FM"
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[initial_preset]
         self._nf_taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter = filter.fir_filter_fff(1, self._nf_taps)
@@ -299,10 +301,28 @@ class PlutoTxFlowgraph(gr.top_block):
         # matches what was heard over the air); 401 taps gives >=61 dB
         # across the whole band.
         self.ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+        # LSB = complex conjugate of the analytic signal: flip the sign of the imaginary part
+        # (+1 = USB, -1 = LSB) -- shares the (expensive) resampler and mode_selector port with SSB.
+        self.ssb_split = blocks.complex_to_float(1)
+        self.ssb_imag_sign = blocks.multiply_const_ff(-1.0 if mode == self.MODE_LSB else 1.0)
+        self.ssb_join = blocks.float_to_complex(1)
         self.ssb_resampler = filter.rational_resampler_ccf(
             interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
             taps=[], fractional_bw=0.4,
         )
+
+        # --- FM sub-audible tone (CTCSS/DCS), summed AFTER the limiter (the NF band-pass would
+        # remove it). All three branches always exist; set_subtone() only changes their gains.
+        self._subtone_kind = "off"
+        self._subtone_value = None
+        self._subtone_level_pct = config.SUBTONE_LEVEL_DEFAULT_PCT
+        self.subtone_voice = blocks.multiply_const_ff(1.0)
+        self.ctcss_source = analog.sig_source_f(config.AUDIO_RATE, analog.GR_SIN_WAVE,
+                                                config.CTCSS_TONES_HZ[8], 1.0)
+        self.ctcss_gain = blocks.multiply_const_ff(0.0)
+        self.dcs_source = blocks.vector_source_f(dcs.render_loop(dcs.STANDARD_CODES[0]).tolist(), True)
+        self.dcs_gain = blocks.multiply_const_ff(0.0)
+        self.subtone_adder = blocks.add_ff(1)
 
         # --- M17 branch (optional, only if gr-m17 is installed): deliberately
         # bypasses the entire analog dynamics chain above (nf_filter/gate/
@@ -756,7 +776,7 @@ class PlutoTxFlowgraph(gr.top_block):
         # lock()/connect()/disconnect() in set_mode() when entering/leaving
         # M17 mode (see set_mode() below). FM<->SSB switching is completely
         # unaffected -- still the original fast mode_selector.set_input_index().
-        self.mode_selector = blocks.selector(gr.sizeof_gr_complex, 1 if mode == self.MODE_SSB else 0, 0)
+        self.mode_selector = blocks.selector(gr.sizeof_gr_complex, 1 if mode in (self.MODE_SSB, self.MODE_LSB) else 0, 0)
         self.mode_selector.set_enabled(True)
 
         # Starts MUTED (0), not the pass-through 1.0+0j it used to be:
@@ -851,12 +871,21 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.nf_gain, self.limiter_smooth)
         self.connect(self.limiter_smooth, self.limiter)
 
-        self.connect(self.limiter, self.fm_resampler)
+        self.connect(self.limiter, self.subtone_voice)
+        self.connect(self.subtone_voice, (self.subtone_adder, 0))
+        self.connect(self.ctcss_source, self.ctcss_gain)
+        self.connect(self.ctcss_gain, (self.subtone_adder, 1))
+        self.connect(self.dcs_source, self.dcs_gain)
+        self.connect(self.dcs_gain, (self.subtone_adder, 2))
+        self.connect(self.subtone_adder, self.fm_resampler)
         self.connect(self.fm_resampler, self.fm_mod)
         self.connect(self.fm_mod, (self.mode_selector, self.MODE_FM))
 
         self.connect(self.limiter, self.ssb_mod)
-        self.connect(self.ssb_mod, self.ssb_resampler)
+        self.connect(self.ssb_mod, self.ssb_split)
+        self.connect((self.ssb_split, 0), (self.ssb_join, 0))
+        self.connect((self.ssb_split, 1), self.ssb_imag_sign, (self.ssb_join, 1))
+        self.connect(self.ssb_join, self.ssb_resampler)
         self.connect(self.ssb_resampler, (self.mode_selector, self.MODE_SSB))
 
         if M17_AVAILABLE:
@@ -955,7 +984,8 @@ class PlutoTxFlowgraph(gr.top_block):
         share mode_selector (fast index switch, no reconnect); M17/FreeDV
         each get their own dedicated producer (see the comment above
         mode_selector's construction for why they can't share it)."""
-        producers = {self.MODE_FM: self.mode_selector, self.MODE_SSB: self.mode_selector}
+        producers = {self.MODE_FM: self.mode_selector, self.MODE_SSB: self.mode_selector,
+                     self.MODE_LSB: self.mode_selector}
         if M17_AVAILABLE:
             producers[self.MODE_M17] = self.m17_tx_resampler
         if FREEDV_AVAILABLE:
@@ -1024,11 +1054,45 @@ class PlutoTxFlowgraph(gr.top_block):
                     self.MODE_MESHTASTIC):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
-        self.mode_selector.set_input_index(1 if mode == self.MODE_SSB else 0)
-        preset = "SSB" if mode == self.MODE_SSB else "FM"
+        sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
+        self.ssb_imag_sign.set_k(-1.0 if mode == self.MODE_LSB else 1.0)
+        self.mode_selector.set_input_index(1 if sideband_mode else 0)
+        preset = "SSB" if sideband_mode else "FM"
         f_lo, f_hi, trans = config.NF_FILTER_PRESETS[preset]
         taps = firdes.band_pass(1.0, config.AUDIO_RATE, f_lo, f_hi, trans, window.WIN_HAMMING)
         self.nf_filter.set_taps(taps)
+
+    # --- FM sub-audible tone (CTCSS / DCS) --------------------------------
+
+    def set_subtone(self, kind, value=None):
+        """kind: "off", "ctcss" (value = tone in Hz) or "dcs" (value = (octal code int, "N"|"I")).
+        Live, no rebuild; only audible in FM mode (SSB/LSB branch hangs off the limiter before the sum)."""
+        if kind not in ("off", "ctcss", "dcs"):
+            raise ValueError(f"unknown sub-audible tone kind {kind!r}")
+        if kind == "ctcss":
+            value = float(value)
+            self.ctcss_source.set_frequency(value)
+        elif kind == "dcs":
+            code, polarity = value
+            if code not in dcs.STANDARD_CODES or polarity not in dcs.POLARITIES:
+                raise ValueError(f"invalid DCS code {value!r}")
+            self.dcs_source.set_data(dcs.render_loop(code, polarity).tolist())
+            value = (code, polarity)
+        self._subtone_kind = kind
+        self._subtone_value = value
+        self._apply_subtone_gains()
+
+    def set_subtone_level(self, percent):
+        lo, hi = config.SUBTONE_LEVEL_RANGE_PCT
+        self._subtone_level_pct = min(max(float(percent), lo), hi)
+        self._apply_subtone_gains()
+
+    def _apply_subtone_gains(self):
+        level = self._subtone_level_pct / 100.0
+        kind = self._subtone_kind
+        self.ctcss_gain.set_k(level if kind == "ctcss" else 0.0)
+        self.dcs_gain.set_k(level if kind == "dcs" else 0.0)
+        self.subtone_voice.set_k(1.0 if kind == "off" else 1.0 - level)
 
     # --- Meshtastic ----------------------------------------------------
 

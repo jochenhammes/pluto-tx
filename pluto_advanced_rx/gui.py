@@ -560,6 +560,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demod_combo = QtWidgets.QComboBox()
         self.demod_combo.addItem("FM", AdvancedRxFlowgraph.MODE_FM)
         self.demod_combo.addItem("SSB (USB)", AdvancedRxFlowgraph.MODE_SSB)
+        self.demod_combo.addItem("SSB (LSB)", AdvancedRxFlowgraph.MODE_LSB)
         self.demod_combo.addItem("RADE", AdvancedRxFlowgraph.MODE_RADE)
         if not RADE_AVAILABLE:
             # rade_c is an optional, from-source dependency (see
@@ -1298,6 +1299,9 @@ class MainWindow(QtWidgets.QMainWindow):
         elif mode == AdvancedRxFlowgraph.MODE_SSB:
             f_lo = config.SSB_AUDIO_BAND_HZ[0]
             self.waterfall.set_demod_band(freq + f_lo, freq + f_lo + self.tb.ssb_demod_width_hz)
+        elif mode == AdvancedRxFlowgraph.MODE_LSB:
+            f_lo = config.SSB_AUDIO_BAND_HZ[0]
+            self.waterfall.set_demod_band(freq - f_lo - self.tb.ssb_demod_width_hz, freq - f_lo)
         elif mode == AdvancedRxFlowgraph.MODE_RADE:
             # Not operator-adjustable (RADE's OFDM occupied bandwidth is a
             # fixed protocol constant, unlike FM/SSB's width sliders) -- but
@@ -1879,7 +1883,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_FM:
             self.tb.set_fm_demod_width(float(value))
-        elif self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_SSB:
+        elif self.demod_combo.currentData() in (AdvancedRxFlowgraph.MODE_SSB, AdvancedRxFlowgraph.MODE_LSB):
             self.tb.set_ssb_demod_width(float(value))
         elif self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_BASEBAND:
             self.tb.set_baseband_width(float(value))
@@ -2555,7 +2559,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_mode = self.demod_combo.currentData()
         fm_width = float(self.width_slider.value()) if current_mode == AdvancedRxFlowgraph.MODE_FM \
             else config.FM_DEMOD_WIDTH_DEFAULT_HZ
-        ssb_width = float(self.width_slider.value()) if current_mode == AdvancedRxFlowgraph.MODE_SSB \
+        ssb_width = float(self.width_slider.value()) \
+            if current_mode in (AdvancedRxFlowgraph.MODE_SSB, AdvancedRxFlowgraph.MODE_LSB) \
             else config.SSB_DEMOD_WIDTH_DEFAULT_HZ
         baseband_width = float(self.width_slider.value()) if current_mode == AdvancedRxFlowgraph.MODE_BASEBAND \
             else config.BASEBAND_WIDTH_DEFAULT_HZ

@@ -5,15 +5,17 @@ and hands off to runtime.run_tx_session() -- no TX logic lives here that
 doesn't already exist in pluto_tx/flowgraph.py itself. See pluto_cli/
 README.md for the full command reference and examples.
 """
+import argparse
 import sys
 
 from pluto_tx.flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE
 from pluto_tx import config as tx_config
+from pluto_tx import dcs as tx_dcs
 from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "meshtastic", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "meshtastic", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -105,11 +107,57 @@ def _run(args, mode, emitter, post_construct=None, **mode_kwargs):
 def add_fm_subparser(subparsers):
     p = subparsers.add_parser("fm", help="Narrowband FM voice", description=__doc__)
     add_common_args(p)
+    tone = p.add_mutually_exclusive_group()
+    tone.add_argument(
+        "--ctcss", type=_ctcss_tone, metavar="HZ",
+        help="Send a CTCSS sub-audible tone (standard EIA tones, e.g. 88.5, 123.0)",
+    )
+    tone.add_argument(
+        "--dcs", type=_dcs_code, metavar="CODE[N|I]",
+        help="Send a DCS code (one of the 83 standard octal codes, e.g. 023, 754I; N = normal, I = inverted)",
+    )
+    lo, hi = tx_config.SUBTONE_LEVEL_RANGE_PCT
+    p.add_argument(
+        "--tone-level", type=int, default=tx_config.SUBTONE_LEVEL_DEFAULT_PCT, metavar="PCT",
+        help=f"Tone deviation in %% of the FM deviation (default {tx_config.SUBTONE_LEVEL_DEFAULT_PCT}, "
+             f"range {lo}-{hi}); the voice is reduced by the same amount",
+    )
     p.set_defaults(func=run_fm)
 
 
+def _ctcss_tone(text):
+    try:
+        hz = float(text.replace(",", "."))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid CTCSS tone {text!r}")
+    if not any(abs(hz - t) < 0.05 for t in tx_config.CTCSS_TONES_HZ):
+        raise argparse.ArgumentTypeError(
+            f"{text} Hz is not a standard CTCSS tone ({tx_config.CTCSS_TONES_HZ[0]:g} ... "
+            f"{tx_config.CTCSS_TONES_HZ[-1]:g} Hz, e.g. 88.5, 123.0)")
+    return min(tx_config.CTCSS_TONES_HZ, key=lambda t: abs(t - hz))
+
+
+def _dcs_code(text):
+    try:
+        return tx_dcs.parse_code(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 def run_fm(args):
-    return _run(args, PlutoTxFlowgraph.MODE_FM, runtime.Emitter(args.json))
+    lo, hi = tx_config.SUBTONE_LEVEL_RANGE_PCT
+    if not lo <= args.tone_level <= hi:
+        print(f"--tone-level must be between {lo} and {hi}", file=sys.stderr)
+        return 2
+
+    def post_construct(tb):
+        tb.set_subtone_level(args.tone_level)
+        if args.ctcss is not None:
+            tb.set_subtone("ctcss", args.ctcss)
+        elif args.dcs is not None:
+            tb.set_subtone("dcs", args.dcs)
+
+    return _run(args, PlutoTxFlowgraph.MODE_FM, runtime.Emitter(args.json), post_construct=post_construct)
 
 
 def add_ssb_subparser(subparsers):
@@ -120,6 +168,16 @@ def add_ssb_subparser(subparsers):
 
 def run_ssb(args):
     return _run(args, PlutoTxFlowgraph.MODE_SSB, runtime.Emitter(args.json))
+
+
+def add_lsb_subparser(subparsers):
+    p = subparsers.add_parser("lsb", help="SSB (LSB) voice", description=__doc__)
+    add_common_args(p)
+    p.set_defaults(func=run_lsb)
+
+
+def run_lsb(args):
+    return _run(args, PlutoTxFlowgraph.MODE_LSB, runtime.Emitter(args.json))
 
 
 def add_m17_subparser(subparsers):
@@ -374,6 +432,7 @@ def run_baseband(args):
 def add_subparsers(tx_subparsers):
     add_fm_subparser(tx_subparsers)
     add_ssb_subparser(tx_subparsers)
+    add_lsb_subparser(tx_subparsers)
     add_m17_subparser(tx_subparsers)
     add_freedv_subparser(tx_subparsers)
     add_rade_subparser(tx_subparsers)

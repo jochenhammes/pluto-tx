@@ -14,6 +14,8 @@ from . import config
 from .devices import pluto as pluto_device
 from .flowgraph import PlutoTxFlowgraph
 
+MODES = {"fm": PlutoTxFlowgraph.MODE_FM, "ssb": PlutoTxFlowgraph.MODE_SSB, "lsb": PlutoTxFlowgraph.MODE_LSB}
+
 
 def build_argparser():
     p = argparse.ArgumentParser(description=__doc__)
@@ -21,7 +23,7 @@ def build_argparser():
     p.add_argument("--freq", type=float, default=config.DEFAULT_FREQUENCY, help="Hz")
     p.add_argument("--atten", type=float, default=pluto_device.DEFAULT_ATTEN_CEILING,
                     help="TX attenuation in dB while keyed (default %(default)s)")
-    p.add_argument("--mode", choices=["fm", "ssb"], default="fm")
+    p.add_argument("--mode", choices=["fm", "ssb", "lsb"], default="fm")
     p.add_argument("--duration", type=float, default=3.0,
                     help="seconds to key up for in the non-interactive (default) test")
     p.add_argument("--interactive", action="store_true",
@@ -46,7 +48,7 @@ def main(argv=None):
 
     if args.gui:
         from .gui import run_gui
-        mode = PlutoTxFlowgraph.MODE_SSB if args.mode == "ssb" else PlutoTxFlowgraph.MODE_FM
+        mode = MODES[args.mode]
         return run_gui(args.uri, frequency_hz=args.freq, atten_ceiling_db=args.atten, mode=mode) or 0
 
     if not args.yes:
@@ -55,7 +57,7 @@ def main(argv=None):
             print("Aborted.")
             return 1
 
-    mode = PlutoTxFlowgraph.MODE_SSB if args.mode == "ssb" else PlutoTxFlowgraph.MODE_FM
+    mode = MODES[args.mode]
     tb = PlutoTxFlowgraph(device_type="pluto", connection=args.uri, frequency=args.freq,
                            power_ceiling=args.atten, mode=mode)
 

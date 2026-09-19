@@ -12,6 +12,7 @@ from PyQt5 import QtCore, QtWidgets, sip
 
 from . import audio_devices
 from . import config
+from . import dcs
 from . import devices
 from . import digitext
 from . import filebroadcast
@@ -230,6 +231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItem("FM", PlutoTxFlowgraph.MODE_FM)
         self.mode_combo.addItem("SSB (USB)", PlutoTxFlowgraph.MODE_SSB)
+        self.mode_combo.addItem("SSB (LSB)", PlutoTxFlowgraph.MODE_LSB)
         self.mode_combo.addItem("M17", PlutoTxFlowgraph.MODE_M17)
         if not M17_AVAILABLE:
             # gr-m17 is an optional, from-source dependency (see
@@ -396,6 +398,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.baseband_row_widget = QtWidgets.QWidget()
         self.baseband_row_widget.setLayout(baseband_row)
         audio_tab_layout.addWidget(self.baseband_row_widget)
+
+        # Sub-audible tone (CTCSS/DCS) -- FM only, same "hide the row outside its mode" pattern.
+        subtone_row = QtWidgets.QHBoxLayout()
+        subtone_row.addWidget(QtWidgets.QLabel("Sub-audible tone:"))
+        self.subtone_kind_combo = QtWidgets.QComboBox()
+        self.subtone_kind_combo.addItem("Off", "off")
+        self.subtone_kind_combo.addItem("CTCSS", "ctcss")
+        self.subtone_kind_combo.addItem("DCS", "dcs")
+        subtone_row.addWidget(self.subtone_kind_combo)
+        self.subtone_value_combo = QtWidgets.QComboBox()
+        self.subtone_value_combo.setMinimumWidth(90)
+        subtone_row.addWidget(self.subtone_value_combo)
+        subtone_row.addWidget(QtWidgets.QLabel("Level:"))
+        self.subtone_level_spin = QtWidgets.QSpinBox()
+        self.subtone_level_spin.setRange(*config.SUBTONE_LEVEL_RANGE_PCT)
+        self.subtone_level_spin.setValue(config.SUBTONE_LEVEL_DEFAULT_PCT)
+        self.subtone_level_spin.setSuffix(" %")
+        self.subtone_level_spin.setToolTip(
+            "Tone deviation as a percentage of the FM deviation; the voice is turned down by the same "
+            "amount while a tone is active, so the total deviation stays the same.\n"
+            "The tone starts with PTT -- give the receiver ~0.3 s before talking.")
+        subtone_row.addWidget(self.subtone_level_spin)
+        subtone_row.addStretch(1)
+        self.subtone_row_widget = QtWidgets.QWidget()
+        self.subtone_row_widget.setLayout(subtone_row)
+        audio_tab_layout.addWidget(self.subtone_row_widget)
+        self._fill_subtone_values()
+        self.subtone_kind_combo.currentIndexChanged.connect(self._on_subtone_kind_changed)
+        self.subtone_value_combo.currentIndexChanged.connect(self._on_subtone_changed)
+        self.subtone_level_spin.valueChanged.connect(self._on_subtone_changed)
+        self._update_subtone_controls_enabled()
         self._update_m17_controls_enabled()
 
         # --- FreeDV variant + callsign row -- only VISIBLE in FreeDV mode,
@@ -1150,6 +1183,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_filebroadcast_controls_enabled()
         self._baseband_connected = enabled
         self._update_baseband_controls_enabled()
+        self._subtone_connected = enabled
+        self._update_subtone_controls_enabled()
+
+    def _update_subtone_controls_enabled(self):
+        is_fm_mode = self.mode_combo.currentData() == PlutoTxFlowgraph.MODE_FM
+        self.subtone_row_widget.setVisible(is_fm_mode)
+        connected = getattr(self, "_subtone_connected", True)
+        kind = self.subtone_kind_combo.currentData()
+        self.subtone_kind_combo.setEnabled(connected)
+        self.subtone_value_combo.setEnabled(connected and kind != "off")
+        self.subtone_level_spin.setEnabled(connected and kind != "off")
+
+    def _fill_subtone_values(self):
+        kind = self.subtone_kind_combo.currentData()
+        self.subtone_value_combo.blockSignals(True)
+        self.subtone_value_combo.clear()
+        if kind == "ctcss":
+            for hz in config.CTCSS_TONES_HZ:
+                self.subtone_value_combo.addItem(f"{hz:.1f} Hz", hz)
+            self.subtone_value_combo.setCurrentIndex(self.subtone_value_combo.findData(88.5))
+        elif kind == "dcs":
+            for code in dcs.STANDARD_CODES:
+                for polarity in dcs.POLARITIES:
+                    self.subtone_value_combo.addItem(f"{dcs.code_label(code)} {polarity}", (code, polarity))
+        self.subtone_value_combo.blockSignals(False)
+
+    def _apply_subtone(self, tb):
+        kind = self.subtone_kind_combo.currentData()
+        tb.set_subtone_level(self.subtone_level_spin.value())
+        tb.set_subtone(kind, None if kind == "off" else self.subtone_value_combo.currentData())
+
+    def _on_subtone_kind_changed(self, _idx):
+        self._fill_subtone_values()
+        self._update_subtone_controls_enabled()
+        self._on_subtone_changed()
+
+    def _on_subtone_changed(self, *_):
+        if self.tb is not None:
+            self._apply_subtone(self.tb)
 
     def _update_m17_controls_enabled(self):
         # Visibility follows the selected mode (row hidden entirely outside
@@ -1519,6 +1591,7 @@ class MainWindow(QtWidgets.QMainWindow):
         module_available = {
             PlutoTxFlowgraph.MODE_FM: True,
             PlutoTxFlowgraph.MODE_SSB: True,
+            PlutoTxFlowgraph.MODE_LSB: True,
             PlutoTxFlowgraph.MODE_M17: M17_AVAILABLE,
             PlutoTxFlowgraph.MODE_FREEDV: FREEDV_AVAILABLE,
             PlutoTxFlowgraph.MODE_RADE: RADE_AVAILABLE,
@@ -1644,6 +1717,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
         self._update_baseband_controls_enabled()
+        self._update_subtone_controls_enabled()
 
     def _on_mode_changed(self, idx):
         mode = self.mode_combo.currentData()
@@ -2357,6 +2431,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_baseband_deviation(float(self.baseband_deviation_slider.value()))
+        self._apply_subtone(new_tb)
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
         new_tb.set_secondary_power("AMP", self.amp_checkbox.isChecked())

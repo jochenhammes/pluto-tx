@@ -23,7 +23,7 @@ from pluto_advanced_rx.rtty_state import RttyChatState
 
 from . import runtime
 
-MODES = ("fm", "ssb", "rade", "m17", "baseband")
+MODES = ("fm", "ssb", "lsb", "rade", "m17", "baseband")
 
 
 def add_common_args(parser):
@@ -266,6 +266,20 @@ def run_ssb(args):
     )
 
 
+def add_lsb_subparser(subparsers):
+    p = subparsers.add_parser("lsb", help="SSB (LSB) voice", description=__doc__)
+    add_common_args(p)
+    p.add_argument("--width-hz", type=float, default=rx_config.SSB_DEMOD_WIDTH_DEFAULT_HZ,
+                   help=f"Demod bandpass width in Hz (default: {rx_config.SSB_DEMOD_WIDTH_DEFAULT_HZ:.0f})")
+    p.set_defaults(func=run_lsb)
+
+
+def run_lsb(args):
+    return _build_and_run(
+        args, AdvancedRxFlowgraph.MODE_LSB, runtime.Emitter(args.json), ssb_demod_width_hz=args.width_hz,
+    )
+
+
 def add_rade_subparser(subparsers):
     p = subparsers.add_parser(
         "rade", help="RADE (radio autoencoder) digital voice (requires librade.so, see install-rade.sh)",
@@ -323,6 +337,7 @@ def run_baseband(args):
 def add_subparsers(rx_subparsers):
     add_fm_subparser(rx_subparsers)
     add_ssb_subparser(rx_subparsers)
+    add_lsb_subparser(rx_subparsers)
     add_rade_subparser(rx_subparsers)
     add_m17_subparser(rx_subparsers)
     add_baseband_subparser(rx_subparsers)

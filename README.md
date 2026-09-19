@@ -25,8 +25,8 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 
 | | |
 |---|---|
-| **TX-Modi** (`pluto-tx`) | FM, SSB (USB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
-| **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB), RADE V1, M17, Baseband |
+| **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
+| **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
 | **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR, MeshCore als Platzhalter) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
@@ -138,7 +138,16 @@ export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 **FM/SSB-Sprechfunk.** Klassischer Sprechfunk über Pluto oder HackRF —
 Mikrofon oder Audiodatei als Quelle, Noise-Gate/Kompressor/Limiter
 optional zuschaltbar (siehe [Sicherheit](#sicherheit) für den
-PTT-Sicherheitsmechanismus dahinter).
+PTT-Sicherheitsmechanismus dahinter). Im FM-Modus kann ein **CTCSS-Ton**
+(50 Standardtöne, 67–254,1 Hz) oder ein **DCS-Code** (83 Standardcodes, Polarität
+N/I) unhörbar mitgesendet werden — z. B. um ein Relais zu öffnen; Pegel in % des
+Hubs einstellbar (Standard 12 %, die Stimme wird um denselben Anteil leiser, der
+Gesamthub bleibt gleich). Der Ton läuft ab PTT-Druck; dem Empfänger ~0,3 s
+Vorlauf geben, bevor gesprochen wird. Ein Squelch-Tail (Reverse-Burst bzw.
+DCS-Abschaltcode) wird nicht gesendet. SSB gibt es als USB und LSB
+(HF-Konvention: unter 10 MHz LSB); die Digimodes (PSK31, RTTY, …) bleiben USB.
+CLI: `pluto-cli tx fm --ctcss 88.5` bzw. `--dcs 023` / `--dcs 754I`,
+`pluto-cli tx lsb`, `pluto-cli rx lsb`.
 
 **Digitalsprache mit M17.** `pluto-tx` sendet, jeder M17-fähige
 Empfänger (auch `pluto-advanced-rx` selbst, oder SDR++ mit dessen
@@ -224,7 +233,7 @@ RTL-SDR gibt es dort zusätzlich **Direct sampling** (Tuner wird umgangen, HF
 0,1–28,8 MHz (über 14,4 MHz aliased: das Band mischt sich mit dem Spiegelbild von 28,8 MHz − f, Bandpass empfehlenswert), Dropdown Q-/I-Zweig — je nach Verdrahtung des HF-Eingangs, beim
 RTL-SDR Blog V3 Q); beim Einschalten wechselt der Frequenzbereich auf HF, beim
 Ausschalten kommt die vorherige Frequenz zurück. Der Tuner-Gain wirkt im
-Direct-Modus nicht. AM und LSB (typisch für HF) kann die RX-App noch nicht.
+Direct-Modus nicht. AM (typisch für HF) kann die RX-App noch nicht; LSB gibt es als eigenen Modus „SSB (LSB)“.
 
 **Baseband-Modus + fldigi.** Roher, unverarbeiteter Audio-Durchgriff
 (kein Noise-Gate/Kompressor/Limiter, breiter als normales 3kHz-SSB-

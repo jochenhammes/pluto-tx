@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for the PlutoSDR advanced RX app: FM/SSB(USB) demodulation
+"""CLI entry point for the PlutoSDR advanced RX app: FM/SSB(USB/LSB) demodulation
 plus an interactive, SDR++-style waterfall (click-to-tune, tuned-frequency
 marker, demod-bandwidth shading).
 
@@ -12,12 +12,15 @@ import sys
 from . import config
 from .flowgraph import AdvancedRxFlowgraph
 
+MODES = {"fm": AdvancedRxFlowgraph.MODE_FM, "ssb": AdvancedRxFlowgraph.MODE_SSB,
+         "lsb": AdvancedRxFlowgraph.MODE_LSB}
+
 
 def build_argparser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uri", default=config.DEFAULT_URI)
     p.add_argument("--freq", type=float, default=config.DEFAULT_FREQUENCY, help="Hz")
-    p.add_argument("--mode", choices=["fm", "ssb"], default="fm")
+    p.add_argument("--mode", choices=["fm", "ssb", "lsb"], default="fm")
     p.add_argument("--bandwidth", type=int, choices=config.RX_BANDWIDTH_PRESETS,
                     default=config.DEFAULT_RX_BANDWIDTH, help="RX sample rate / zoom span, Hz")
     p.add_argument("--gain-mode", choices=config.GAIN_MODES, default=config.DEFAULT_GAIN_MODE)
@@ -38,7 +41,7 @@ def main(argv=None):
 
     from .gui import run_gui
 
-    demod_mode = AdvancedRxFlowgraph.MODE_SSB if args.mode == "ssb" else AdvancedRxFlowgraph.MODE_FM
+    demod_mode = MODES[args.mode]
     return run_gui(args.uri, frequency_hz=args.freq, demod_mode=demod_mode, sample_rate=args.bandwidth,
                    gain_mode=args.gain_mode, manual_gain_db=args.gain) or 0
 

@@ -80,6 +80,7 @@ class AdvancedRxFlowgraph(gr.top_block):
     MODE_RADE = 2
     MODE_M17 = 3
     MODE_BASEBAND = 4
+    MODE_LSB = 5  # shares the SSB branch/selector port; only the filter's side differs
 
     def __init__(self, uri=None, frequency=config.DEFAULT_FREQUENCY,
                  sample_rate=None, gain_mode=config.DEFAULT_GAIN_MODE,
@@ -305,9 +306,8 @@ class AdvancedRxFlowgraph(gr.top_block):
         # low-frequency mains hum) stays fixed; its width -- and therefore
         # the high edge -- is operator-adjustable (set_ssb_demod_width()).
         self.ssb_demod_width_hz = ssb_demod_width_hz
-        f_lo = config.SSB_AUDIO_BAND_HZ[0]
-        ssb_taps = firdes.complex_band_pass(1.0, self.if_rate, f_lo, f_lo + ssb_demod_width_hz,
-                                             config.SSB_AUDIO_BAND_HZ[2], window.WIN_HAMMING)
+        # LSB (MODE_LSB) uses the same branch with the mirrored band below the carrier.
+        ssb_taps = self._ssb_taps(ssb_demod_width_hz, demod_mode == self.MODE_LSB)
         self.ssb_filter = filter.fir_filter_ccc(1, ssb_taps)
         self.ssb_to_real = blocks.complex_to_real()
         self.connect(self.if_filter, self.ssb_filter)
@@ -381,7 +381,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         # _audio_producer_map()/set_demod_mode() below) -- clamp to a
         # valid FM/SSB/Baseband index either way.
         _initial_selector_index = {
-            self.MODE_SSB: 1, self.MODE_BASEBAND: 2,
+            self.MODE_SSB: 1, self.MODE_LSB: 1, self.MODE_BASEBAND: 2,
         }.get(demod_mode, 0)
         self.demod_selector = blocks.selector(gr.sizeof_float, _initial_selector_index, 0)
         self.demod_selector.set_enabled(True)
@@ -816,7 +816,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         demod_selector's construction for why they can't share it)."""
         producers = {
             self.MODE_FM: self.demod_selector, self.MODE_SSB: self.demod_selector,
-            self.MODE_BASEBAND: self.demod_selector,
+            self.MODE_LSB: self.demod_selector, self.MODE_BASEBAND: self.demod_selector,
         }
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_audio_resampler_up
@@ -858,7 +858,10 @@ class AdvancedRxFlowgraph(gr.top_block):
         if mode in (self.MODE_RADE, self.MODE_M17):
             return  # both bypass demod_selector entirely, nothing to retap there
 
-        self.demod_selector.set_input_index({self.MODE_SSB: 1, self.MODE_BASEBAND: 2}.get(mode, 0))
+        if mode in (self.MODE_SSB, self.MODE_LSB):
+            self.ssb_filter.set_taps(self._ssb_taps(self.ssb_demod_width_hz, mode == self.MODE_LSB))
+        self.demod_selector.set_input_index(
+            {self.MODE_SSB: 1, self.MODE_LSB: 1, self.MODE_BASEBAND: 2}.get(mode, 0))
 
     def set_nf_gain(self, gain: float):
         self.nf_gain.set_k(gain)
@@ -891,12 +894,17 @@ class AdvancedRxFlowgraph(gr.top_block):
         taps = firdes.low_pass(1.0, self.if_rate, width_hz / 2, config.FM_CHANNEL_TRANS_HZ, window.WIN_HAMMING)
         self.baseband_channel_filter.set_taps(taps)
 
+    def _ssb_taps(self, width_hz, lower_sideband):
+        f_lo = config.SSB_AUDIO_BAND_HZ[0]
+        lo, hi = f_lo, f_lo + width_hz
+        if lower_sideband:
+            lo, hi = -hi, -lo
+        return firdes.complex_band_pass(1.0, self.if_rate, lo, hi,
+                                        config.SSB_AUDIO_BAND_HZ[2], window.WIN_HAMMING)
+
     def set_ssb_demod_width(self, width_hz: float):
         self.ssb_demod_width_hz = width_hz
-        f_lo = config.SSB_AUDIO_BAND_HZ[0]
-        taps = firdes.complex_band_pass(1.0, self.if_rate, f_lo, f_lo + width_hz,
-                                         config.SSB_AUDIO_BAND_HZ[2], window.WIN_HAMMING)
-        self.ssb_filter.set_taps(taps)
+        self.ssb_filter.set_taps(self._ssb_taps(width_hz, self.demod_mode == self.MODE_LSB))
 
     def set_psk31_tone_hz(self, tone_hz: float):
         """Retunes psk31_tone_filter in place (freq_xlating_fir_filter_ccf.

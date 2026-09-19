@@ -86,6 +86,10 @@ pluto-cli tx fm --freq 432150000
 # Same, but skip the confirmation prompt and get machine-readable output:
 pluto-cli tx fm --freq 432150000 --yes --json
 
+# FM with a CTCSS sub-audible tone (or --dcs 023 for a DCS code), and LSB voice:
+pluto-cli tx fm --freq 432150000 --ctcss 88.5
+pluto-cli tx lsb --freq 7100000
+
 # Receive FM at the same frequency to the default speaker, for 10 seconds:
 pluto-cli rx fm --freq 432150000 --duration 10
 ```
@@ -119,7 +123,8 @@ Common flags (every mode):
 
 | mode | extra flags | notes |
 |---|---|---|
-| `fm`, `ssb` | -- | analog voice |
+| `fm` | `--ctcss HZ` or `--dcs CODE[N\|I]`, `--tone-level PCT` | analog voice; optional CTCSS tone (50 standard tones, e.g. `88.5`) or DCS code (83 standard octal codes, `N` normal / `I` inverted, e.g. `023`, `754I`); tone level in % of the deviation (default 12, 5-25), the voice is reduced by the same amount; the tone starts with PTT |
+| `ssb`, `lsb` | -- | analog voice, upper / lower sideband |
 | `m17` | `--src-callsign`, `--dst-callsign` | requires `install-m17.sh`; holds keyed briefly after unkey to send the EOT frame |
 | `freedv` | `--variant {2020,2020b}`, `--callsign` | digital voice |
 | `rade` | `--eoo` | requires `install-rade.sh`; `--eoo` sends an End-Of-Over marker after unkey and waits for it to finish |
@@ -182,7 +187,7 @@ for the whole process lifetime via `--digimode` at startup.
 
 | mode | extra flags | notes |
 |---|---|---|
-| `fm`, `ssb`, `baseband` | `--width-hz` | demod filter width |
+| `fm`, `ssb`, `lsb`, `baseband` | `--width-hz` | demod filter width |
 | `rade` | -- | requires `install-rade.sh` |
 | `m17` | -- | requires `install-m17.sh`; each decoded frame is emitted as an `m17_fields` event |
 
