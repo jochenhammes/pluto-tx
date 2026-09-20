@@ -47,12 +47,21 @@ from pluto_tx.lora_airtime import cr_index as _lora_cr_index
 # is a from-source build (install-lora.sh), and the packet layer needs the
 # `meshtastic` + `cryptography` pip packages.
 try:
-    from .lora_rx import LoraRxDecoder, LORA_AVAILABLE
+    from .lora_rx import LoraRxDecoder, LORA_AVAILABLE as _LORA_CORE_AVAILABLE
     from pluto_tx.lora import lora_resampler_taps as _lora_resampler_taps
-    from pluto_tx import meshtastic_codec as _meshtastic_codec  # noqa: F401 (import check)
 except ImportError:
     LoraRxDecoder = None
-    LORA_AVAILABLE = False
+    _LORA_CORE_AVAILABLE = False
+try:
+    from pluto_tx import meshtastic_codec as _meshtastic_codec  # noqa: F401 (import check)
+except ImportError:
+    _meshtastic_codec = None
+LORA_AVAILABLE = _LORA_CORE_AVAILABLE and _meshtastic_codec is not None
+try:
+    from pluto_tx import meshcore_codec as _meshcore_codec  # noqa: F401 (import check)
+except ImportError:
+    _meshcore_codec = None
+MESHCORE_AVAILABLE = _LORA_CORE_AVAILABLE and _meshcore_codec is not None  # needs `cryptography`, not `meshtastic`
 
 # RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
 # install-rade.sh), not something every user has.
@@ -96,7 +105,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
                  rtty_reverse=False, active_digimode=None, buffer_size=None,
                  on_meshtastic_frame=None, meshtastic_preset_index=0,
-                 frequency_correction_ppm=0.0, direct_sampling=0, on_pocsag_message=None):
+                 frequency_correction_ppm=0.0, direct_sampling=0, on_pocsag_message=None,
+                 on_meshcore_packet=None, meshcore_preset_index=0):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -706,27 +716,20 @@ class AdvancedRxFlowgraph(gr.top_block):
                 raise ValueError("Meshtastic needs gr-lora_sdr and the meshtastic package -- see install-lora.sh")
             if self.device.is_audio_only():
                 raise ValueError("Meshtastic (LoRa) needs an RF device, not a soundcard")
-            lp = config.MESHTASTIC_PRESETS[self.meshtastic_preset_index]
-            lora_bw = int(lp.bandwidth_hz)
-            lora_fs = lora_bw * 4  # LoraRxDecoder's proven oversampling (samp_rate_mult=4)
-            if self.sample_rate < 2 * lora_bw:
-                raise ValueError(
-                    f"RX bandwidth {self.sample_rate / 1e6:g} MS/s is too low for {lp.name} "
-                    f"({lora_bw / 1e3:g} kHz) -- pick at least {2 * lora_bw / 1e6:g} MS/s")
-            g_lora = math.gcd(int(self.sample_rate), lora_fs)
-            lora_interp, lora_decim = lora_fs // g_lora, int(self.sample_rate) // g_lora
-            self.meshtastic_rx_resampler = filter.rational_resampler_ccf(
-                interpolation=lora_interp, decimation=lora_decim,
-                taps=_lora_resampler_taps(lora_bw, float(lora_interp), self.sample_rate * lora_interp,
-                                          min(self.sample_rate, lora_fs)),
-            )
-            self.meshtastic_decoder = LoraRxDecoder(
-                lp.spreading_factor, lora_bw, _lora_cr_index(lp.coding_rate),
-                center_freq_hz=self.nominal_freq_hz,
-            )
-            self.connect(self.pluto_source, self.meshtastic_rx_resampler)
-            self.connect(self.meshtastic_rx_resampler, self.meshtastic_decoder)
-            self.msg_connect(self.meshtastic_decoder, "msg", self.meshtastic_deframer, "msg")
+            self.meshtastic_rx_resampler, self.meshtastic_decoder = self._wire_lora_rx(
+                config.MESHTASTIC_PRESETS[self.meshtastic_preset_index], self.meshtastic_deframer)
+
+        # --- MeshCore RX: the same LoRa chain with MeshCore's PHY (SF8/62.5 kHz/CR 4/8 by default), preamble
+        # length and sync word from the preset; a separate deframer object so the GUI can read its counter.
+        self.meshcore_preset_index = int(meshcore_preset_index)
+        self.meshcore_deframer = MeshtasticDeframer(on_meshcore_packet or (lambda raw: None))
+        if active_digimode == "meshcore":
+            if not MESHCORE_AVAILABLE:
+                raise ValueError("MeshCore needs gr-lora_sdr and the cryptography package -- see install-lora.sh")
+            if self.device.is_audio_only():
+                raise ValueError("MeshCore (LoRa) needs an RF device, not a soundcard")
+            self.meshcore_rx_resampler, self.meshcore_decoder = self._wire_lora_rx(
+                config.MESHCORE_PRESETS[self.meshcore_preset_index], self.meshcore_deframer)
 
         # --- POCSAG paging RX (25 kHz channel, 2-FSK +-4.5 kHz, 512/1200/2400 Bd). Taps the 50 kHz
         # if_filter like RTTY/PSK31: channel low-pass -> FM discriminator (+-1 = +-4.5 kHz) -> DC removal
@@ -779,7 +782,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                 self.connect(sync, slicer)
                 self.connect(slicer, deframer)
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "pocsag"):
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the
@@ -860,6 +863,31 @@ class AdvancedRxFlowgraph(gr.top_block):
         __init__'s gain_values."""
         agc_stage = next(s for s in self.device.gain_stages if s.controls_agc)
         self.device.set_gain(agc_stage.name, gain_db)
+
+    def _wire_lora_rx(self, lp, deframer):
+        """Tap the full-rate device source, resample to 4 x the preset's LoRa bandwidth with EXPLICIT taps and
+        feed gr-lora_sdr's decoder (PHY, preamble length and sync word from `lp`); returns (resampler, decoder)."""
+        lora_bw = int(lp.bandwidth_hz)
+        lora_fs = lora_bw * 4  # LoraRxDecoder's proven oversampling (samp_rate_mult=4)
+        if self.sample_rate < 2 * lora_bw:
+            raise ValueError(
+                f"RX bandwidth {self.sample_rate / 1e6:g} MS/s is too low for {lp.name} "
+                f"({lora_bw / 1e3:g} kHz) -- pick at least {2 * lora_bw / 1e6:g} MS/s")
+        g_lora = math.gcd(int(self.sample_rate), lora_fs)
+        lora_interp, lora_decim = lora_fs // g_lora, int(self.sample_rate) // g_lora
+        resampler = filter.rational_resampler_ccf(
+            interpolation=lora_interp, decimation=lora_decim,
+            taps=_lora_resampler_taps(lora_bw, float(lora_interp), self.sample_rate * lora_interp,
+                                      min(self.sample_rate, lora_fs)),
+        )
+        decoder = LoraRxDecoder(
+            lp.spreading_factor, lora_bw, _lora_cr_index(lp.coding_rate),
+            center_freq_hz=self.nominal_freq_hz, preamb_len=lp.preamble_len, sync_word=lp.sync_word,
+        )
+        self.connect(self.pluto_source, resampler)
+        self.connect(resampler, decoder)
+        self.msg_connect(decoder, "msg", deframer, "msg")
+        return resampler, decoder
 
     def _audio_producer_map(self):
         """mode -> the block that should feed nf_gain in that mode. FM/SSB/

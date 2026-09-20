@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, Meshtastic/LoRa) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, Meshtastic/LoRa, MeshCore/LoRa) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -27,7 +27,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR, MeshCore als Platzhalter) |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
@@ -85,7 +85,8 @@ Protokollschicht braucht zusätzlich die pip-Pakete `meshtastic` und
 `cryptography` (`pip install --user --break-system-packages meshtastic
 cryptography` bei PEP-668-Systemen). Ohne das ist der
 Meshtastic-Eintrag im Digimode-Kombo beider Apps ausgegraut, der Rest
-läuft normal.
+läuft normal. **MeshCore** braucht nur `gr-lora_sdr` und `cryptography`
+(nicht das `meshtastic`-Paket).
 
 ### FreeDV braucht kein separates Skript
 
@@ -209,8 +210,28 @@ Paket und löst danach selbst aus); `pluto-advanced-rx` zeigt jedes
 empfangene Paket in einer Tabelle (Absender, Ziel, Typ, Hops, Text —
 Pakete anderer Kanäle als "other channel"). Nur ein Digimode gleichzeitig
 (wie bei PSK31/RTTY), und nur mit RF-Gerät (Pluto/HackRF/RTL-SDR),
-nicht über Soundkarte. MeshCore steht als deaktivierter Platzhalter im
-Preset-Kombo (Protokollschicht noch nicht implementiert).
+nicht über Soundkarte.
+
+**MeshCore (LoRa).** Eigener Digimode neben Meshtastic (gleiche LoRa-Basis,
+anderes Paketformat). Preset „MeshCore EU/UK Narrow“: 869,618 MHz, SF8, 62,5 kHz,
+CR 4/8, 32 Präambel-Symbole, Sync 0x12 — **bit-genau gegen einen echten Heltec V3
+verifiziert** (RX dekodiert alle acht aufgezeichneten Bursts byte-gleich zum
+ESP32-Referenz, unsere TX-Chirp-Symbole stimmen mit dem echten Burst überein).
+`pluto-advanced-rx` zeigt Adverts (Name, Rolle, Position, **Ed25519-Signatur
+geprüft**), entschlüsselt Gruppentexte des öffentlichen Kanals (und weiterer
+Kanäle mit eigenem 32-Hex-Schlüssel; AES-128-ECB + 2-Byte-HMAC, MAC geprüft) und
+führt eine Knotenliste; andere Pakettypen erscheinen mit Typ, Route, Pfad und
+Länge als „unverifiziert“ (ausblendbar). Nichts davon wird gespeichert.
+`pluto-tx` sendet einen signierten **Advert** (Flood/Direct, Name, Rolle, optional
+Position) oder einen **Gruppentext** (Public oder eigener Kanal); die App ist ein
+eigener neuer MeshCore-Knoten (Ed25519-Schlüssel wird beim ersten Mal in
+`~/.config/pluto-tx/meshcore_identity.json` angelegt, Rechte 0600, nie den Schlüssel
+eines anderen Geräts benutzen). 10 % Duty-Cycle wird durchgesetzt. **In
+Amateurfunkbändern nur Adverts** (MeshCore-Text ist immer verschlüsselt, und der
+Advert braucht dort einen Namen = Rufzeichen). Ein Flood-Advert wird von
+Repeatern weiterverteilt — Sendetests zunächst gegen einen isolierten Empfänger.
+Direktnachrichten (TXT_MSG) sind noch nicht implementiert.
+CLI: `pluto-cli tx meshcore --kind advert --name DA2JH`, `pluto-cli rx fm --digimode meshcore`.
 **Rechtlicher Hinweis, im Programm bei jedem Preset sichtbar:**
 *433 MHz* (Band 433,0–434,0 MHz) liegt im deutschen 70-cm-Amateurfunkband — dort greift die
 Eigenbau-Ausnahme, es gilt aber Ham Mode (Rufzeichen Pflicht, keine
@@ -332,6 +353,7 @@ pluto_tx/                 # Sende-App
 ├── dynamics.py                # Kompressor/Limiter
 ├── lora.py / lora_airtime.py    # LoRa-PHY (gr-lora_sdr), Airtime-Formel + Duty-Cycle-Begrenzer
 ├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
+├── meshcore_codec.py / meshcore_identity.py  # MeshCore: Paketformat, Adverts (Ed25519), Gruppentext (AES-ECB+HMAC), Knotenidentität
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
 ├── gui.py / app.py
 └── da2jh-test.wav              # Standard-Testaufnahme

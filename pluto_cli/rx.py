@@ -17,6 +17,7 @@ from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
+from pluto_advanced_rx.meshcore_state import MeshcoreState
 from pluto_advanced_rx.meshtastic_state import MeshtasticState
 from pluto_advanced_rx.pocsag_state import PocsagState
 from pluto_advanced_rx.psk31_state import Psk31ChatState
@@ -82,7 +83,7 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic", "pocsag"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
@@ -145,6 +146,17 @@ def add_common_args(parser):
              "empty = unencrypted), used when --digimode meshtastic",
     )
     parser.add_argument(
+        "--meshcore-preset", choices=tuple(p.name for p in rx_config.MESHCORE_PRESETS),
+        default=rx_config.MESHCORE_PRESETS[0].name,
+        help="MeshCore preset (carrier, SF/BW/CR, preamble, sync word) for --digimode meshcore; --freq is "
+             f"ignored (default: {rx_config.MESHCORE_PRESETS[0].name})",
+    )
+    parser.add_argument(
+        "--meshcore-channel", action="append", default=[], metavar="NAME:HEX",
+        help="Extra MeshCore group channel to decrypt (name and 32 hex digits of the secret; repeatable). "
+             "The Public channel is always decoded.",
+    )
+    parser.add_argument(
         "--filebroadcast-save-dir", default=None, metavar="DIR",
         help="Also watch for File Broadcast files in parallel (always-on branch, independent of "
              "the primary demod mode) and save each one to this directory as soon as it's fully "
@@ -191,6 +203,30 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                            "hop_limit": row["hop_limit"], "hop_start": row["hop_start"], "text": row["text"]})
         emitter.emit("meshtastic_frame", **fields)
 
+    meshcore_state = MeshcoreState()
+    meshcore_preset_index = [p.name for p in rx_config.MESHCORE_PRESETS].index(args.meshcore_preset)
+    if args.digimode == "meshcore":
+        from pluto_tx import meshcore_codec
+        extra = []
+        for spec in args.meshcore_channel:
+            name, _, key = spec.partition(":")
+            try:
+                extra.append(meshcore_codec.GroupChannel(name or "Custom", meshcore_codec.parse_channel_secret(key)))
+            except ValueError as e:
+                emitter.error(f"invalid --meshcore-channel {spec!r}: {e}")
+                return 1
+        meshcore_state.set_channels(extra)
+
+    def on_meshcore_packet(raw):
+        row = meshcore_state.on_frame(raw)
+        if row["kind"] == "invalid":
+            return
+        fields = {k: row[k] for k in ("kind", "route", "type", "hops", "verified", "raw_len") if k in row}
+        for k in ("name", "role", "public_key", "latitude", "longitude", "timestamp", "channel", "sender", "text"):
+            if k in row:
+                fields[k] = row[k]
+        emitter.emit("meshcore_packet", **fields)
+
     pocsag_state = PocsagState()
     pocsag_state.set_charset(args.pocsag_charset)
     pocsag_state.set_hide_damaged(False)  # damaged calls are filtered by on_pocsag_message()
@@ -211,6 +247,14 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         emitter.error(f"--direct-sampling is only available for --device rtlsdr, not {args.device}")
         return 1
     frequency = args.freq
+    if args.digimode == "meshcore":
+        from pluto_advanced_rx.flowgraph import MESHCORE_AVAILABLE
+        if not MESHCORE_AVAILABLE:
+            emitter.error("MeshCore is not available -- gr-lora_sdr / the cryptography package is not installed, "
+                          "see install-lora.sh")
+            return 1
+        frequency = rx_config.MESHCORE_PRESETS[meshcore_preset_index].frequency_hz
+        emitter.emit("meshcore_listen", preset=args.meshcore_preset, freq_hz=frequency)
     if args.digimode == "meshtastic":
         if not LORA_AVAILABLE:
             emitter.error("Meshtastic is not available -- gr-lora_sdr / the meshtastic package is not installed, "
@@ -250,6 +294,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             on_rtty_char=on_rtty_char,
             on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
             on_pocsag_message=on_pocsag_message,
+            on_meshcore_packet=on_meshcore_packet, meshcore_preset_index=meshcore_preset_index,
             frequency_correction_ppm=args.freq_correction_ppm, direct_sampling=direct_sampling,
             **mode_kwargs,
         )

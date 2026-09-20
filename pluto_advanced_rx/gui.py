@@ -31,11 +31,14 @@ from . import devices
 from . import rade_autotune
 from .fft_probe import FftProbe
 from .filebroadcast_state import FileBroadcastState
-from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_AVAILABLE
+from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_AVAILABLE, MESHCORE_AVAILABLE
+from .meshcore_state import MeshcoreState
 from .meshtastic_state import MeshtasticState
 from .pocsag_state import PocsagState
 if LORA_AVAILABLE:
     from pluto_tx import meshtastic_codec
+if MESHCORE_AVAILABLE:
+    from pluto_tx import meshcore_codec
 from .psk31_state import Psk31ChatState
 from .rtty_state import RttyChatState
 from .waterfall_widget import AdvancedWaterfallWidget
@@ -91,6 +94,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshtastic_last_frames = 0
         self._meshtastic_last_activity_time = 0.0
         self._meshtastic_psk_error = None
+        # MeshCore traffic (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._meshcore_state = MeshcoreState()
+        self._meshcore_rendered_version = -1
+        self._meshcore_last_frames = 0
+        self._meshcore_last_activity_time = 0.0
         # POCSAG paging calls -- same "constructed ONCE, survives rebuilds" reasoning.
         self._pocsag_state = PocsagState()
         self._pocsag_rendered_version = -1
@@ -247,6 +255,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("RTTY", "rtty")
         self.digimode_combo.addItem("POCSAG (Paging)", "pocsag")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
+        self.digimode_combo.addItem("MeshCore (LoRa)", "meshcore")
+        if not MESHCORE_AVAILABLE:
+            mc_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshcore"))
+            mc_item.setEnabled(False)
+            mc_item.setToolTip("gr-lora_sdr / the cryptography package is not installed -- see install-lora.sh / README")
         if not LORA_AVAILABLE:
             lora_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshtastic"))
             lora_item.setEnabled(False)
@@ -383,12 +396,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshtastic_preset_combo = QtWidgets.QComboBox()
         for i, preset in enumerate(config.MESHTASTIC_PRESETS):
             self.meshtastic_preset_combo.addItem(preset.name, i)
-        # MeshCore stays a visible but disabled placeholder (no protocol layer yet).
-        for preset in config.MESHCORE_PRESETS:
-            self.meshtastic_preset_combo.addItem(f"{preset.name} (placeholder)", -1)
-            item = self.meshtastic_preset_combo.model().item(self.meshtastic_preset_combo.count() - 1)
-            item.setEnabled(False)
-            item.setToolTip(config.MESHCORE_PLACEHOLDER_TIP)
         self._meshtastic_default_channel = self._meshtastic_preset().default_channel_name
         self.meshtastic_preset_combo.currentIndexChanged.connect(self._on_meshtastic_preset_changed)
         meshtastic_preset_row.addWidget(self.meshtastic_preset_combo)
@@ -433,6 +440,70 @@ class MainWindow(QtWidgets.QMainWindow):
         meshtastic_group_layout.addLayout(meshtastic_clear_row)
         digimodes_tab_layout.addWidget(meshtastic_group)
         self.meshtastic_group_widget = meshtastic_group
+
+        # --- MeshCore RX: tune to the preset's carrier (done on entering the mode); adverts are shown with their
+        # signature check, group text is decrypted for the Public channel and any extra channels below.
+        meshcore_group = QtWidgets.QWidget()
+        mc_layout = QtWidgets.QVBoxLayout(meshcore_group)
+        mc_layout.setContentsMargins(0, 0, 0, 0)
+        mc_row = QtWidgets.QHBoxLayout()
+        mc_row.addWidget(QtWidgets.QLabel("Preset:"))
+        self.meshcore_preset_combo = QtWidgets.QComboBox()
+        for i, preset in enumerate(config.MESHCORE_PRESETS):
+            self.meshcore_preset_combo.addItem(preset.name, i)
+        self.meshcore_preset_combo.currentIndexChanged.connect(self._on_meshcore_preset_changed)
+        mc_row.addWidget(self.meshcore_preset_combo)
+        mc_row.addWidget(QtWidgets.QLabel("Extra channel:"))
+        self.meshcore_channel_name_edit = QtWidgets.QLineEdit()
+        self.meshcore_channel_name_edit.setPlaceholderText("name")
+        self.meshcore_channel_name_edit.setMaximumWidth(100)
+        mc_row.addWidget(self.meshcore_channel_name_edit)
+        self.meshcore_channel_key_edit = QtWidgets.QLineEdit()
+        self.meshcore_channel_key_edit.setPlaceholderText("32 hex digits (secret)")
+        self.meshcore_channel_key_edit.setMaximumWidth(290)
+        self.meshcore_channel_key_edit.setToolTip(
+            "Secret of another group channel to decrypt (the Public channel is always active). Kept in memory only.")
+        mc_row.addWidget(self.meshcore_channel_key_edit)
+        self.meshcore_hide_unverified_checkbox = QtWidgets.QCheckBox("Hide unverified")
+        self.meshcore_hide_unverified_checkbox.setToolTip(
+            "Hide frames that could not authenticate themselves (only adverts with a valid signature and group texts "
+            "with a valid MAC are verified) -- on a weak signal the rest is often damaged.")
+        mc_row.addWidget(self.meshcore_hide_unverified_checkbox)
+        mc_row.addStretch(1)
+        self.meshcore_clear_button = QtWidgets.QPushButton("Clear")
+        mc_row.addWidget(self.meshcore_clear_button)
+        mc_layout.addLayout(mc_row)
+        self.meshcore_regulatory_label = QtWidgets.QLabel()
+        self.meshcore_regulatory_label.setWordWrap(True)
+        mc_layout.addWidget(self.meshcore_regulatory_label)
+        self.meshcore_signal_label = QtWidgets.QLabel()
+        mc_layout.addWidget(self.meshcore_signal_label)
+        self.meshcore_table = QtWidgets.QTableWidget(0, 7)
+        self.meshcore_table.setHorizontalHeaderLabels(["Time", "Route", "Type", "Hops", "From", "Content", "OK"])
+        self.meshcore_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.meshcore_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.meshcore_table.verticalHeader().setVisible(False)
+        self.meshcore_table.horizontalHeader().setStretchLastSection(True)
+        self.meshcore_table.setMinimumHeight(160)
+        self.meshcore_table.setToolTip("OK = the content authenticated itself (advert signature / group MAC).")
+        mc_layout.addWidget(self.meshcore_table)
+        self.meshcore_nodes_label = QtWidgets.QLabel("Nodes heard: 0")
+        mc_layout.addWidget(self.meshcore_nodes_label)
+        self.meshcore_nodes_table = QtWidgets.QTableWidget(0, 5)
+        self.meshcore_nodes_table.setHorizontalHeaderLabels(["Name", "Role", "Key", "Position", "Last heard"])
+        self.meshcore_nodes_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.meshcore_nodes_table.verticalHeader().setVisible(False)
+        self.meshcore_nodes_table.horizontalHeader().setStretchLastSection(True)
+        self.meshcore_nodes_table.setMaximumHeight(120)
+        mc_layout.addWidget(self.meshcore_nodes_table)
+        digimodes_tab_layout.addWidget(meshcore_group)
+        self.meshcore_group_widget = meshcore_group
+        self.meshcore_channel_name_edit.textChanged.connect(self._apply_meshcore_channels)
+        self.meshcore_channel_key_edit.textChanged.connect(self._apply_meshcore_channels)
+        self.meshcore_hide_unverified_checkbox.toggled.connect(self._meshcore_state.set_hide_unverified)
+        self.meshcore_clear_button.clicked.connect(self._on_meshcore_clear_clicked)
+        self._update_meshcore_regulatory_label()
+        self._update_meshcore_signal_label()
         # --- POCSAG (paging) RX: tune the carrier of a 25 kHz paging channel; 512/1200/2400 Bd are
         # decoded in parallel. Rows keep the raw payload, so charset/interpretation re-render the table.
         pocsag_group = QtWidgets.QWidget()
@@ -981,6 +1052,7 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.receive_button, self.autotune_button, self.filebroadcast_receive_button,
                   self.digimode_combo, self.psk31_tone_slider, self.rtty_mark_slider,
                   self.meshtastic_preset_combo, self.meshtastic_channel_edit, self.meshtastic_psk_edit,
+                  self.meshcore_preset_combo,
                   self.rtty_shift_combo, self.rtty_baud_combo, self.rtty_reverse_checkbox):
             w.setEnabled(enabled)
         self.gain_slider.setEnabled(enabled and self.gain_mode_combo.currentData() == "manual")
@@ -1007,6 +1079,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_group_widget.setVisible(selected == "psk31")
         self.rtty_group_widget.setVisible(selected == "rtty")
         self.meshtastic_group_widget.setVisible(selected == "meshtastic")
+        self.meshcore_group_widget.setVisible(selected == "meshcore")
         self.pocsag_group_widget.setVisible(selected == "pocsag")
 
     def _update_device_connection_labels(self):
@@ -1108,6 +1181,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if LORA_AVAILABLE and not has_frequency:
             lora_item.setToolTip("LoRa needs an RF device, not a soundcard")
             if self.digimode_combo.currentData() == "meshtastic":
+                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
+        mc_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshcore"))
+        mc_item.setEnabled(MESHCORE_AVAILABLE and has_frequency)
+        if MESHCORE_AVAILABLE and not has_frequency:
+            mc_item.setToolTip("LoRa needs an RF device, not a soundcard")
+            if self.digimode_combo.currentData() == "meshcore":
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
         self.audio_tune_label.setVisible(has_audio_tuning)
         self.audio_tune_spin.setVisible(has_audio_tuning)
@@ -1286,6 +1365,8 @@ class MainWindow(QtWidgets.QMainWindow):
             rtty_reverse=self.rtty_reverse_checkbox.isChecked(),
             on_meshtastic_frame=self._meshtastic_state.on_frame,
             meshtastic_preset_index=self._meshtastic_preset_index(),
+            on_meshcore_packet=self._meshcore_state.on_frame,
+            meshcore_preset_index=self._meshcore_preset_index(),
             on_pocsag_message=self._pocsag_state.on_message,
         )
 
@@ -1595,6 +1676,92 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- Meshtastic -------------------------------------------------------
 
+    # --- MeshCore ----------------------------------------------------------
+
+    def _meshcore_preset_index(self):
+        return max(0, self.meshcore_preset_combo.currentData() or 0)
+
+    def _meshcore_preset(self):
+        return config.MESHCORE_PRESETS[self._meshcore_preset_index()]
+
+    def _update_meshcore_regulatory_label(self):
+        preset = self._meshcore_preset()
+        self.meshcore_regulatory_label.setText(
+            f"<b>{preset.frequency_hz / 1e6:.3f} MHz, SF{preset.spreading_factor}, "
+            f"{preset.bandwidth_hz / 1e3:g} kHz, CR {preset.coding_rate}</b> -- {preset.regulatory_label}"
+            + ("" if preset.phy_verified else "<br><i>PHY parameters not yet verified against a real node.</i>"))
+        self.meshcore_regulatory_label.setStyleSheet("color: #b9770e;")
+
+    def _apply_meshcore_channels(self, *_):
+        channels = []
+        name, key = self.meshcore_channel_name_edit.text().strip(), self.meshcore_channel_key_edit.text().strip()
+        if key:
+            try:
+                channels.append(meshcore_codec.GroupChannel(name or "Custom", meshcore_codec.parse_channel_secret(key)))
+            except ValueError:
+                pass  # incomplete input while typing -- keep only the Public channel
+        self._meshcore_state.set_channels(channels)
+
+    def _on_meshcore_preset_changed(self, _idx):
+        self._update_meshcore_regulatory_label()
+        if self.tb is not None and self._active_digimode == "meshcore":
+            self._rebuild_for_digimode("meshcore", force=True)  # PHY, preamble and carrier come from the preset
+
+    def _on_meshcore_clear_clicked(self):
+        self._meshcore_state.clear()
+        self._render_meshcore_table()
+
+    def _update_meshcore_signal_label(self):
+        if self.tb is None:
+            self.meshcore_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "meshcore":
+            self.meshcore_signal_label.setText("Not listening.")
+            return
+        frames = self.tb.meshcore_deframer.frames_decoded
+        if frames > self._meshcore_last_frames:
+            self._meshcore_last_frames = frames
+            self._meshcore_last_activity_time = time.time()
+        freq = (self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6
+        recent = self._meshcore_last_activity_time > 0 and time.time() - self._meshcore_last_activity_time < 10.0
+        total, invalid, hidden = self._meshcore_state.counts()
+        self.meshcore_signal_label.setText(
+            f"{'Frame received' if recent else 'Listening'} on {freq:.3f} MHz -- {frames} frame(s) decoded since connecting"
+            f", {total - hidden} shown" + (f", {hidden} hidden" if hidden else "") + ".")
+
+    def _render_meshcore_table(self):
+        version, rows = self._meshcore_state.get_snapshot()
+        self._meshcore_rendered_version = version
+        table = self.meshcore_table
+        scrollbar = table.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            stamp = time.strftime("%H:%M:%S", time.localtime(row["time"]))
+            kind = row["kind"]
+            if kind == "advert":
+                pos = f", {row['latitude']:.4f}/{row['longitude']:.4f}" if row["latitude"] is not None else ""
+                who, content = row["name"], f"{row['role']}{pos} key {row['public_key'][:8]}"
+            elif kind == "group_text":
+                who, content = row["sender"], f"[{row['channel']}] {row['text']}"
+            else:
+                who, content = "", f"{row['payload_len']} B payload" + (
+                    f", channel hash {row['channel_hash']:02X}" if row.get("channel_hash") is not None else "")
+            cells = [stamp, row["route"], row["type"], str(row["hops"]), who, content, "yes" if row["verified"] else "no"]
+            for c, text in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+        table.resizeColumnsToContents()
+        if at_bottom:
+            table.scrollToBottom()
+        nodes = self._meshcore_state.get_nodes()
+        self.meshcore_nodes_label.setText(f"Nodes heard: {len(nodes)}")
+        self.meshcore_nodes_table.setRowCount(len(nodes))
+        for r, n in enumerate(nodes):
+            pos = f"{n['latitude']:.4f}, {n['longitude']:.4f}" if n["latitude"] is not None else ""
+            cells = [n["name"], n["role"], n["public_key"][:16], pos, time.strftime("%H:%M:%S", time.localtime(n["time"]))]
+            for c, text in enumerate(cells):
+                self.meshcore_nodes_table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+
     def _meshtastic_preset_index(self):
         idx = self.meshtastic_preset_combo.currentData()
         return idx if idx is not None and idx >= 0 else 0
@@ -1792,6 +1959,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_signal_label()
         self._update_rtty_signal_label()
         self._update_meshtastic_signal_label()
+        self._update_meshcore_signal_label()
+        if self._meshcore_state.version != self._meshcore_rendered_version:
+            self._render_meshcore_table()
         self._update_pocsag_signal_label()
         if self._meshtastic_state.version != self._meshtastic_rendered_version:
             self._render_meshtastic_table()
@@ -2466,11 +2636,12 @@ class MainWindow(QtWidgets.QMainWindow):
         freq = self.tb.nominal_freq_hz
         # Meshtastic presets retune the receiver to the preset's carrier; the
         # previous frequency comes back when leaving the mode again.
-        if new_digimode == "meshtastic":
-            if self.tb.active_digimode != "meshtastic":
+        lora_digimodes = ("meshtastic", "meshcore")
+        if new_digimode in lora_digimodes:
+            if self.tb.active_digimode not in lora_digimodes:
                 self._freq_before_lora = freq
-            freq = self._meshtastic_preset().frequency_hz
-        elif self.tb.active_digimode == "meshtastic" and self._freq_before_lora is not None:
+            freq = (self._meshtastic_preset() if new_digimode == "meshtastic" else self._meshcore_preset()).frequency_hz
+        elif self.tb.active_digimode in lora_digimodes and self._freq_before_lora is not None:
             freq = self._freq_before_lora
             self._freq_before_lora = None
         fine = self.tb.fine_offset_hz
@@ -2509,6 +2680,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rtty_last_chars_decoded = 0
         self._rtty_last_activity_time = 0.0
         self._meshtastic_last_frames = 0
+        self._meshcore_last_frames = 0
+        self._meshcore_last_activity_time = 0.0
         self._meshtastic_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb

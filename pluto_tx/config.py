@@ -491,6 +491,11 @@ class LoraPreset:
     # True only for PHY parameter sets measured against a real Meshtastic node. Everything else is
     # built from the firmware's preset table but its on-air sync symbols are extrapolated.
     phy_verified: bool = False
+    # On-air framing that is not part of SF/BW/CR: preamble length in symbols and the sync word.
+    # sync_word None = Meshtastic's measured sync symbols (meshtastic_sync_symbols(sf)); an int is a
+    # sync-word byte (MeshCore: 0x12 -> symbols 8, 16), a 2-tuple raw symbol values.
+    preamble_len: int = 16
+    sync_word: object = None
 
 
 # Meshtastic EU_433 region: 433.0-434.0 MHz, 10% duty cycle, 10 dBm power
@@ -598,24 +603,36 @@ def _meshtastic_presets():
             )
 
 
+_MESHCORE_868_LABEL = (
+    "868 MHz -- ISM/SRD, Zertifizierungsstatus ungeklaert (eigenes "
+    "Risiko), kein Ham Mode noetig (MeshCore-Text ist immer verschluesselt), 10% "
+    "Duty-Cycle zwingend durchsetzen (MeshCores Standardverhalten NICHT uebernehmen)"
+)
+
 LORA_PRESETS = tuple(_meshtastic_presets()) + (
     LoraPreset(
-        name="MeshCore (EU)",
-        frequency_hz=869_618_000.0,  # project's own previously-cited MeshCore-EU default
+        name="MeshCore EU/UK Narrow",
+        frequency_hz=869_618_000.0,
         spreading_factor=8, bandwidth_hz=62_500.0, coding_rate="8",
         duty_cycle_limit=0.10,  # NOT MeshCore's own ~50% default -- must be enforced independently, see above
         ham_mode_required=False,
-        regulatory_label=(
-            "868 MHz -- ISM/SRD, Zertifizierungsstatus ungeklaert (eigenes "
-            "Risiko), kein Ham Mode noetig, Verschluesselung erlaubt, 10% "
-            "Duty-Cycle zwingend durchsetzen (MeshCores Standardverhalten NICHT uebernehmen)"
-        ),
+        regulatory_label=_MESHCORE_868_LABEL,
+        # Measured 2026-09-20 on a real Heltec V3 (HackRF IQ + ESP32/SX1276 reference packets): 32 preamble
+        # upchirps, sync symbols (8, 16) = sync word 0x12, CR 4/8, SF8, 62.5 kHz; our TX chirp symbols and our RX
+        # decoder match those bursts symbol for symbol.
+        preamble_len=32, sync_word=0x12, phy_verified=True,
+    ),
+    LoraPreset(
+        name="MeshCore EU/UK 250 kHz (unverified)",
+        frequency_hz=869_525_000.0,
+        spreading_factor=11, bandwidth_hz=250_000.0, coding_rate="5",
+        duty_cycle_limit=0.10, ham_mode_required=False,
+        regulatory_label=_MESHCORE_868_LABEL,
+        preamble_len=32, sync_word=0x12, phy_verified=False,
     ),
 )
 
-# Presets the apps expose as a working Meshtastic digimode (TX + RX). MeshCore
-# stays a visible, disabled placeholder in both apps until its protocol layer
-# exists (no Ham-Mode/encoding/decoding implemented) -- LORA_PRESETS[2].
+# Presets the apps expose as the Meshtastic and MeshCore digimodes (TX + RX).
 MESHTASTIC_PRESETS = tuple(p for p in LORA_PRESETS if p.name.startswith("Meshtastic"))
 MESHCORE_PRESETS = tuple(p for p in LORA_PRESETS if p.name.startswith("MeshCore"))
 MESHTASTIC_MODEM_NAMES = tuple(m[0] for m in MESHTASTIC_MODEM_PRESETS)
@@ -631,11 +648,6 @@ def meshtastic_preset_index(modem: str, region: str) -> int:
     raise ValueError(f"no preset {modem!r} in region {region.upper()} "
                      f"(the region is narrower than the preset's bandwidth)")
 
-
-MESHCORE_PLACEHOLDER_TIP = (
-    "MeshCore is a placeholder only: the LoRa PHY parameters are stored, but the "
-    "MeshCore protocol layer is not implemented yet."
-)
 
 # Meshtastic TX. Text payload limit in UTF-8 bytes: the LoRa payload ceiling is
 # 255 B, minus the 16 B mesh header, minus protobuf framing/overhead; 200 is

@@ -8,7 +8,9 @@ README.md for the full command reference and examples.
 import argparse
 import sys
 
-from pluto_tx.flowgraph import PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE
+from pluto_tx.flowgraph import (
+    PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, MESHCORE_AVAILABLE,
+)
 from pluto_tx import config as tx_config
 from pluto_tx import dcs as tx_dcs
 from pluto_tx import pocsag_codec as tx_pocsag
@@ -16,7 +18,7 @@ from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "meshtastic", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "meshtastic", "meshcore", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -416,6 +418,67 @@ def add_meshtastic_subparser(subparsers):
     p.set_defaults(func=run_meshtastic)
 
 
+def add_meshcore_subparser(subparsers):
+    p = subparsers.add_parser(
+        "meshcore",
+        help="MeshCore (LoRa) advert or group text -- one frame (requires gr-lora_sdr + cryptography, see install-lora.sh)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    add_repeat_args(p)
+    p.add_argument("--kind", choices=("advert", "group"), default="advert",
+                   help="advert = announce this node (signed, unencrypted); group = encrypted group text "
+                        "(default: advert)")
+    p.add_argument("--name", default="", help="Node name in the advert / sender name in a group text "
+                                              "(amateur bands: your callsign)")
+    p.add_argument("--route", choices=("flood", "direct"), default="flood",
+                   help="Flood (repeaters forward it) or Direct/zero hop (default: flood)")
+    p.add_argument("--role", choices=("chat", "repeater", "room", "sensor"), default="chat",
+                   help="Advertised node role (default: chat)")
+    p.add_argument("--position", nargs=2, type=float, metavar=("LAT", "LON"), default=None,
+                   help="Include a position in the advert (degrees)")
+    p.add_argument("--text", default="", help="Group message (--kind group)")
+    p.add_argument("--channel-name", default="Public", help="Channel name (default: Public)")
+    p.add_argument("--channel-key", default="", metavar="HEX32",
+                   help="32-hex-digit channel secret; empty = the Public channel")
+    p.add_argument("--preset", choices=tuple(p_.name for p_ in tx_config.MESHCORE_PRESETS),
+                   default=tx_config.MESHCORE_PRESETS[0].name,
+                   help=f"MeshCore preset; sets the carrier, --freq is ignored (default: {tx_config.MESHCORE_PRESETS[0].name})")
+    p.set_defaults(func=run_meshcore)
+
+
+def run_meshcore(args):
+    emitter = runtime.Emitter(args.json)
+    if not MESHCORE_AVAILABLE:
+        emitter.error("MeshCore is not available -- gr-lora_sdr / the cryptography package is not installed, "
+                      "see install-lora.sh")
+        return 1
+    if args.device == "soundcard":
+        emitter.error("MeshCore needs an RF device (pluto or hackrf), not the soundcard")
+        return 1
+    preset_index = [p_.name for p_ in tx_config.MESHCORE_PRESETS].index(args.preset)
+    role = {"chat": 1, "repeater": 2, "room": 3, "sensor": 4}[args.role]
+
+    def preflight(tb):
+        ok, message, info = tb.prepare_meshcore_tx()  # every refusal BEFORE any RF action
+        if not ok:
+            emitter.error(message)
+            tb.shutdown_safe()
+            sys.exit(1)
+        summary = info["summary"]
+        emitter.emit("meshcore_packet", kind=summary["kind"], route=summary.get("route"), bytes=len(info["packet"]),
+                     airtime_s=round(info["airtime_s"], 3), freq_hz=info["preset"].frequency_hz,
+                     **{k: summary[k] for k in ("name", "public_key", "channel", "text") if k in summary})
+
+    return _run(
+        args, PlutoTxFlowgraph.MODE_MESHCORE, emitter, post_construct=preflight,
+        meshcore_preset_index=preset_index, meshcore_kind=args.kind, meshcore_name=args.name,
+        meshcore_text=args.text, meshcore_route=args.route, meshcore_role=role,
+        meshcore_location=tuple(args.position) if args.position else None,
+        meshcore_channel_name=args.channel_name, meshcore_channel_secret_hex=args.channel_key,
+    )
+
+
 def run_meshtastic(args):
     emitter = runtime.Emitter(args.json)
     if not LORA_AVAILABLE:
@@ -516,5 +579,6 @@ def add_subparsers(tx_subparsers):
     add_rtty_subparser(tx_subparsers)
     add_pocsag_subparser(tx_subparsers)
     add_meshtastic_subparser(tx_subparsers)
+    add_meshcore_subparser(tx_subparsers)
     add_filebroadcast_subparser(tx_subparsers)
     add_baseband_subparser(tx_subparsers)

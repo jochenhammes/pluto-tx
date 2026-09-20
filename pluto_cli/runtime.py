@@ -228,6 +228,8 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                     time.sleep(tb.meshtastic_hold_s)
                 elif mode == PlutoTxFlowgraph.MODE_POCSAG:
                     time.sleep(tb.pocsag_hold_s)
+                elif mode == PlutoTxFlowgraph.MODE_MESHCORE:
+                    time.sleep(tb.meshcore_hold_s)
                 else:
                     time.sleep(args.duration)
                 tb.unkey_ptt()

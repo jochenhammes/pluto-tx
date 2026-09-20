@@ -83,9 +83,15 @@ class PresetTests(unittest.TestCase):
         for p in config.MESHTASTIC_PRESETS:
             self.assertEqual(p.phy_verified, p.default_channel_name == "LongFast")
 
-    def test_meshcore_is_placeholder_only(self):
+    def test_meshcore_presets_are_separate_and_carry_their_own_framing(self):
         self.assertTrue(config.MESHCORE_PRESETS)
         self.assertFalse(set(config.MESHCORE_PRESETS) & set(config.MESHTASTIC_PRESETS))
+        narrow = config.MESHCORE_PRESETS[0]
+        self.assertEqual((narrow.frequency_hz, narrow.spreading_factor, narrow.bandwidth_hz, narrow.coding_rate),
+                         (869_618_000.0, 8, 62_500.0, "8"))
+        self.assertEqual((narrow.preamble_len, narrow.sync_word, narrow.phy_verified), (32, 0x12, True))
+        for p in config.MESHTASTIC_PRESETS:                    # Meshtastic keeps its measured framing
+            self.assertEqual((p.preamble_len, p.sync_word), (16, None))
 
     def test_868_presets_have_duty_cycle_and_no_ham_mode(self):
         for p in config.LORA_PRESETS:

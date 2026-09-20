@@ -45,12 +45,22 @@ from . import lora_airtime
 # `cryptography` pip packages. Same posture as M17_AVAILABLE above -- the app
 # stays fully usable without them, the GUI greys the mode out.
 try:
+    from .lora import LORA_AVAILABLE as _LORA_CORE_AVAILABLE, LoraTxEncoder, lora_resampler_taps
+except ImportError:
+    LoraTxEncoder = None
+    _LORA_CORE_AVAILABLE = False
+try:
     from . import meshtastic_codec
-    from .lora import LORA_AVAILABLE, LoraTxEncoder, lora_resampler_taps
 except ImportError:
     meshtastic_codec = None
-    LoraTxEncoder = None
-    LORA_AVAILABLE = False
+LORA_AVAILABLE = _LORA_CORE_AVAILABLE and meshtastic_codec is not None  # Meshtastic needs the meshtastic package
+# MeshCore only needs gr-lora_sdr and `cryptography` (Ed25519/AES/HMAC), not the meshtastic package.
+try:
+    from . import meshcore_codec, meshcore_identity
+except ImportError:
+    meshcore_codec = meshcore_identity = None
+MESHCORE_AVAILABLE = _LORA_CORE_AVAILABLE and meshcore_codec is not None
+_LORA_TX_BRANCH = LORA_AVAILABLE or MESHCORE_AVAILABLE  # the LoRa encoder branch exists for either digimode
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
 # install-m17.sh), not something every pluto_tx user necessarily has. The
@@ -119,6 +129,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_MESHTASTIC = 10
     MODE_LSB = 11
     MODE_POCSAG = 12
+    MODE_MESHCORE = 13
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -135,7 +146,10 @@ class PlutoTxFlowgraph(gr.top_block):
                  meshtastic_channel_name=None, meshtastic_psk_b64=config.MESHTASTIC_DEFAULT_PSK_B64,
                  meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign="",
                  pocsag_ric=config.POCSAG_DEFAULT_RIC, pocsag_function=3, pocsag_kind="alpha", pocsag_text="",
-                 pocsag_baud=config.POCSAG_BAUD_DEFAULT, pocsag_charset="ascii"):
+                 pocsag_baud=config.POCSAG_BAUD_DEFAULT, pocsag_charset="ascii",
+                 meshcore_preset_index=0, meshcore_kind="advert", meshcore_name="", meshcore_text="",
+                 meshcore_route="flood", meshcore_role=1, meshcore_location=None,
+                 meshcore_channel_name="Public", meshcore_channel_secret_hex="", meshcore_identity=None):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -164,6 +178,8 @@ class PlutoTxFlowgraph(gr.top_block):
             mode = self.MODE_FM
         if mode == self.MODE_RADE and not RADE_AVAILABLE:
             mode = self.MODE_FM
+        if mode == self.MODE_MESHCORE and (not MESHCORE_AVAILABLE or device_cls.is_audio_only()):
+            mode = self.MODE_FM  # LoRa needs an RF device and gr-lora_sdr + cryptography
         if mode == self.MODE_MESHTASTIC and (not LORA_AVAILABLE or device_cls.is_audio_only()):
             # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
@@ -636,13 +652,31 @@ class PlutoTxFlowgraph(gr.top_block):
         self._meshtastic_pending = None  # (packet, airtime_s, preset) prepared by prepare_meshtastic_tx()
         self._meshtastic_busy_until = 0.0  # monotonic; the previous frame is still draining until then
         self._meshtastic_duty = lora_airtime.DutyCycleLimiter(None)
+        # --- MeshCore state (same LoRa encoder branch as Meshtastic, MeshCore preset/framing when mode is MeshCore)
+        self.meshcore_preset_index = int(meshcore_preset_index)
+        self.meshcore_kind = meshcore_kind          # "advert" | "group"
+        self.meshcore_name = meshcore_name
+        self.meshcore_text = meshcore_text
+        self.meshcore_route = meshcore_route        # "flood" | "direct"
+        self.meshcore_role = int(meshcore_role)
+        self.meshcore_location = meshcore_location  # None or (lat, lon)
+        self.meshcore_channel_name = meshcore_channel_name
+        self.meshcore_channel_secret_hex = meshcore_channel_secret_hex  # empty = the Public channel
+        self._meshcore_identity = meshcore_identity
+        self.meshcore_hold_s = 0.0
+        self.meshcore_last_airtime_s = 0.0
+        self._meshcore_pending = None  # (packet, airtime_s, preset) from prepare_meshcore_tx()
+        self._meshcore_busy_until = 0.0
+        self._meshcore_duty = lora_airtime.DutyCycleLimiter(None)
         self._lora_rf_bandwidth_active = False
         self._lora_phy = None
-        if LORA_AVAILABLE:
-            lp = config.MESHTASTIC_PRESETS[self.meshtastic_preset_index]
+        if _LORA_TX_BRANCH:
+            lp = (config.MESHCORE_PRESETS[self.meshcore_preset_index] if mode == self.MODE_MESHCORE
+                  else config.MESHTASTIC_PRESETS[self.meshtastic_preset_index])
             self._lora_phy = self._meshtastic_phy(lp)
             lora_bw = int(lp.bandwidth_hz)
-            self.lora_encoder = LoraTxEncoder(lp.spreading_factor, lora_bw, lora_airtime.cr_index(lp.coding_rate))
+            self.lora_encoder = LoraTxEncoder(lp.spreading_factor, lora_bw, lora_airtime.cr_index(lp.coding_rate),
+                                              preamb_len=lp.preamble_len, sync_word=lp.sync_word)
             lora_fs = int(self.lora_encoder.samp_rate)
             g_lora = math.gcd(quad_rate, lora_fs)
             lora_interp, lora_decim = quad_rate // g_lora, lora_fs // g_lora
@@ -853,7 +887,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
         self._null_sink_psk31 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see PSK31 branch above
         self._null_sink_rtty = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see RTTY branch above
-        if LORA_AVAILABLE:
+        if _LORA_TX_BRANCH:
             self._null_sink_lora = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
@@ -979,7 +1013,7 @@ class PlutoTxFlowgraph(gr.top_block):
         # the comment on prepare_for_start() above, but the app starts
         # unkeyed). See key_ptt()/unkey_ptt() for the PTT<->device-safety
         # hard tie.
-        if self.mode == self.MODE_MESHTASTIC:
+        if self.mode in (self.MODE_MESHTASTIC, self.MODE_MESHCORE):
             self._apply_mode_rf_settings(self.mode)
         self.device.post_unkey()
 
@@ -1032,8 +1066,9 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
         producers[self.MODE_PSK31] = self.psk31_ssb_resampler  # always available, see its branch above
         producers[self.MODE_RTTY] = self.rtty_ssb_resampler  # always available, see its branch above
-        if LORA_AVAILABLE:
+        if _LORA_TX_BRANCH:
             producers[self.MODE_MESHTASTIC] = self.lora_tx_resampler
+            producers[self.MODE_MESHCORE] = self.lora_tx_resampler
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         producers[self.MODE_POCSAG] = self.pocsag_mod  # always available, see its branch above
@@ -1054,7 +1089,7 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_psk31
         if producer is self.rtty_ssb_resampler:
             return self._null_sink_rtty
-        if LORA_AVAILABLE and producer is self.lora_tx_resampler:
+        if _LORA_TX_BRANCH and producer is self.lora_tx_resampler:
             return self._null_sink_lora
         if producer is self.filebroadcast_tx_resampler:
             return self._null_sink_filebroadcast
@@ -1091,7 +1126,7 @@ class PlutoTxFlowgraph(gr.top_block):
 
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
                     self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
-                    self.MODE_MESHTASTIC, self.MODE_POCSAG):
+                    self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
@@ -1217,8 +1252,8 @@ class PlutoTxFlowgraph(gr.top_block):
         cover the whole +-BW/2 chirp (the Pluto default of 200 kHz would clip
         LongFast's 250 kHz edges) and the carrier goes to the preset's
         frequency; leaving the mode restores the device default."""
-        if mode == self.MODE_MESHTASTIC:
-            preset = self.meshtastic_preset
+        if mode in (self.MODE_MESHTASTIC, self.MODE_MESHCORE):
+            preset = self.meshtastic_preset if mode == self.MODE_MESHTASTIC else self.meshcore_preset
             default_bw = self.device.default_bandwidth_hz or 0
             self.device.set_rf_bandwidth(max(default_bw, preset.bandwidth_hz * config.LORA_TX_RF_BANDWIDTH_MARGIN))
             self._lora_rf_bandwidth_active = True
@@ -1230,7 +1265,10 @@ class PlutoTxFlowgraph(gr.top_block):
 
     @staticmethod
     def _meshtastic_phy(preset):
-        return (preset.spreading_factor, int(preset.bandwidth_hz), preset.coding_rate)
+        """Everything the built LoRa encoder depends on (SF/BW/CR plus preamble length and sync word) --
+        presets differing in any of it need a rebuilt flowgraph; the name is historical (also used by MeshCore)."""
+        return (preset.spreading_factor, int(preset.bandwidth_hz), preset.coding_rate, preset.preamble_len,
+                preset.sync_word)
 
     def meshtastic_phy_matches(self, index: int) -> bool:
         """True if preset `index` can be selected live, i.e. has the same
@@ -1311,7 +1349,7 @@ class PlutoTxFlowgraph(gr.top_block):
         )
         airtime_s = lora_airtime.lora_airtime_s(
             len(packet), preset.spreading_factor, preset.bandwidth_hz, lora_airtime.cr_index(preset.coding_rate),
-            config.MESHTASTIC_PREAMBLE_LEN,
+            preset.preamble_len,
         )
         self._meshtastic_duty.limit = preset.duty_cycle_limit
         ok, wait_s = self._meshtastic_duty.check(airtime_s, now)
@@ -1322,6 +1360,110 @@ class PlutoTxFlowgraph(gr.top_block):
                            f"next frame possible in {wait_s / 60:.1f} min."), None
         info = {"packet": packet, "airtime_s": airtime_s, "preset": preset, "text": text}
         self._meshtastic_pending = (packet, airtime_s, preset)
+        return True, f"{len(packet)} B, {airtime_s:.2f} s airtime", info
+
+    # --- MeshCore -------------------------------------------------------
+
+    @property
+    def meshcore_preset(self):
+        return config.MESHCORE_PRESETS[self.meshcore_preset_index]
+
+    def meshcore_phy_matches(self, index: int) -> bool:
+        return self._meshtastic_phy(config.MESHCORE_PRESETS[int(index)]) == self._lora_phy
+
+    def set_meshcore_preset(self, index: int):
+        if not self.meshcore_phy_matches(index):
+            raise ValueError("preset has a different LoRa PHY -- rebuild the flowgraph with it")
+        self.meshcore_preset_index = int(index)
+        self._meshcore_pending = None
+        if self.mode == self.MODE_MESHCORE:
+            self.set_frequency(self.meshcore_preset.frequency_hz)
+
+    def set_meshcore_message(self, kind=None, name=None, text=None, route=None, role=None, location=False,
+                             channel_name=None, channel_secret_hex=None):
+        """Any subset of the message settings (location=False means "unchanged", None clears it)."""
+        if kind is not None:
+            self.meshcore_kind = kind
+        if name is not None:
+            self.meshcore_name = name
+        if text is not None:
+            self.meshcore_text = text
+        if route is not None:
+            self.meshcore_route = route
+        if role is not None:
+            self.meshcore_role = int(role)
+        if location is not False:
+            self.meshcore_location = location
+        if channel_name is not None:
+            self.meshcore_channel_name = channel_name
+        if channel_secret_hex is not None:
+            self.meshcore_channel_secret_hex = channel_secret_hex
+        self._meshcore_pending = None
+
+    @property
+    def meshcore_identity(self):
+        """The node identity (loaded from / created in ~/.config/pluto-tx on first use)."""
+        if self._meshcore_identity is None:
+            self._meshcore_identity = meshcore_identity.load_or_create()
+        return self._meshcore_identity
+
+    def meshcore_duty_status(self, now=None):
+        now = time.monotonic() if now is None else now
+        self._meshcore_duty.limit = self.meshcore_preset.duty_cycle_limit
+        return self._meshcore_duty.used_s(now), self._meshcore_duty.budget_s()
+
+    def prepare_meshcore_tx(self, now=None):
+        """Build the MeshCore packet for the current settings and run every pre-flight check WITHOUT touching RF.
+        -> (ok, message, info); info has "packet", "airtime_s", "preset", "summary" when ok. Checks: content set,
+        length limits, no encrypted text on amateur-band frequencies (only the unencrypted, signed advert is
+        allowed there and it needs a name = callsign), previous frame no longer draining, duty-cycle budget."""
+        now = time.monotonic() if now is None else now
+        preset = self.meshcore_preset
+        name = self.meshcore_name.strip()
+        band = config.in_amateur_band(preset.frequency_hz if self.mode != self.MODE_MESHCORE else self.nominal_freq_hz)
+        if now < self._meshcore_busy_until:
+            return False, "The previous frame is still being sent.", None
+        route = meshcore_codec.ROUTE_DIRECT if self.meshcore_route == "direct" else meshcore_codec.ROUTE_FLOOD
+        try:
+            if self.meshcore_kind == "advert":
+                if band and not name:
+                    return False, f"Amateur band ({band}): the advert name must contain your callsign.", None
+                packet = meshcore_codec.build_advert(self.meshcore_identity, name, self.meshcore_role,
+                                                     self.meshcore_location, route=route)
+            elif self.meshcore_kind == "group":
+                if band:
+                    return False, (f"Amateur band ({band}): MeshCore text is always encrypted -- only adverts "
+                                   "may be sent here."), None
+                text = self.meshcore_text.strip()
+                if not text:
+                    return False, "Enter a message first.", None
+                if self.meshcore_channel_secret_hex.strip():
+                    channel = meshcore_codec.GroupChannel(
+                        self.meshcore_channel_name or "Custom",
+                        meshcore_codec.parse_channel_secret(self.meshcore_channel_secret_hex))
+                else:
+                    channel = meshcore_codec.PUBLIC_CHANNEL
+                packet = meshcore_codec.build_group_text(channel, name, text, route=route)
+            else:
+                return False, f"unknown MeshCore message kind {self.meshcore_kind!r}", None
+        except ValueError as e:
+            return False, str(e), None
+        airtime_s = lora_airtime.lora_airtime_s(
+            len(packet), preset.spreading_factor, preset.bandwidth_hz, lora_airtime.cr_index(preset.coding_rate),
+            preset.preamble_len,
+        )
+        self._meshcore_duty.limit = preset.duty_cycle_limit
+        ok, wait_s = self._meshcore_duty.check(airtime_s, now)
+        if not ok:
+            if wait_s == float("inf"):
+                return False, "This frame alone exceeds the duty-cycle budget.", None
+            return False, (f"Duty-cycle limit ({preset.duty_cycle_limit:.0%} per hour) reached -- "
+                           f"next frame possible in {wait_s / 60:.1f} min."), None
+        info = {"packet": packet, "airtime_s": airtime_s, "preset": preset,
+                "summary": meshcore_codec.summarize_packet(
+                    packet, (meshcore_codec.PUBLIC_CHANNEL,) + ((channel,) if self.meshcore_kind == "group" and
+                                                                self.meshcore_channel_secret_hex.strip() else ()))}
+        self._meshcore_pending = (packet, airtime_s, preset)
         return True, f"{len(packet)} B, {airtime_s:.2f} s airtime", info
 
     def set_baseband_deviation(self, hz: float):
@@ -1604,6 +1746,10 @@ class PlutoTxFlowgraph(gr.top_block):
             ok, message, _info = self.prepare_meshtastic_tx()
             if not ok:
                 raise ValueError(message)  # refused before any RF action
+        if self.mode == self.MODE_MESHCORE and self._meshcore_pending is None:
+            ok, message, _info = self.prepare_meshcore_tx()
+            if not ok:
+                raise ValueError(message)  # refused before any RF action
         if self.mode == self.MODE_RADE and self.device.is_audio_only():
             self.ptt_mute.set_k(1.0)
             self.tx_gain.set_k(1.0 + 0j)
@@ -1714,6 +1860,16 @@ class PlutoTxFlowgraph(gr.top_block):
             self.meshtastic_hold_s = lead_s + airtime_s + config.MESHTASTIC_TX_TAIL_S
             self._meshtastic_busy_until = now + self.meshtastic_hold_s
             self._meshtastic_duty.record(airtime_s, now)
+            self.lora_encoder.send_payload_bytes(packet)
+        if self.mode == self.MODE_MESHCORE:
+            packet, airtime_s, preset = self._meshcore_pending
+            self._meshcore_pending = None
+            now = time.monotonic()
+            self.meshcore_last_airtime_s = airtime_s
+            lead_s = 10.1 * lora_airtime.symbol_time_s(preset.spreading_factor, preset.bandwidth_hz)  # encoder delay
+            self.meshcore_hold_s = lead_s + airtime_s + config.MESHTASTIC_TX_TAIL_S
+            self._meshcore_busy_until = now + self.meshcore_hold_s
+            self._meshcore_duty.record(airtime_s, now)
             self.lora_encoder.send_payload_bytes(packet)
         self._keyed = True
         if self.mode == self.MODE_POCSAG:

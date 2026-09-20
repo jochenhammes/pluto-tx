@@ -27,7 +27,7 @@ from pluto_tx.config import (  # noqa: F401 (re-exported)
 # with -- the RX decoder must use the exact same values, so re-exported
 # rather than duplicated (same reasoning as the M17 constants above).
 from pluto_tx.config import (  # noqa: F401 (re-exported)
-    LORA_PRESETS, MESHTASTIC_PRESETS, MESHCORE_PRESETS, MESHCORE_PLACEHOLDER_TIP,
+    LORA_PRESETS, MESHTASTIC_PRESETS, MESHCORE_PRESETS,
     MESHTASTIC_PREAMBLE_LEN, MESHTASTIC_SYNC_SYMBOLS, MESHTASTIC_DEFAULT_PSK_B64,
     MESHTASTIC_MODEM_NAMES, meshtastic_preset_index, meshtastic_sync_symbols,
 )

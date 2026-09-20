@@ -21,10 +21,13 @@ from . import pocsag_codec
 from . import freq_correction
 from .devices import pluto as pluto_device
 from .flowgraph import (
-    PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, _default_wav_path,
+    PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, MESHCORE_AVAILABLE,
+    _default_wav_path,
 )
 if LORA_AVAILABLE:
     from . import meshtastic_codec
+if MESHCORE_AVAILABLE:
+    from . import meshcore_codec
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 
 
@@ -72,7 +75,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_audio_mode = (
             mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
                                   PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
-                                  PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_POCSAG)
+                                  PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE,
+                                  PlutoTxFlowgraph.MODE_POCSAG)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -89,6 +93,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshtastic_ptt_epoch = 0
         # Same per-press staleness guard for POCSAG's one-shot call timers.
         self._pocsag_ptt_epoch = 0
+        self._meshcore_ptt_epoch = 0
         # Repeat series state, see _repeat_begin()/_finish_one_shot().
         self._repeat_active = False
         self._repeat_total = 1
@@ -526,6 +531,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("RTTY", PlutoTxFlowgraph.MODE_RTTY)
         self.digimode_combo.addItem("POCSAG (Paging)", PlutoTxFlowgraph.MODE_POCSAG)
         self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
+        self.digimode_combo.addItem("MeshCore (LoRa)", PlutoTxFlowgraph.MODE_MESHCORE)
+        if not MESHCORE_AVAILABLE:
+            mc_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHCORE))
+            mc_item.setEnabled(False)
+            mc_item.setToolTip("gr-lora_sdr / the cryptography package is not installed -- see install-lora.sh / README")
         if not LORA_AVAILABLE:
             lora_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHTASTIC))
             lora_item.setEnabled(False)
@@ -859,12 +869,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshtastic_preset_combo = QtWidgets.QComboBox()
         for i, preset in enumerate(config.MESHTASTIC_PRESETS):
             self.meshtastic_preset_combo.addItem(preset.name, i)
-        # MeshCore stays a visible but disabled placeholder (no protocol layer yet).
-        for preset in config.MESHCORE_PRESETS:
-            self.meshtastic_preset_combo.addItem(f"{preset.name} (placeholder)", -1)
-            item = self.meshtastic_preset_combo.model().item(self.meshtastic_preset_combo.count() - 1)
-            item.setEnabled(False)
-            item.setToolTip(config.MESHCORE_PLACEHOLDER_TIP)
         self.meshtastic_preset_combo.setCurrentIndex(
             max(0, min(int(meshtastic_preset_index), len(config.MESHTASTIC_PRESETS) - 1)))
         self._meshtastic_default_channel = self._meshtastic_selected_preset().default_channel_name
@@ -953,6 +957,98 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(meshtastic_group)
         self.meshtastic_group_widget = meshtastic_group
 
+        # --- MeshCore (LoRa) controls -- one-shot like Meshtastic: PTT builds one advert or group text and sends it.
+        meshcore_group = QtWidgets.QWidget()
+        mc_layout = QtWidgets.QVBoxLayout(meshcore_group)
+        mc_layout.setContentsMargins(0, 0, 0, 0)
+        mc_row1 = QtWidgets.QHBoxLayout()
+        mc_row1.addWidget(QtWidgets.QLabel("Preset:"))
+        self.meshcore_preset_combo = QtWidgets.QComboBox()
+        for i, preset in enumerate(config.MESHCORE_PRESETS):
+            self.meshcore_preset_combo.addItem(preset.name, i)
+        mc_row1.addWidget(self.meshcore_preset_combo)
+        mc_row1.addWidget(QtWidgets.QLabel("Send:"))
+        self.meshcore_kind_combo = QtWidgets.QComboBox()
+        self.meshcore_kind_combo.addItem("Advert (announce this node)", "advert")
+        self.meshcore_kind_combo.addItem("Group text", "group")
+        mc_row1.addWidget(self.meshcore_kind_combo)
+        mc_row1.addWidget(QtWidgets.QLabel("Route:"))
+        self.meshcore_route_combo = QtWidgets.QComboBox()
+        self.meshcore_route_combo.addItem("Flood", "flood")
+        self.meshcore_route_combo.addItem("Direct (zero hop)", "direct")
+        mc_row1.addWidget(self.meshcore_route_combo)
+        mc_row1.addStretch(1)
+        mc_layout.addLayout(mc_row1)
+        self.meshcore_regulatory_label = QtWidgets.QLabel()
+        self.meshcore_regulatory_label.setWordWrap(True)
+        mc_layout.addWidget(self.meshcore_regulatory_label)
+        mc_row2 = QtWidgets.QHBoxLayout()
+        mc_row2.addWidget(QtWidgets.QLabel("Name:"))
+        self.meshcore_name_edit = QtWidgets.QLineEdit()
+        self.meshcore_name_edit.setMaxLength(meshcore_codec.NAME_MAX_BYTES if MESHCORE_AVAILABLE else 32)
+        self.meshcore_name_edit.setMaximumWidth(220)
+        self.meshcore_name_edit.setToolTip("Node name in the advert / sender name in a group text. On amateur bands: your callsign.")
+        mc_row2.addWidget(self.meshcore_name_edit)
+        mc_row2.addWidget(QtWidgets.QLabel("Role:"))
+        self.meshcore_role_combo = QtWidgets.QComboBox()
+        for role, label in ((1, "Chat"), (2, "Repeater"), (3, "Room server"), (4, "Sensor")):
+            self.meshcore_role_combo.addItem(label, role)
+        mc_row2.addWidget(self.meshcore_role_combo)
+        self.meshcore_position_checkbox = QtWidgets.QCheckBox("Position:")
+        mc_row2.addWidget(self.meshcore_position_checkbox)
+        self.meshcore_lat_spin = QtWidgets.QDoubleSpinBox()
+        self.meshcore_lat_spin.setRange(-90.0, 90.0)
+        self.meshcore_lat_spin.setDecimals(5)
+        self.meshcore_lat_spin.setValue(51.0)
+        self.meshcore_lon_spin = QtWidgets.QDoubleSpinBox()
+        self.meshcore_lon_spin.setRange(-180.0, 180.0)
+        self.meshcore_lon_spin.setDecimals(5)
+        self.meshcore_lon_spin.setValue(10.0)
+        mc_row2.addWidget(self.meshcore_lat_spin)
+        mc_row2.addWidget(self.meshcore_lon_spin)
+        mc_row2.addStretch(1)
+        mc_layout.addLayout(mc_row2)
+        mc_row3 = QtWidgets.QHBoxLayout()
+        mc_row3.addWidget(QtWidgets.QLabel("Channel:"))
+        self.meshcore_channel_name_edit = QtWidgets.QLineEdit("Public")
+        self.meshcore_channel_name_edit.setMaximumWidth(110)
+        mc_row3.addWidget(self.meshcore_channel_name_edit)
+        mc_row3.addWidget(QtWidgets.QLabel("Key (32 hex, empty = Public):"))
+        self.meshcore_channel_key_edit = QtWidgets.QLineEdit()
+        self.meshcore_channel_key_edit.setMaximumWidth(300)
+        self.meshcore_channel_key_edit.setPlaceholderText("Public channel")
+        mc_row3.addWidget(self.meshcore_channel_key_edit)
+        mc_row3.addStretch(1)
+        mc_layout.addLayout(mc_row3)
+        mc_row4 = QtWidgets.QHBoxLayout()
+        mc_row4.addWidget(QtWidgets.QLabel("Text:"))
+        self.meshcore_text_edit = QtWidgets.QLineEdit()
+        self.meshcore_text_edit.setMinimumWidth(420)
+        self.meshcore_text_edit.setPlaceholderText("Group message, then press PTT")
+        mc_row4.addWidget(self.meshcore_text_edit)
+        mc_layout.addLayout(mc_row4)
+        self.meshcore_identity_label = QtWidgets.QLabel("")
+        self.meshcore_identity_label.setToolTip(
+            "This app is its own MeshCore node: an Ed25519 key created on first use in ~/.config/pluto-tx/.")
+        mc_layout.addWidget(self.meshcore_identity_label)
+        self.meshcore_info_label = QtWidgets.QLabel()
+        self.meshcore_info_label.setWordWrap(True)
+        mc_layout.addWidget(self.meshcore_info_label)
+        self.meshcore_sent_log = QtWidgets.QTextEdit()
+        self.meshcore_sent_log.setReadOnly(True)
+        self.meshcore_sent_log.setMaximumHeight(120)
+        self.meshcore_sent_log.setToolTip("Local echo of what THIS station has sent.")
+        mc_layout.addWidget(self.meshcore_sent_log)
+        digimodes_tab_layout.addWidget(meshcore_group)
+        self.meshcore_group_widget = meshcore_group
+        self.meshcore_preset_combo.currentIndexChanged.connect(self._on_meshcore_preset_changed)
+        for signal_ in (self.meshcore_kind_combo.currentIndexChanged, self.meshcore_route_combo.currentIndexChanged,
+                        self.meshcore_name_edit.textChanged, self.meshcore_role_combo.currentIndexChanged,
+                        self.meshcore_position_checkbox.toggled, self.meshcore_lat_spin.valueChanged,
+                        self.meshcore_lon_spin.valueChanged, self.meshcore_channel_name_edit.textChanged,
+                        self.meshcore_channel_key_edit.textChanged, self.meshcore_text_edit.textChanged):
+            signal_.connect(self._on_meshcore_changed)
+
         digimodes_tab_layout.addStretch(1)
         self._update_digitext_estimate()
         self._update_digitext_controls_enabled()
@@ -960,6 +1056,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
         self._update_pocsag_info()
+        self._update_meshcore_controls_enabled()
+        self._update_meshcore_regulatory_label()
         self._update_meshtastic_controls_enabled()
 
         # --- File Broadcast rotation list -- lives in the "File-Transfer"
@@ -1203,6 +1301,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mode_tab_widget.setCurrentIndex(2)
         elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31,
                                     PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
+                                    PlutoTxFlowgraph.MODE_MESHCORE,
                                     PlutoTxFlowgraph.MODE_MESHTASTIC):
             self.mode_tab_widget.setCurrentIndex(1)
         # Connected AFTER the initial sync above (and after every widget it
@@ -1287,6 +1386,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_meshtastic_controls_enabled()
         self._pocsag_connected = enabled
         self._update_pocsag_controls_enabled()
+        self._meshcore_connected = enabled
+        self._update_meshcore_controls_enabled()
         self._filebroadcast_connected = enabled
         self._update_filebroadcast_controls_enabled()
         self._baseband_connected = enabled
@@ -1398,6 +1499,126 @@ class MainWindow(QtWidgets.QMainWindow):
         connected = getattr(self, "_psk31_connected", True)
         self.psk31_text_edit.setEnabled(connected)
         self.psk31_tone_slider.setEnabled(connected)
+
+    # --- MeshCore ----------------------------------------------------------
+
+    def _meshcore_selected_preset(self):
+        return config.MESHCORE_PRESETS[max(0, self.meshcore_preset_combo.currentData() or 0)]
+
+    def _lora_phy_matches_mode(self, mode):
+        """True if the built flowgraph's LoRa encoder already has the PHY the selected LoRa mode needs."""
+        if mode == PlutoTxFlowgraph.MODE_MESHCORE:
+            return self.tb.meshcore_phy_matches(self.meshcore_preset_combo.currentData() or 0)
+        return self.tb.meshtastic_phy_matches(max(0, self.meshtastic_preset_combo.currentData() or 0))
+
+    def _update_meshcore_controls_enabled(self):
+        self.meshcore_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_MESHCORE)
+        connected = getattr(self, "_meshcore_connected", True)
+        group = self.meshcore_kind_combo.currentData() == "group"
+        for w in (self.meshcore_preset_combo, self.meshcore_kind_combo, self.meshcore_route_combo,
+                  self.meshcore_name_edit, self.meshcore_role_combo, self.meshcore_position_checkbox):
+            w.setEnabled(connected)
+        position = self.meshcore_position_checkbox.isChecked()
+        self.meshcore_lat_spin.setEnabled(connected and position and not group)
+        self.meshcore_lon_spin.setEnabled(connected and position and not group)
+        self.meshcore_role_combo.setEnabled(connected and not group)
+        self.meshcore_position_checkbox.setEnabled(connected and not group)
+        for w in (self.meshcore_channel_name_edit, self.meshcore_channel_key_edit, self.meshcore_text_edit):
+            w.setEnabled(connected and group)
+
+    def _update_meshcore_regulatory_label(self):
+        preset = self._meshcore_selected_preset()
+        self.meshcore_regulatory_label.setText(
+            f"<b>{preset.frequency_hz / 1e6:.3f} MHz, SF{preset.spreading_factor}, "
+            f"{preset.bandwidth_hz / 1e3:g} kHz, CR {preset.coding_rate}</b> -- {preset.regulatory_label}"
+            + ("" if preset.phy_verified else "<br><i>PHY parameters not yet verified against a real node.</i>"))
+        self.meshcore_regulatory_label.setStyleSheet("color: #b9770e;")
+
+    def _meshcore_location(self):
+        if self.meshcore_kind_combo.currentData() == "advert" and self.meshcore_position_checkbox.isChecked():
+            return (self.meshcore_lat_spin.value(), self.meshcore_lon_spin.value())
+        return None
+
+    def _apply_meshcore(self, tb):
+        tb.set_meshcore_message(
+            kind=self.meshcore_kind_combo.currentData(), name=self.meshcore_name_edit.text(),
+            text=self.meshcore_text_edit.text(), route=self.meshcore_route_combo.currentData(),
+            role=self.meshcore_role_combo.currentData(), location=self._meshcore_location(),
+            channel_name=self.meshcore_channel_name_edit.text(),
+            channel_secret_hex=self.meshcore_channel_key_edit.text())
+
+    def _on_meshcore_changed(self, *_):
+        self._update_meshcore_controls_enabled()
+        if self.tb is not None:
+            self._apply_meshcore(self.tb)
+        self._update_meshcore_info()
+
+    def _on_meshcore_preset_changed(self, _idx):
+        self._update_meshcore_regulatory_label()
+        if self.tb is not None:
+            idx = self.meshcore_preset_combo.currentData() or 0
+            if self.tb.meshcore_phy_matches(idx):
+                self.tb.set_meshcore_preset(idx)
+                if self._current_mode == PlutoTxFlowgraph.MODE_MESHCORE:
+                    self.freq_spin.setValue(self.tb.nominal_freq_hz / 1e6)
+            elif self._current_mode == PlutoTxFlowgraph.MODE_MESHCORE:
+                self._rebuild(self.tb.device.connection, self._wav_path)
+                return
+        self._update_meshcore_info()
+
+    def _update_meshcore_info(self, message=None, error=False):
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_MESHCORE:
+            self.meshcore_info_label.setText("")
+            return
+        self.meshcore_identity_label.setText(f"Node key: {self.tb.meshcore_identity.public_key.hex()[:16]}...")
+        if message is None:
+            ok, message, _info = self.tb.prepare_meshcore_tx()
+            error = not ok and (self.meshcore_kind_combo.currentData() == "advert"
+                                or bool(self.meshcore_text_edit.text().strip()))
+            if not ok and not error:
+                message = ""
+        used_s, budget_s = self.tb.meshcore_duty_status()
+        duty = f"  |  duty cycle: {used_s:.1f} s of {budget_s:.0f} s per hour" if budget_s else ""
+        self.meshcore_info_label.setText(f"{message}{duty}" if message else duty.lstrip(" |"))
+        self.meshcore_info_label.setStyleSheet("color: #c0392b;" if error else "")
+
+    def _meshcore_ptt_allowed(self):
+        """Pre-flight for a MeshCore PTT press (True outside MeshCore mode): refuses BEFORE any RF action."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_MESHCORE:
+            return True
+        ok, message, info = self.tb.prepare_meshcore_tx()
+        self._meshcore_last_info = info
+        if not ok:
+            self._update_meshcore_info(message, error=True)
+            self.status_label.setText(f"Not sent: {message}")
+        return ok
+
+    def _log_meshcore_sent(self):
+        info = getattr(self, "_meshcore_last_info", None)
+        if self._current_mode != PlutoTxFlowgraph.MODE_MESHCORE or not info:
+            return
+        summary = info["summary"]
+        what = (f"advert '{summary.get('name', '')}'" if summary["kind"] == "advert"
+                else f"{summary.get('channel', 'group')}: {summary.get('text', '')}")
+        self.meshcore_sent_log.append(f"[{time.strftime('%H:%M:%S')}] {summary.get('route', '')}, {what}  ({info['airtime_s']:.2f} s)")
+        self._update_meshcore_info(f"Sending {len(info['packet'])} B, {info['airtime_s']:.2f} s airtime")
+
+    def _schedule_meshcore_auto_unkey(self):
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_MESHCORE:
+            return
+        token = self.tb
+        self._meshcore_ptt_epoch += 1
+        epoch = self._meshcore_ptt_epoch
+        hold_s = self.tb.meshcore_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._finish_meshcore_auto_unkey(token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.MESHTASTIC_TX_WATCHDOG_MARGIN_S) * 1000),
+                                 lambda: self._finish_meshcore_auto_unkey(token, epoch))
+
+    def _finish_meshcore_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._meshcore_ptt_epoch or not self.tb.keyed:
+            return
+        self._finish_one_shot()
+        QtCore.QTimer.singleShot(300, self._update_meshcore_info)
 
     def _update_pocsag_controls_enabled(self):
         self.pocsag_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_POCSAG)
@@ -1758,6 +1979,7 @@ class MainWindow(QtWidgets.QMainWindow):
         PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
         PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
     )
+    _LORA_MODES = (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE)
 
     def _sync_mode_combo_availability(self):
         """Greys out every mode_combo entry except RADE (the only
@@ -1793,6 +2015,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if LORA_AVAILABLE and not is_rf:
             lora_item.setToolTip("LoRa needs an RF device -- a 48 kHz soundcard cannot carry it")
             if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_MESHTASTIC:
+                self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
+        mc_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHCORE))
+        mc_item.setEnabled(MESHCORE_AVAILABLE and is_rf)
+        if MESHCORE_AVAILABLE and not is_rf:
+            mc_item.setToolTip("LoRa needs an RF device -- a 48 kHz soundcard cannot carry it")
+            if self.digimode_combo.currentData() == PlutoTxFlowgraph.MODE_MESHCORE:
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_DIGITEXT))
         if not is_rf and self._current_mode not in self._AUDIO_ONLY_CAPABLE_MODES:
             if RADE_AVAILABLE:
@@ -1883,11 +2111,15 @@ class MainWindow(QtWidgets.QMainWindow):
         combo (or File-Transfer's fixed mode) live again without that
         combo's own value having changed."""
         self._repeat_cancel()
-        was_lora = self._current_mode == PlutoTxFlowgraph.MODE_MESHTASTIC
+        was_lora = self._current_mode in self._LORA_MODES
         self._current_mode = mode
-        is_lora = mode == PlutoTxFlowgraph.MODE_MESHTASTIC
+        is_lora = mode in self._LORA_MODES
         if is_lora and not was_lora:
             self._freq_before_lora = self.freq_spin.value()
+        if self.tb is not None and is_lora and not self._lora_phy_matches_mode(mode):
+            # Meshtastic <-> MeshCore (or another preset PHY): the LoRa encoder is built per PHY -> rebuild
+            self._rebuild(self.tb.device.connection, self._wav_path)
+            return
         if self.tb is not None:
             self.tb.set_mode(mode)
             if is_lora:
@@ -1897,8 +2129,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.freq_spin.setValue(self._freq_before_lora)  # tb.set_frequency() via _on_freq_changed
                 self._freq_before_lora = None
         self._update_meshtastic_controls_enabled()
-        if is_lora:
+        self._update_meshcore_controls_enabled()
+        if mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
             self._update_meshtastic_info()
+        elif mode == PlutoTxFlowgraph.MODE_MESHCORE:
+            self._update_meshcore_info()
         self._update_m17_controls_enabled()
         self._update_freedv_controls_enabled()
         self._update_rade_controls_enabled()
@@ -2252,7 +2487,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ptt_button.setChecked(False)
             self.ptt_button.blockSignals(False)
             return
-        if checked and (not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed()):
+        if checked and not self._all_ptt_allowed():
             self._reset_digitext_ptt_visual()
             return
         if checked:
@@ -2273,7 +2508,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._armed or self.tb is None:
             return
-        if not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed():
+        if not self._all_ptt_allowed():
             return
         self._key_and_schedule()
         self._repeat_begin()
@@ -2284,6 +2519,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is None or not self.tb.keyed:
             return
         self._release_ptt()
+
+    def _all_ptt_allowed(self):
+        return self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._meshcore_ptt_allowed()
 
     def _key_and_schedule(self):
         """Key the transmitter and start the per-mode auto-unkey timers/logs (one-shot modes)."""
@@ -2298,10 +2536,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_meshtastic_sent()
         self._schedule_pocsag_auto_unkey()
         self._log_pocsag_sent()
+        self._schedule_meshcore_auto_unkey()
+        self._log_meshcore_sent()
 
     # --- Repeat series (one-shot digimodes) ------------------------------
     _ONE_SHOT_MODES = (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
-                       PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_POCSAG)
+                       PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_POCSAG)
 
     def _repeat_begin(self):
         """Called right after a user PTT press keyed the first transmission."""
@@ -2368,7 +2608,7 @@ class MainWindow(QtWidgets.QMainWindow):
         problem = None
         if not self._armed:
             problem = "not armed"
-        elif not self._meshtastic_ptt_allowed() or not self._pocsag_ptt_allowed():
+        elif not self._all_ptt_allowed():
             problem = self.status_label.text() or "refused"
         else:
             try:
@@ -2707,6 +2947,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 pocsag_text=self.pocsag_text_edit.text(),
                 pocsag_baud=self.pocsag_baud_combo.currentData(),
                 pocsag_charset="de" if self.pocsag_charset_checkbox.isChecked() else "ascii",
+                meshcore_preset_index=max(0, self.meshcore_preset_combo.currentData() or 0),
+                meshcore_kind=self.meshcore_kind_combo.currentData(),
+                meshcore_name=self.meshcore_name_edit.text(),
+                meshcore_text=self.meshcore_text_edit.text(),
+                meshcore_route=self.meshcore_route_combo.currentData(),
+                meshcore_role=self.meshcore_role_combo.currentData(),
+                meshcore_location=self._meshcore_location(),
+                meshcore_channel_name=self.meshcore_channel_name_edit.text(),
+                meshcore_channel_secret_hex=self.meshcore_channel_key_edit.text(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")
@@ -2734,12 +2983,13 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_compressor_enabled(self.compressor_enable.isChecked())
         new_tb.set_limiter_enabled(self.limiter_enable.isChecked())
         new_tb.set_rade_eoo_enabled(self.rade_eoo_checkbox.isChecked())
-        if new_tb.mode == PlutoTxFlowgraph.MODE_MESHTASTIC:
+        if new_tb.mode in (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE):
             self.freq_spin.setValue(new_tb.nominal_freq_hz / 1e6)  # the preset's carrier, see __init__
         if self._filebroadcast_entries:
             self._reload_all_filebroadcast_files(new_tb)
         self._wav_path = new_tb.wav_path
         self.tb = new_tb
+        self._update_meshcore_info()
         self._embed_waterfall(new_tb)
         self.file_button.setText(self._file_button_text(new_tb.wav_path))
         new_tb.start()

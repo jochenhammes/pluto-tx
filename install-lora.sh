@@ -180,9 +180,9 @@ echo "Done -- pluto-tx, pluto-advanced-rx and pluto-cli now find gr-lora_sdr aut
 
 echo
 echo "== Done =="
-echo "The Meshtastic (LoRa) entry in both apps' Digimode combo is now selectable"
-echo "-- as long as the Python packages 'meshtastic' and 'cryptography' are"
-echo "also installed (the packet layer, pure Python, from PyPI):"
+echo "The MeshCore (LoRa) entry in both apps' Digimode combo is now selectable if the"
+echo "Python package 'cryptography' is installed. The Meshtastic (LoRa) entry additionally"
+echo "needs the package 'meshtastic' (the packet layers, pure Python, from PyPI):"
 if python3 -c "import meshtastic, cryptography" 2>/dev/null; then
     echo "    found -- nothing more to do."
 else

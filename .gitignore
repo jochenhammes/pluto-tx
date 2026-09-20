@@ -8,3 +8,5 @@ gr-lora_sdr/
 # Local working notes/briefings -- not meant to be synced to GitHub.
 install-improvements.md
 pluto-tx-file-broadcast-briefing.md
+# Private RF/serial captures of MeshCore traffic -- never upload (large, third-party node data).
+meshcore_capture_*/
