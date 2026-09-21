@@ -31,6 +31,10 @@ if MESHCORE_AVAILABLE:
 from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 
 
+# Right-hand waterfall column: about half of the width the waterfall had when it spanned the single-column window.
+WATERFALL_PANEL_MIN_WIDTH_PX = 400
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, uri, frequency_hz=config.DEFAULT_FREQUENCY,
                  atten_ceiling_db=pluto_device.DEFAULT_ATTEN_CEILING, mode=PlutoTxFlowgraph.MODE_FM,
@@ -112,9 +116,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._wav_path = wav_path or _default_wav_path()  # carried across reconnects; updated on a file pick
         self._audio_device = ""  # carried across reconnects; updated when source_combo picks a different mic
 
+        # Two columns like pluto_advanced_rx: the left column holds every control tab/section exactly as before
+        # (natural width), the right column the TX baseband waterfall (about half as wide as it used to be when
+        # it spanned the whole window, and it takes any extra width when the window is enlarged).
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
+        columns_layout = QtWidgets.QHBoxLayout(central)
+        layout = QtWidgets.QVBoxLayout()          # the left column: all sections below are added to this name
+        columns_layout.addLayout(layout, 0)
 
         # --- 4-section top-level layout: every widget below is constructed
         # in its usual place (unchanged) but added to one of these section
@@ -1265,13 +1274,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hw_status_label = QtWidgets.QLabel()
         section1.addWidget(self.hw_status_label)
 
-        layout.addWidget(self._hline())
-        layout.addWidget(self._section_title("TX Baseband"))
+        layout.addStretch(1)  # extra window height stays below the controls instead of spreading them out
 
-        # --- Live TX waterfall (own sub-layout so it can be swapped out on
+        # --- Live TX waterfall, right column (own sub-layout so it can be swapped out on
         # a device reconnect, which rebuilds the flowgraph) -----------------
+        waterfall_panel = QtWidgets.QWidget()
+        waterfall_panel.setMinimumWidth(WATERFALL_PANEL_MIN_WIDTH_PX)
+        waterfall_panel_layout = QtWidgets.QVBoxLayout(waterfall_panel)
+        waterfall_panel_layout.setContentsMargins(0, 0, 0, 0)
+        waterfall_panel_layout.addWidget(self._section_title("TX Baseband"))
         self.waterfall_container = QtWidgets.QVBoxLayout()
-        layout.addLayout(self.waterfall_container, 1)
+        waterfall_panel_layout.addLayout(self.waterfall_container, 1)
+        columns_layout.addWidget(waterfall_panel, 1)
         self._embed_waterfall(None)
 
         # --- Lifecycle: periodic tick doubles as (a) Ctrl-C responsiveness

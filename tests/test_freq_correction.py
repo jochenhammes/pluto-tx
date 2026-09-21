@@ -179,6 +179,29 @@ class GuiTests(unittest.TestCase):
         kw = w._current_gain_kwargs(gui.devices.DEVICE_REGISTRY["rtlsdr"])
         self.assertEqual((kw["frequency_correction_ppm"], kw["direct_sampling"]), (3.0, 0))
 
+    def test_tx_two_column_layout(self):
+        from pluto_tx import gui
+        w = gui.MainWindow("x")
+        w.show()
+        self.addCleanup(w.close)
+        self.pump(0.3)
+        panel = w.waterfall_container.parentWidget()
+        left_edge = w.mode_tab_widget.geometry().right()
+        self.assertGreater(panel.geometry().left(), left_edge)                       # waterfall column is to the right
+        self.assertEqual(panel.width(), gui.WATERFALL_PANEL_MIN_WIDTH_PX)          # about half the old full-window width
+        self.assertLess(panel.width(), w.mode_tab_widget.width() * 0.6)
+        w.resize(w.width() + 400, w.height() + 200)                                  # first room: controls reach their natural width
+        self.pump(0.3)
+        tab_width, panel_width = w.mode_tab_widget.width(), panel.width()
+        w.resize(w.width() + 600, w.height())
+        self.pump(0.3)
+        self.assertEqual(w.mode_tab_widget.width(), tab_width)                       # controls keep their width...
+        self.assertGreater(panel.width(), panel_width + 500)                         # ...the waterfall takes the rest
+        for i in range(w.mode_tab_widget.count()):                                  # every tab stays in the left column
+            w.mode_tab_widget.setCurrentIndex(i)
+            self.pump(0.05)
+            self.assertLess(w.mode_tab_widget.geometry().right(), panel.geometry().left())
+
     def test_tx_correction_field(self):
         from pluto_tx import gui
         w = gui.MainWindow("x")
