@@ -152,6 +152,12 @@ def add_common_args(parser):
              f"ignored (default: {rx_config.MESHCORE_PRESETS[0].name})",
     )
     parser.add_argument(
+        "--meshcore-decrypt-dm", action="store_true",
+        help="With --digimode meshcore also decrypt direct messages addressed to this app's node identity "
+             "(~/.config/pluto-tx/meshcore_identity.json, created if missing); senders must have advertised "
+             "before. Direct messages to other nodes stay unreadable.",
+    )
+    parser.add_argument(
         "--meshcore-channel", action="append", default=[], metavar="NAME:HEX",
         help="Extra MeshCore group channel to decrypt (name and 32 hex digits of the secret; repeatable). "
              "The Public channel is always decoded.",
@@ -216,13 +222,19 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                 emitter.error(f"invalid --meshcore-channel {spec!r}: {e}")
                 return 1
         meshcore_state.set_channels(extra)
+        if args.meshcore_decrypt_dm:
+            from pluto_tx import meshcore_identity
+            identity = meshcore_identity.load_or_create()
+            meshcore_state.set_identity(identity)
+            emitter.emit("meshcore_identity", public_key=identity.public_key.hex())
 
     def on_meshcore_packet(raw):
         row = meshcore_state.on_frame(raw)
         if row["kind"] == "invalid":
             return
         fields = {k: row[k] for k in ("kind", "route", "type", "hops", "verified", "raw_len") if k in row}
-        for k in ("name", "role", "public_key", "latitude", "longitude", "timestamp", "channel", "sender", "text"):
+        for k in ("name", "role", "public_key", "latitude", "longitude", "timestamp", "channel", "sender", "text",
+                  "sender_key", "dest_hash", "src_hash", "ack_hash"):
             if k in row:
                 fields[k] = row[k]
         emitter.emit("meshcore_packet", **fields)

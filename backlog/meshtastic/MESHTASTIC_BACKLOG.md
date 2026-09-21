@@ -23,7 +23,7 @@ Stand: Meshtastic ist als Digimode in `pluto-tx`, `pluto-advanced-rx` und `pluto
 - **NodeInfo / Position** senden und empfangen (Node-Liste mit Namen in der RX-App).
 - **Eigener Kanalname -> Frequenz-Slot** automatisch berechnen (Formel existiert:
   `config.meshtastic_channel_frequency_hz`), statt Frequenz von Hand.
-- **MeshCore**: als Digimode umgesetzt (Adverts + Gruppentext; siehe README). Offen: Direktnachrichten (TXT_MSG, X25519-Schlüsselaustausch), ACK/PATH/TRACE, Hashtag-Kanäle (Schlüsselableitung), weitere Presets verifizieren, Custom-Preset, echte Hardwaretests (TX-Advert an Heltec/ESP32).
+- **MeshCore**: als Digimode umgesetzt (Adverts, Gruppentext, Direktnachrichten; siehe README). Offen: ACK/PATH/TRACE, Weiterleiten, Hashtag-Kanäle (Schlüsselableitung), weitere Presets verifizieren, Custom-Preset, echte Hardwaretests (TX-Advert an Heltec/ESP32).
 
 ## Bekannte Grenzen
 - Kein Weiterleiten fremder Pakete, kein Routing, nur ein Kanal gleichzeitig.

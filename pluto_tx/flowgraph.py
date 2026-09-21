@@ -149,7 +149,8 @@ class PlutoTxFlowgraph(gr.top_block):
                  pocsag_baud=config.POCSAG_BAUD_DEFAULT, pocsag_charset="ascii",
                  meshcore_preset_index=0, meshcore_kind="advert", meshcore_name="", meshcore_text="",
                  meshcore_route="flood", meshcore_role=1, meshcore_location=None,
-                 meshcore_channel_name="Public", meshcore_channel_secret_hex="", meshcore_identity=None):
+                 meshcore_channel_name="Public", meshcore_channel_secret_hex="", meshcore_identity=None,
+                 meshcore_recipient_hex=""):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -663,6 +664,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self.meshcore_channel_name = meshcore_channel_name
         self.meshcore_channel_secret_hex = meshcore_channel_secret_hex  # empty = the Public channel
         self._meshcore_identity = meshcore_identity
+        self.meshcore_recipient_hex = meshcore_recipient_hex  # public key (64 hex) of the addressee of a direct message
         self.meshcore_hold_s = 0.0
         self.meshcore_last_airtime_s = 0.0
         self._meshcore_pending = None  # (packet, airtime_s, preset) from prepare_meshcore_tx()
@@ -1380,7 +1382,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self.set_frequency(self.meshcore_preset.frequency_hz)
 
     def set_meshcore_message(self, kind=None, name=None, text=None, route=None, role=None, location=False,
-                             channel_name=None, channel_secret_hex=None):
+                             channel_name=None, channel_secret_hex=None, recipient_hex=None):
         """Any subset of the message settings (location=False means "unchanged", None clears it)."""
         if kind is not None:
             self.meshcore_kind = kind
@@ -1398,6 +1400,8 @@ class PlutoTxFlowgraph(gr.top_block):
             self.meshcore_channel_name = channel_name
         if channel_secret_hex is not None:
             self.meshcore_channel_secret_hex = channel_secret_hex
+        if recipient_hex is not None:
+            self.meshcore_recipient_hex = recipient_hex
         self._meshcore_pending = None
 
     @property
@@ -1411,6 +1415,19 @@ class PlutoTxFlowgraph(gr.top_block):
         now = time.monotonic() if now is None else now
         self._meshcore_duty.limit = self.meshcore_preset.duty_cycle_limit
         return self._meshcore_duty.used_s(now), self._meshcore_duty.budget_s()
+
+    def _meshcore_summary(self, packet):
+        """What the frame looks like to a receiver (the sender's own view of it, for the info line/log)."""
+        channels = [meshcore_codec.PUBLIC_CHANNEL]
+        if self.meshcore_kind == "group" and self.meshcore_channel_secret_hex.strip():
+            channels.append(meshcore_codec.GroupChannel(
+                self.meshcore_channel_name or "Custom",
+                meshcore_codec.parse_channel_secret(self.meshcore_channel_secret_hex)))
+        summary = meshcore_codec.summarize_packet(packet, channels)
+        if self.meshcore_kind == "direct":  # only the recipient can decrypt it; describe it from our side
+            summary.update(kind="direct_text", text=self.meshcore_text.strip(), verified=True,
+                           recipient=self.meshcore_recipient_hex.strip().lower()[:16])
+        return summary
 
     def prepare_meshcore_tx(self, now=None):
         """Build the MeshCore packet for the current settings and run every pre-flight check WITHOUT touching RF.
@@ -1430,6 +1447,17 @@ class PlutoTxFlowgraph(gr.top_block):
                     return False, f"Amateur band ({band}): the advert name must contain your callsign.", None
                 packet = meshcore_codec.build_advert(self.meshcore_identity, name, self.meshcore_role,
                                                      self.meshcore_location, route=route)
+            elif self.meshcore_kind == "direct":
+                if band:
+                    return False, (f"Amateur band ({band}): MeshCore text is always encrypted -- only adverts "
+                                   "may be sent here."), None
+                text = self.meshcore_text.strip()
+                if not text:
+                    return False, "Enter a message first.", None
+                if not self.meshcore_recipient_hex.strip():
+                    return False, "Enter the recipient's public key (64 hex digits).", None
+                recipient = meshcore_codec.parse_public_key(self.meshcore_recipient_hex)
+                packet = meshcore_codec.build_text_message(self.meshcore_identity, recipient, text, route=route)
             elif self.meshcore_kind == "group":
                 if band:
                     return False, (f"Amateur band ({band}): MeshCore text is always encrypted -- only adverts "
@@ -1460,9 +1488,7 @@ class PlutoTxFlowgraph(gr.top_block):
             return False, (f"Duty-cycle limit ({preset.duty_cycle_limit:.0%} per hour) reached -- "
                            f"next frame possible in {wait_s / 60:.1f} min."), None
         info = {"packet": packet, "airtime_s": airtime_s, "preset": preset,
-                "summary": meshcore_codec.summarize_packet(
-                    packet, (meshcore_codec.PUBLIC_CHANNEL,) + ((channel,) if self.meshcore_kind == "group" and
-                                                                self.meshcore_channel_secret_hex.strip() else ()))}
+                "summary": self._meshcore_summary(packet)}
         self._meshcore_pending = (packet, airtime_s, preset)
         return True, f"{len(packet)} B, {airtime_s:.2f} s airtime", info
 

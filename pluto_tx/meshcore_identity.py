@@ -11,13 +11,21 @@ DEFAULT_PATH = os.path.join(os.path.expanduser("~"), ".config", "pluto-tx", "mes
 PATH_ENV = "PLUTO_TX_MESHCORE_IDENTITY"  # override (tests, several identities)
 
 
-def load_or_create(path: str = None) -> Identity:
+def load_existing(path: str = None):
+    """The stored identity, or None if there is none (never creates one)."""
     path = path or os.environ.get(PATH_ENV) or DEFAULT_PATH
     try:
         with open(path) as f:
             return Identity(bytes.fromhex(json.load(f)["seed"]))
     except (OSError, KeyError, ValueError, json.JSONDecodeError):
-        pass
+        return None
+
+
+def load_or_create(path: str = None) -> Identity:
+    path = path or os.environ.get(PATH_ENV) or DEFAULT_PATH
+    existing = load_existing(path)
+    if existing is not None:
+        return existing
     identity = Identity.generate()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

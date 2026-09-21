@@ -10,6 +10,9 @@ header:  0bVVPPPPRR = version (bits 6-7), payload type (bits 2-5), route type (b
 path_len: bits 0-5 hop count, bits 6-7 hash size code (0 = 1 byte, 1 = 2, 2 = 3)
 Advert:  [public key 32][timestamp 4][signature 64][appdata]; signature = Ed25519 over key || timestamp || appdata
 GRP_TXT: [channel hash 1][mac 2][AES-128-ECB(secret, zero padded (timestamp 4 | flags 1 | "sender: text"))]
+TXT_MSG: [dest hash 1][src hash 1][mac 2][AES-128-ECB(shared, zero padded (timestamp 4 | type<<2|attempt 1 | text))]
+         hash = first byte of the node's public key; shared = X25519(clamped SHA-512(seed)[:32], Ed25519->Montgomery
+         (1+y)/(1-y) of the peer key), AES key = first 16 bytes, HMAC key = all 32 bytes (MeshCore calcSharedSecret)
 """
 import hashlib
 import hmac
@@ -18,6 +21,7 @@ from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import serialization
 
@@ -149,6 +153,41 @@ class Identity:
 
     def sign(self, message: bytes) -> bytes:
         return self._key.sign(message)
+
+    @property
+    def node_hash(self) -> int:
+        return self.public_key[0]
+
+    @property
+    def _scalar(self) -> bytes:
+        h = bytearray(hashlib.sha512(self.seed).digest()[:32])
+        h[0] &= 248
+        h[31] &= 127
+        h[31] |= 64
+        return bytes(h)
+
+    def shared_secret(self, peer_public_key: bytes) -> bytes:
+        """32-byte ECDH secret shared with the node owning Ed25519 key `peer_public_key` (raises ValueError for a
+        key that is not a valid public key)."""
+        return X25519PrivateKey.from_private_bytes(self._scalar).exchange(
+            X25519PublicKey.from_public_bytes(ed25519_public_to_x25519(peer_public_key)))
+
+
+_P25519 = 2 ** 255 - 19
+
+
+def ed25519_public_to_x25519(public_key: bytes) -> bytes:
+    """Birational map of an Ed25519 public key (compressed y) to the X25519 u coordinate: u = (1 + y) / (1 - y)."""
+    if len(public_key) != PUB_KEY_SIZE:
+        raise ValueError("public key must be 32 bytes")
+    y = int.from_bytes(public_key, "little") & ((1 << 255) - 1)
+    if y >= _P25519 or y == 1:
+        raise ValueError("not a valid Ed25519 public key")
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes(public_key))
+    except ValueError:
+        raise ValueError("not a valid Ed25519 public key") from None
+    return ((1 + y) * pow(1 - y, -1, _P25519) % _P25519).to_bytes(32, "little")
 
 
 def build_appdata(role=ROLE_CHAT, name="", location=None) -> bytes:
@@ -302,12 +341,77 @@ def decrypt_group_text(payload: bytes, channels) -> dict:
     return None
 
 
+# ---------------------------------------------------------------- direct messages (TXT_MSG)
+
+TXT_PLAIN, TXT_CLI, TXT_SIGNED = 0, 1, 2
+DIRECT_PLAINTEXT_MAX = ((MAX_PAYLOAD_BYTES - 2 - CIPHER_MAC_SIZE) // 16) * 16
+DIRECT_TEXT_MAX_BYTES = DIRECT_PLAINTEXT_MAX - 5  # minus timestamp (4) and type/attempt (1)
+
+
+def parse_public_key(text: str) -> bytes:
+    """64 hex digits -> a valid Ed25519 public key (ValueError otherwise)."""
+    text = text.strip().replace(" ", "")
+    try:
+        raw = bytes.fromhex(text)
+    except ValueError:
+        raise ValueError("the recipient key must be 64 hex digits") from None
+    if len(raw) != PUB_KEY_SIZE:
+        raise ValueError("the recipient key must be 64 hex digits")
+    ed25519_public_to_x25519(raw)
+    return raw
+
+
+def build_text_message_payload(identity: Identity, peer_public_key: bytes, text: str, timestamp: int,
+                               attempt: int = 0, txt_type: int = TXT_PLAIN) -> bytes:
+    body = text.encode("utf-8")
+    if len(body) > DIRECT_TEXT_MAX_BYTES:
+        raise ValueError(f"message is longer than {DIRECT_TEXT_MAX_BYTES} bytes")
+    secret = identity.shared_secret(peer_public_key)
+    plain = struct.pack("<IB", timestamp & 0xFFFFFFFF, ((txt_type & 0x3F) << 2) | (attempt & 3)) + body
+    plain += bytes(-len(plain) % 16)
+    cipher = _aes_ecb(secret, plain, True)
+    return bytes([peer_public_key[0], identity.node_hash]) + _mac(secret, cipher) + cipher
+
+
+def build_text_message(identity: Identity, peer_public_key: bytes, text: str, timestamp=None,
+                       route=ROUTE_DIRECT, attempt: int = 0) -> bytes:
+    import time as _time
+    ts = int(_time.time()) if timestamp is None else int(timestamp)
+    return build_packet(route, PT_TXT_MSG, build_text_message_payload(identity, peer_public_key, text, ts, attempt))
+
+
+def decrypt_text_message(payload: bytes, identity: Identity, peers) -> dict:
+    """Decrypt a TXT_MSG addressed to `identity` (dest hash = its key's first byte). `peers`: known public keys;
+    those whose first byte equals the source hash are tried. -> dict(sender_key, timestamp, txt_type, attempt, text)
+    or None (not for us, sender unknown or bad MAC)."""
+    if len(payload) < 2 + CIPHER_MAC_SIZE + 16 or (len(payload) - 2 - CIPHER_MAC_SIZE) % 16:
+        return None
+    dest, src, mac, cipher = payload[0], payload[1], bytes(payload[2:4]), bytes(payload[4:])
+    if dest != identity.node_hash:
+        return None
+    for peer in peers:
+        if peer[0] != src:
+            continue
+        try:
+            secret = identity.shared_secret(peer)
+        except ValueError:
+            continue
+        if not hmac.compare_digest(_mac(secret, cipher), mac):
+            continue
+        plain = _aes_ecb(secret, cipher, False)
+        ts, flags = struct.unpack_from("<IB", plain)
+        text = plain[5:].rstrip(b"\x00").decode("utf-8", "replace")
+        return dict(sender_key=bytes(peer).hex(), timestamp=ts, txt_type=flags >> 2, attempt=flags & 3, text=text)
+    return None
+
+
 # ---------------------------------------------------------------- summary (never raises)
 
-def summarize_packet(raw: bytes, channels=(PUBLIC_CHANNEL,)) -> dict:
+def summarize_packet(raw: bytes, channels=(PUBLIC_CHANNEL,), identity: Identity = None, peers=()) -> dict:
     """One dict per received frame for the RX table: kind 'advert' | 'group_text' | 'other' | 'invalid'.
     Never raises. 'verified' is True only where the content authenticated itself (advert signature,
-    group MAC); other payload types carry no integrity information a receiver can check without keys."""
+    group MAC, direct-message MAC); other payload types carry no integrity information a receiver can check
+    without keys. Direct messages are only decrypted when addressed to `identity` and the sender's key is in `peers`."""
     info = dict(kind="invalid", raw_len=len(raw), verified=False, hex=bytes(raw).hex())
     try:
         pkt = parse_packet(raw)
@@ -328,6 +432,15 @@ def summarize_packet(raw: bytes, channels=(PUBLIC_CHANNEL,)) -> dict:
                 info.update(kind="group_text", verified=True, **dec)
             else:
                 info["channel_hash"] = pkt.payload[0] if pkt.payload else None
+        elif pkt.payload_type == PT_TXT_MSG and len(pkt.payload) >= 2:
+            info["dest_hash"], info["src_hash"] = pkt.payload[0], pkt.payload[1]
+            dec = decrypt_text_message(pkt.payload, identity, peers) if identity is not None else None
+            if dec is not None:
+                info.update(kind="direct_text", verified=True, **dec)
+            else:
+                info["for_this_node"] = identity is not None and pkt.payload[0] == identity.node_hash
+        elif pkt.payload_type == PT_ACK and len(pkt.payload) == 4:
+            info["ack_hash"] = pkt.payload.hex()
     except ValueError:
         info["kind"] = "invalid"
     return info

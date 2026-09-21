@@ -221,16 +221,23 @@ ESP32-Referenz, unsere TX-Chirp-Symbole stimmen mit dem echten Burst überein).
 geprüft**), entschlüsselt Gruppentexte des öffentlichen Kanals (und weiterer
 Kanäle mit eigenem 32-Hex-Schlüssel; AES-128-ECB + 2-Byte-HMAC, MAC geprüft) und
 führt eine Knotenliste; andere Pakettypen erscheinen mit Typ, Route, Pfad und
-Länge als „unverifiziert“ (ausblendbar). Nichts davon wird gespeichert.
+Länge als „unverifiziert“ (ausblendbar). Direktnachrichten **an diesen Knoten**
+(dieselbe Schlüsseldatei wie in der TX-App; Häkchen „Decrypt direct messages to this
+node“) werden entschlüsselt, sobald der Advert des Absenders gehört wurde (auch
+nachträglich); Direktnachrichten an andere Knoten bleiben unlesbar. Nichts davon wird gespeichert.
 `pluto-tx` sendet einen signierten **Advert** (Flood/Direct, Name, Rolle, optional
-Position) oder einen **Gruppentext** (Public oder eigener Kanal); die App ist ein
+Position), einen **Gruppentext** (Public oder eigener Kanal) oder eine
+**Direktnachricht** an den öffentlichen Schlüssel eines Knotens (64 Hex, aus der
+Knotenliste der RX-App kopierbar; gemeinsames Geheimnis per X25519 aus den
+Ed25519-Schlüsseln, AES-128-ECB + 2-Byte-HMAC wie in der MeshCore-Firmware); die App ist ein
 eigener neuer MeshCore-Knoten (Ed25519-Schlüssel wird beim ersten Mal in
 `~/.config/pluto-tx/meshcore_identity.json` angelegt, Rechte 0600, nie den Schlüssel
 eines anderen Geräts benutzen). 10 % Duty-Cycle wird durchgesetzt. **In
 Amateurfunkbändern nur Adverts** (MeshCore-Text ist immer verschlüsselt, und der
 Advert braucht dort einen Namen = Rufzeichen). Ein Flood-Advert wird von
 Repeatern weiterverteilt — Sendetests zunächst gegen einen isolierten Empfänger.
-Direktnachrichten (TXT_MSG) sind noch nicht implementiert.
+ACK/PATH/TRACE und Weiterleiten sind nicht implementiert (eine Direktnachricht wird
+genau einmal gesendet, ohne Wiederholung bei fehlendem ACK).
 CLI: `pluto-cli tx meshcore --kind advert --name DA2JH`, `pluto-cli rx fm --digimode meshcore`.
 **Rechtlicher Hinweis, im Programm bei jedem Preset sichtbar:**
 *433 MHz* (Band 433,0–434,0 MHz) liegt im deutschen 70-cm-Amateurfunkband — dort greift die

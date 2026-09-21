@@ -971,6 +971,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_kind_combo = QtWidgets.QComboBox()
         self.meshcore_kind_combo.addItem("Advert (announce this node)", "advert")
         self.meshcore_kind_combo.addItem("Group text", "group")
+        self.meshcore_kind_combo.addItem("Direct message", "direct")
         mc_row1.addWidget(self.meshcore_kind_combo)
         mc_row1.addWidget(QtWidgets.QLabel("Route:"))
         self.meshcore_route_combo = QtWidgets.QComboBox()
@@ -1020,11 +1021,18 @@ class MainWindow(QtWidgets.QMainWindow):
         mc_row3.addWidget(self.meshcore_channel_key_edit)
         mc_row3.addStretch(1)
         mc_layout.addLayout(mc_row3)
+        mc_row3b = QtWidgets.QHBoxLayout()
+        mc_row3b.addWidget(QtWidgets.QLabel("To (public key, 64 hex):"))
+        self.meshcore_recipient_edit = QtWidgets.QLineEdit()
+        self.meshcore_recipient_edit.setPlaceholderText("public key of the addressee (copy it from the RX app's node list)")
+        self.meshcore_recipient_edit.setMinimumWidth(480)
+        mc_row3b.addWidget(self.meshcore_recipient_edit)
+        mc_layout.addLayout(mc_row3b)
         mc_row4 = QtWidgets.QHBoxLayout()
         mc_row4.addWidget(QtWidgets.QLabel("Text:"))
         self.meshcore_text_edit = QtWidgets.QLineEdit()
         self.meshcore_text_edit.setMinimumWidth(420)
-        self.meshcore_text_edit.setPlaceholderText("Group message, then press PTT")
+        self.meshcore_text_edit.setPlaceholderText("Message, then press PTT")
         mc_row4.addWidget(self.meshcore_text_edit)
         mc_layout.addLayout(mc_row4)
         self.meshcore_identity_label = QtWidgets.QLabel("")
@@ -1046,7 +1054,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.meshcore_name_edit.textChanged, self.meshcore_role_combo.currentIndexChanged,
                         self.meshcore_position_checkbox.toggled, self.meshcore_lat_spin.valueChanged,
                         self.meshcore_lon_spin.valueChanged, self.meshcore_channel_name_edit.textChanged,
-                        self.meshcore_channel_key_edit.textChanged, self.meshcore_text_edit.textChanged):
+                        self.meshcore_channel_key_edit.textChanged, self.meshcore_text_edit.textChanged,
+                        self.meshcore_recipient_edit.textChanged):
             signal_.connect(self._on_meshcore_changed)
 
         digimodes_tab_layout.addStretch(1)
@@ -1514,7 +1523,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_meshcore_controls_enabled(self):
         self.meshcore_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_MESHCORE)
         connected = getattr(self, "_meshcore_connected", True)
-        group = self.meshcore_kind_combo.currentData() == "group"
+        kind = self.meshcore_kind_combo.currentData()
+        group = kind in ("group", "direct")
         for w in (self.meshcore_preset_combo, self.meshcore_kind_combo, self.meshcore_route_combo,
                   self.meshcore_name_edit, self.meshcore_role_combo, self.meshcore_position_checkbox):
             w.setEnabled(connected)
@@ -1523,8 +1533,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_lon_spin.setEnabled(connected and position and not group)
         self.meshcore_role_combo.setEnabled(connected and not group)
         self.meshcore_position_checkbox.setEnabled(connected and not group)
-        for w in (self.meshcore_channel_name_edit, self.meshcore_channel_key_edit, self.meshcore_text_edit):
-            w.setEnabled(connected and group)
+        for w in (self.meshcore_channel_name_edit, self.meshcore_channel_key_edit):
+            w.setEnabled(connected and kind == "group")
+        self.meshcore_recipient_edit.setEnabled(connected and kind == "direct")
+        self.meshcore_text_edit.setEnabled(connected and group)
 
     def _update_meshcore_regulatory_label(self):
         preset = self._meshcore_selected_preset()
@@ -1545,7 +1557,8 @@ class MainWindow(QtWidgets.QMainWindow):
             text=self.meshcore_text_edit.text(), route=self.meshcore_route_combo.currentData(),
             role=self.meshcore_role_combo.currentData(), location=self._meshcore_location(),
             channel_name=self.meshcore_channel_name_edit.text(),
-            channel_secret_hex=self.meshcore_channel_key_edit.text())
+            channel_secret_hex=self.meshcore_channel_key_edit.text(),
+            recipient_hex=self.meshcore_recipient_edit.text())
 
     def _on_meshcore_changed(self, *_):
         self._update_meshcore_controls_enabled()
@@ -1575,6 +1588,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ok, message, _info = self.tb.prepare_meshcore_tx()
             error = not ok and (self.meshcore_kind_combo.currentData() == "advert"
                                 or bool(self.meshcore_text_edit.text().strip()))
+            if self.meshcore_kind_combo.currentData() == "direct" and not self.meshcore_recipient_edit.text().strip():
+                error = False
             if not ok and not error:
                 message = ""
         used_s, budget_s = self.tb.meshcore_duty_status()
@@ -1598,8 +1613,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._current_mode != PlutoTxFlowgraph.MODE_MESHCORE or not info:
             return
         summary = info["summary"]
-        what = (f"advert '{summary.get('name', '')}'" if summary["kind"] == "advert"
-                else f"{summary.get('channel', 'group')}: {summary.get('text', '')}")
+        if summary["kind"] == "advert":
+            what = f"advert '{summary.get('name', '')}'"
+        elif summary["kind"] == "direct_text":
+            what = f"direct to {summary.get('recipient', '')}...: {summary.get('text', '')}"
+        else:
+            what = f"{summary.get('channel', 'group')}: {summary.get('text', '')}"
         self.meshcore_sent_log.append(f"[{time.strftime('%H:%M:%S')}] {summary.get('route', '')}, {what}  ({info['airtime_s']:.2f} s)")
         self._update_meshcore_info(f"Sending {len(info['packet'])} B, {info['airtime_s']:.2f} s airtime")
 
@@ -2956,6 +2975,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 meshcore_location=self._meshcore_location(),
                 meshcore_channel_name=self.meshcore_channel_name_edit.text(),
                 meshcore_channel_secret_hex=self.meshcore_channel_key_edit.text(),
+                meshcore_recipient_hex=self.meshcore_recipient_edit.text(),
             )
         except Exception as e:
             self.status_label.setText(f"Could not connect to {device_cls.display_name} ({label}): {e}")

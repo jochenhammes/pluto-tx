@@ -426,9 +426,11 @@ def add_meshcore_subparser(subparsers):
     )
     add_common_args(p)
     add_repeat_args(p)
-    p.add_argument("--kind", choices=("advert", "group"), default="advert",
-                   help="advert = announce this node (signed, unencrypted); group = encrypted group text "
-                        "(default: advert)")
+    p.add_argument("--kind", choices=("advert", "group", "direct"), default="advert",
+                   help="advert = announce this node (signed, unencrypted); group = encrypted group text; "
+                        "direct = encrypted direct message to --to-key (default: advert)")
+    p.add_argument("--to-key", default="", metavar="HEX64",
+                   help="Public key (64 hex digits) of the addressee of --kind direct, e.g. from the RX app's node list")
     p.add_argument("--name", default="", help="Node name in the advert / sender name in a group text "
                                               "(amateur bands: your callsign)")
     p.add_argument("--route", choices=("flood", "direct"), default="flood",
@@ -468,7 +470,7 @@ def run_meshcore(args):
         summary = info["summary"]
         emitter.emit("meshcore_packet", kind=summary["kind"], route=summary.get("route"), bytes=len(info["packet"]),
                      airtime_s=round(info["airtime_s"], 3), freq_hz=info["preset"].frequency_hz,
-                     **{k: summary[k] for k in ("name", "public_key", "channel", "text") if k in summary})
+                     **{k: summary[k] for k in ("name", "public_key", "channel", "text", "recipient") if k in summary})
 
     return _run(
         args, PlutoTxFlowgraph.MODE_MESHCORE, emitter, post_construct=preflight,
@@ -476,6 +478,7 @@ def run_meshcore(args):
         meshcore_text=args.text, meshcore_route=args.route, meshcore_role=role,
         meshcore_location=tuple(args.position) if args.position else None,
         meshcore_channel_name=args.channel_name, meshcore_channel_secret_hex=args.channel_key,
+        meshcore_recipient_hex=args.to_key,
     )
 
 

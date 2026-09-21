@@ -158,5 +158,117 @@ class IdentityTests(unittest.TestCase):
                 del os.environ[meshcore_identity.PATH_ENV]
 
 
+class DirectMessageTests(unittest.TestCase):
+    def test_x25519_map_matches_a_real_firmware_keypair(self):
+        # public test vector of github.com/meshcore-go/meshcore-go (MIT): a firmware-expanded private key and its public key
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        from cryptography.hazmat.primitives import serialization as S
+        expanded = bytes.fromhex("7065e18fd9fabb70c1ed90dca19907de698c88b709ea146eafd93d9b830c7b60"
+                                 "c4681193c79bbc39945ba8064104bb618f8fd7a84a0af6f57033d6e8ddcd6471")
+        public = bytes.fromhex("1ec77175b0918ed206f9ae04ec136d6d5d4315bb26305427f645b492e9350c10")
+        x_pub = X25519PrivateKey.from_private_bytes(expanded[:32]).public_key().public_bytes(
+            S.Encoding.Raw, S.PublicFormat.Raw)
+        self.assertEqual(x_pub, mc.ed25519_public_to_x25519(public))
+
+    def test_own_scalar_and_public_key_agree(self):
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        from cryptography.hazmat.primitives import serialization as S
+        for _ in range(20):
+            ident = mc.Identity.generate()
+            x_pub = X25519PrivateKey.from_private_bytes(ident._scalar).public_key().public_bytes(
+                S.Encoding.Raw, S.PublicFormat.Raw)
+            self.assertEqual(x_pub, mc.ed25519_public_to_x25519(ident.public_key))
+
+    def test_shared_secret_is_symmetric_and_pair_specific(self):
+        a, b, c = mc.Identity.generate(), mc.Identity.generate(), mc.Identity.generate()
+        self.assertEqual(a.shared_secret(b.public_key), b.shared_secret(a.public_key))
+        self.assertNotEqual(a.shared_secret(b.public_key), a.shared_secret(c.public_key))
+        self.assertEqual(len(a.shared_secret(b.public_key)), 32)
+
+    def test_invalid_public_keys_are_rejected(self):
+        with self.assertRaises(ValueError):
+            mc.ed25519_public_to_x25519(b"\x01" + bytes(31))       # y = 1: division by zero on the Montgomery map
+        with self.assertRaises(ValueError):
+            mc.ed25519_public_to_x25519(bytes(31))
+        for bad in ("", "zz", "00" * 31, "00" * 33):
+            with self.assertRaises(ValueError):
+                mc.parse_public_key(bad)
+
+    def test_roundtrip_and_isolation(self):
+        a, b, c = mc.Identity.generate(), mc.Identity.generate(), mc.Identity.generate()
+        raw = mc.build_text_message(a, b.public_key, "Hallo Bob äöü 🌲", timestamp=1_700_000_000, attempt=2)
+        pkt = mc.parse_packet(raw)
+        self.assertEqual((pkt.route, pkt.payload_type), (mc.ROUTE_DIRECT, mc.PT_TXT_MSG))
+        self.assertEqual((pkt.payload[0], pkt.payload[1]), (b.node_hash, a.node_hash))
+        dec = mc.decrypt_text_message(pkt.payload, b, [c.public_key, a.public_key])
+        self.assertEqual((dec["text"], dec["timestamp"], dec["attempt"], dec["txt_type"], dec["sender_key"]),
+                         ("Hallo Bob äöü 🌲", 1_700_000_000, 2, 0, a.public_key.hex()))
+        self.assertIsNone(mc.decrypt_text_message(pkt.payload, c, [a.public_key]))        # not addressed to c
+        self.assertIsNone(mc.decrypt_text_message(pkt.payload, b, [c.public_key]))        # wrong / unknown sender
+        self.assertIsNone(mc.decrypt_text_message(pkt.payload, b, []))
+        raw_flood = mc.build_text_message(a, b.public_key, "x", route=mc.ROUTE_FLOOD)
+        self.assertEqual(mc.parse_packet(raw_flood).route, mc.ROUTE_FLOOD)
+
+    def test_tampering_breaks_the_mac_and_hash_collisions_are_resolved(self):
+        a, b = mc.Identity.generate(), mc.Identity.generate()
+        payload = bytearray(mc.parse_packet(mc.build_text_message(a, b.public_key, "geheim")).payload)
+        payload[-1] ^= 1
+        self.assertIsNone(mc.decrypt_text_message(bytes(payload), b, [a.public_key]))
+        # a second peer with the same first key byte is tried and rejected by the MAC
+        other = mc.Identity.generate()
+        while other.node_hash != a.node_hash:
+            other = mc.Identity.generate()
+        good = mc.parse_packet(mc.build_text_message(a, b.public_key, "ok")).payload
+        self.assertEqual(mc.decrypt_text_message(good, b, [other.public_key, a.public_key])["text"], "ok")
+
+    def test_length_limit_and_empty_text(self):
+        a, b = mc.Identity.generate(), mc.Identity.generate()
+        mc.build_text_message(a, b.public_key, "x" * mc.DIRECT_TEXT_MAX_BYTES)
+        with self.assertRaises(ValueError):
+            mc.build_text_message(a, b.public_key, "x" * (mc.DIRECT_TEXT_MAX_BYTES + 1))
+
+    def test_summary_kinds(self):
+        a, b, c = mc.Identity.generate(), mc.Identity.generate(), mc.Identity.generate()
+        raw = mc.build_text_message(a, b.public_key, "hi")
+        s_for_b = mc.summarize_packet(raw, identity=b, peers=[a.public_key])
+        self.assertEqual((s_for_b["kind"], s_for_b["verified"], s_for_b["text"]), ("direct_text", True, "hi"))
+        s_no_peer = mc.summarize_packet(raw, identity=b, peers=[])
+        self.assertEqual((s_no_peer["kind"], s_no_peer["verified"], s_no_peer["for_this_node"]), ("other", False, True))
+        s_other = mc.summarize_packet(raw, identity=c, peers=[a.public_key])
+        self.assertEqual((s_other["kind"], s_other["for_this_node"], s_other["dest_hash"], s_other["src_hash"]),
+                         ("other", False, b.node_hash, a.node_hash))
+        self.assertEqual(mc.summarize_packet(raw)["kind"], "other")                     # no identity: never decrypted
+        ack = mc.summarize_packet(mc.build_packet(mc.ROUTE_DIRECT, mc.PT_ACK, b"\x01\x02\x03\x04"))
+        self.assertEqual(ack["ack_hash"], "01020304")
+
+
+class StateTests(unittest.TestCase):
+    def test_direct_message_before_the_advert_is_decrypted_afterwards(self):
+        from pluto_advanced_rx.meshcore_state import MeshcoreState
+        a, me = mc.Identity.generate(), mc.Identity.generate()
+        state = MeshcoreState()
+        state.set_identity(me)
+        state.on_frame(mc.build_text_message(a, me.public_key, "zuerst die Nachricht"))
+        self.assertEqual(state.get_snapshot()[1][0]["kind"], "other")
+        state.on_frame(mc.build_advert(a, "Alice"))
+        kinds = [r["kind"] for r in state.get_snapshot()[1]]
+        self.assertEqual(kinds, ["direct_text", "advert"])
+        self.assertEqual(state.get_snapshot()[1][0]["text"], "zuerst die Nachricht")
+
+    def test_without_identity_nothing_is_decrypted_and_switching_off_works(self):
+        from pluto_advanced_rx.meshcore_state import MeshcoreState
+        a, me = mc.Identity.generate(), mc.Identity.generate()
+        state = MeshcoreState()
+        state.on_frame(mc.build_advert(a, "Alice"))
+        state.on_frame(mc.build_text_message(a, me.public_key, "x"))
+        self.assertEqual(state.get_snapshot()[1][1]["kind"], "other")
+        state.set_identity(me)
+        state.on_frame(mc.build_text_message(a, me.public_key, "y"))
+        self.assertEqual(state.get_snapshot()[1][2]["kind"], "direct_text")
+        state.set_identity(None)
+        state.on_frame(mc.build_text_message(a, me.public_key, "z"))
+        self.assertEqual(state.get_snapshot()[1][3]["kind"], "other")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -38,7 +38,7 @@ def send(fg):
     return iq, float(on[-1] - on[0]) / RATE
 
 
-def receive(iq, channels=(), rate=RATE, offset_hz=0.0):
+def receive(iq, channels=(), rate=RATE, offset_hz=0.0, identity=None, heard=()):
     from pluto_advanced_rx import flowgraph as rxf
     from pluto_advanced_rx.meshcore_state import MeshcoreState
     from tests import fakes
@@ -51,6 +51,9 @@ def receive(iq, channels=(), rate=RATE, offset_hz=0.0):
     fakes.make_fake_rx(np.concatenate([pad, iq, pad, pad]), rate)
     state = MeshcoreState()
     state.set_channels(list(channels))
+    state.set_identity(identity)
+    for raw in heard:                      # adverts heard earlier (their keys let direct messages be decrypted)
+        state.on_frame(raw)
     rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=869.618e6, sample_rate=rate, device_type="fake",
                                  active_digimode="meshcore", on_meshcore_packet=state.on_frame)
     rx.start()
@@ -119,6 +122,23 @@ class TxTests(unittest.TestCase):
         fg.set_meshcore_message(text="x", channel_secret_hex="12")
         self.assertIn("32 hex", fg.prepare_meshcore_tx()[1])
 
+    def test_direct_message_refusals(self):
+        recipient = mc.Identity.generate().public_key.hex()
+        fg = make_tx(meshcore_kind="direct", meshcore_text="hi")
+        self.assertIn("recipient", fg.prepare_meshcore_tx()[1])
+        fg.set_meshcore_message(recipient_hex="12")
+        self.assertIn("64 hex", fg.prepare_meshcore_tx()[1])
+        fg.set_meshcore_message(recipient_hex=recipient, text="")
+        self.assertIn("message", fg.prepare_meshcore_tx()[1])
+        fg.set_meshcore_message(text="x" * 300)
+        self.assertIn("longer", fg.prepare_meshcore_tx()[1])
+        fg.set_meshcore_message(text="ok")
+        ok, msg, info = fg.prepare_meshcore_tx()
+        self.assertTrue(ok, msg)
+        self.assertEqual(info["summary"]["kind"], "direct_text")
+        fg.set_frequency(433_500_000)
+        self.assertIn("encrypted", fg.prepare_meshcore_tx()[1])                     # amateur band
+
     def test_amateur_band_allows_only_a_named_advert(self):
         fg = make_tx()
         fg.set_frequency(433_500_000)                                          # 70 cm
@@ -176,6 +196,19 @@ class LoopbackTests(unittest.TestCase):
                 rows = receive(iq, [custom], rate, offset)
                 self.assertEqual([(r["kind"], r["channel"], r["sender"], r["text"]) for r in rows],
                                  [("group_text", channel.name, "DA2JH", "Test äöü 123")])
+
+    def test_direct_message_loopback(self):
+        sender, me = mc.Identity.generate(), mc.Identity.generate()
+        fg = make_tx(meshcore_identity=sender, meshcore_kind="direct", meshcore_text="Direkt: äöü 123",
+                     meshcore_route="direct", meshcore_recipient_hex=me.public_key.hex())
+        iq, on_air = send(fg)
+        self.assertAlmostEqual(on_air, fg.meshcore_last_airtime_s, delta=0.05)
+        rows = receive(iq, identity=me, heard=[mc.build_advert(sender, "Absender")])
+        direct = [r for r in rows if r["kind"] == "direct_text"]
+        self.assertEqual([(r["text"], r["verified"], r["sender_key"], r["route"]) for r in direct],
+                         [("Direkt: äöü 123", True, sender.public_key.hex(), "Direct")])
+        rows = receive(iq, identity=mc.Identity.generate(), heard=[mc.build_advert(sender, "Absender")])
+        self.assertEqual([r["kind"] for r in rows if r["type"] == "TXT_MSG"], ["other"])   # another node: unreadable
 
     def test_unknown_channel_is_shown_but_unverified(self):
         fg = make_tx(meshcore_kind="group", meshcore_name="a", meshcore_text="private",
@@ -361,6 +394,52 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.tb.mode, MESHCORE)
         self.assertEqual(w.tb.meshcore_kind, "group")                           # settings survive the rebuild
         self.assertEqual(w.tb.meshcore_name, "DA2JH")
+
+    def test_tx_gui_direct_message_fields(self):
+        from pluto_tx import gui
+        w = gui.MainWindow("x")
+        w.device_type_combo.addItem("fake", "fake")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("fake"))
+        w.mode_tab_widget.setCurrentIndex(1)
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData(MESHCORE))
+        w._rebuild("x", None)
+        self.addCleanup(lambda: w.tb is not None and w.tb.shutdown_safe())
+        w.meshcore_kind_combo.setCurrentIndex(w.meshcore_kind_combo.findData("direct"))
+        self.assertTrue(w.meshcore_recipient_edit.isEnabled())
+        self.assertTrue(w.meshcore_text_edit.isEnabled())
+        self.assertFalse(w.meshcore_channel_key_edit.isEnabled())
+        w.meshcore_text_edit.setText("Hallo")
+        w.meshcore_route_combo.setCurrentIndex(w.meshcore_route_combo.findData("direct"))
+        self.assertIn("recipient", w.tb.prepare_meshcore_tx()[1])
+        w.meshcore_recipient_edit.setText(mc.Identity.generate().public_key.hex())
+        self.assertEqual((w.tb.meshcore_kind, w.tb.meshcore_route), ("direct", "direct"))
+        self.assertTrue(w.tb.prepare_meshcore_tx()[0])
+        self.assertIn("B, ", w.meshcore_info_label.text())
+        w.meshcore_kind_combo.setCurrentIndex(w.meshcore_kind_combo.findData("advert"))
+        self.assertFalse(w.meshcore_recipient_edit.isEnabled())
+
+    def test_rx_gui_direct_messages(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("")
+        self.assertFalse(w.meshcore_dm_checkbox.isChecked())                     # no key file yet: nothing is created
+        self.assertFalse(os.path.exists(os.environ["PLUTO_TX_MESHCORE_IDENTITY"]))
+        alice = mc.Identity.generate()
+        w.meshcore_dm_checkbox.setChecked(True)
+        self.assertTrue(os.path.exists(os.environ["PLUTO_TX_MESHCORE_IDENTITY"]))
+        from pluto_tx import meshcore_identity
+        me = meshcore_identity.load_or_create()
+        self.assertIn(me.public_key.hex(), w.meshcore_own_key_label.text())
+        w._meshcore_state.on_frame(mc.build_text_message(alice, me.public_key, "vor dem Advert"))
+        w._meshcore_state.on_frame(mc.build_advert(alice, "Alice"))
+        w._render_meshcore_table()
+        table = w.meshcore_table
+        self.assertEqual(table.item(0, 2).text(), "TXT_MSG")
+        self.assertEqual(table.item(0, 4).text(), "Alice")
+        self.assertIn("vor dem Advert", table.item(0, 5).text())
+        self.assertEqual(table.item(0, 6).text(), "yes")
+        self.assertEqual(w.meshcore_nodes_table.item(0, 2).text(), alice.public_key.hex())   # full key for copying
+        w.meshcore_dm_checkbox.setChecked(False)
+        self.assertEqual(w.meshcore_own_key_label.text(), "")
 
     def test_rx_gui_table_nodes_and_hiding(self):
         from pluto_advanced_rx import gui

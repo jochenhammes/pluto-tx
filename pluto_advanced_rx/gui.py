@@ -38,7 +38,7 @@ from .pocsag_state import PocsagState
 if LORA_AVAILABLE:
     from pluto_tx import meshtastic_codec
 if MESHCORE_AVAILABLE:
-    from pluto_tx import meshcore_codec
+    from pluto_tx import meshcore_codec, meshcore_identity
 from .psk31_state import Psk31ChatState
 from .rtty_state import RttyChatState
 from .waterfall_widget import AdvancedWaterfallWidget
@@ -464,6 +464,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_channel_key_edit.setToolTip(
             "Secret of another group channel to decrypt (the Public channel is always active). Kept in memory only.")
         mc_row.addWidget(self.meshcore_channel_key_edit)
+        self.meshcore_dm_checkbox = QtWidgets.QCheckBox("Decrypt direct messages to this node")
+        self.meshcore_dm_checkbox.setToolTip(
+            "Uses the node identity of this app (the same key file as the TX app, ~/.config/pluto-tx/). Only messages "
+            "addressed to this node can be read, and only from senders whose advert was heard before.")
+        mc_row.addWidget(self.meshcore_dm_checkbox)
         self.meshcore_hide_unverified_checkbox = QtWidgets.QCheckBox("Hide unverified")
         self.meshcore_hide_unverified_checkbox.setToolTip(
             "Hide frames that could not authenticate themselves (only adverts with a valid signature and group texts "
@@ -487,10 +492,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_table.setMinimumHeight(160)
         self.meshcore_table.setToolTip("OK = the content authenticated itself (advert signature / group MAC).")
         mc_layout.addWidget(self.meshcore_table)
+        self.meshcore_own_key_label = QtWidgets.QLabel("")
+        self.meshcore_own_key_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        mc_layout.addWidget(self.meshcore_own_key_label)
         self.meshcore_nodes_label = QtWidgets.QLabel("Nodes heard: 0")
         mc_layout.addWidget(self.meshcore_nodes_label)
         self.meshcore_nodes_table = QtWidgets.QTableWidget(0, 5)
-        self.meshcore_nodes_table.setHorizontalHeaderLabels(["Name", "Role", "Key", "Position", "Last heard"])
+        self.meshcore_nodes_table.setHorizontalHeaderLabels(["Name", "Role", "Public key", "Position", "Last heard"])
+        self.meshcore_nodes_table.setToolTip("Select a row and press Ctrl+C to copy the full public key "
+                                             "(needed as recipient in the TX app's direct messages).")
         self.meshcore_nodes_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.meshcore_nodes_table.verticalHeader().setVisible(False)
         self.meshcore_nodes_table.horizontalHeader().setStretchLastSection(True)
@@ -501,6 +511,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_channel_name_edit.textChanged.connect(self._apply_meshcore_channels)
         self.meshcore_channel_key_edit.textChanged.connect(self._apply_meshcore_channels)
         self.meshcore_hide_unverified_checkbox.toggled.connect(self._meshcore_state.set_hide_unverified)
+        self.meshcore_dm_checkbox.toggled.connect(self._on_meshcore_dm_toggled)
+        existing = meshcore_identity.load_existing() if MESHCORE_AVAILABLE else None
+        if existing is not None:
+            self.meshcore_dm_checkbox.setChecked(True)  # an identity already exists (TX app): use it
         self.meshcore_clear_button.clicked.connect(self._on_meshcore_clear_clicked)
         self._update_meshcore_regulatory_label()
         self._update_meshcore_signal_label()
@@ -1707,6 +1721,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None and self._active_digimode == "meshcore":
             self._rebuild_for_digimode("meshcore", force=True)  # PHY, preamble and carrier come from the preset
 
+    def _on_meshcore_dm_toggled(self, on):
+        if on:
+            identity = meshcore_identity.load_or_create()   # creates the key file the first time it is switched on
+            self._meshcore_state.set_identity(identity)
+            self.meshcore_own_key_label.setText(f"This node's public key: {identity.public_key.hex()}")
+        else:
+            self._meshcore_state.set_identity(None)
+            self.meshcore_own_key_label.setText("")
+
     def _on_meshcore_clear_clicked(self):
         self._meshcore_state.clear()
         self._render_meshcore_table()
@@ -1744,9 +1767,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 who, content = row["name"], f"{row['role']}{pos} key {row['public_key'][:8]}"
             elif kind == "group_text":
                 who, content = row["sender"], f"[{row['channel']}] {row['text']}"
+            elif kind == "direct_text":
+                names = {n["public_key"]: n["name"] for n in self._meshcore_state.get_nodes()}
+                who, content = names.get(row["sender_key"], row["sender_key"][:8]), f"[direct] {row['text']}"
             else:
-                who, content = "", f"{row['payload_len']} B payload" + (
-                    f", channel hash {row['channel_hash']:02X}" if row.get("channel_hash") is not None else "")
+                extra = ""
+                if row.get("channel_hash") is not None:
+                    extra = f", channel hash {row['channel_hash']:02X}"
+                elif row.get("dest_hash") is not None:
+                    extra = (f", to {row['dest_hash']:02X} from {row['src_hash']:02X}"
+                             + (" (for this node, sender unknown yet)" if row.get("for_this_node") else ""))
+                elif row.get("ack_hash"):
+                    extra = f", ack {row['ack_hash']}"
+                who, content = "", f"{row['payload_len']} B payload" + extra
             cells = [stamp, row["route"], row["type"], str(row["hops"]), who, content, "yes" if row["verified"] else "no"]
             for c, text in enumerate(cells):
                 table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
@@ -1758,7 +1791,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_nodes_table.setRowCount(len(nodes))
         for r, n in enumerate(nodes):
             pos = f"{n['latitude']:.4f}, {n['longitude']:.4f}" if n["latitude"] is not None else ""
-            cells = [n["name"], n["role"], n["public_key"][:16], pos, time.strftime("%H:%M:%S", time.localtime(n["time"]))]
+            cells = [n["name"], n["role"], n["public_key"], pos, time.strftime("%H:%M:%S", time.localtime(n["time"]))]
             for c, text in enumerate(cells):
                 self.meshcore_nodes_table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
 
