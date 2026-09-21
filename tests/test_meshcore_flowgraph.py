@@ -418,6 +418,28 @@ class GuiTests(unittest.TestCase):
         w.meshcore_kind_combo.setCurrentIndex(w.meshcore_kind_combo.findData("advert"))
         self.assertFalse(w.meshcore_recipient_edit.isEnabled())
 
+    def test_rx_gui_layout_is_narrow_and_tables_use_the_free_height(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("")
+        w.show()
+        self.addCleanup(w.close)
+        w.mode_tab_widget.setCurrentIndex(w._digimodes_tab_index)
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("meshcore"))
+        w.meshcore_dm_checkbox.setChecked(True)                    # shows the (shortened) own key line
+        self.app.processEvents()
+        self.assertLess(w.meshcore_group_widget.minimumSizeHint().width(), 560)          # was ~800 px
+        # the two checkboxes sit one row below the channel fields
+        self.assertGreater(w.meshcore_dm_checkbox.geometry().y(), w.meshcore_channel_key_edit.geometry().y())
+        self.assertGreater(w.meshcore_hide_unverified_checkbox.geometry().y(), w.meshcore_channel_key_edit.geometry().y())
+        w.resize(1300, 700)
+        self.app.processEvents()
+        small = (w.meshcore_table.height(), w.meshcore_nodes_table.height())
+        w.resize(1300, 1300)
+        self.app.processEvents()
+        big = (w.meshcore_table.height(), w.meshcore_nodes_table.height())
+        self.assertGreater(big[0], small[0] + 150)                 # both tables grow with the window
+        self.assertGreater(big[1], small[1])
+
     def test_rx_gui_direct_messages(self):
         from pluto_advanced_rx import gui
         w = gui.MainWindow("")
@@ -428,7 +450,8 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.environ["PLUTO_TX_MESHCORE_IDENTITY"]))
         from pluto_tx import meshcore_identity
         me = meshcore_identity.load_or_create()
-        self.assertIn(me.public_key.hex(), w.meshcore_own_key_label.text())
+        self.assertIn(me.public_key.hex()[:16], w.meshcore_own_key_label.text())
+        self.assertIn(me.public_key.hex(), w.meshcore_own_key_label.toolTip())
         w._meshcore_state.on_frame(mc.build_text_message(alice, me.public_key, "vor dem Advert"))
         w._meshcore_state.on_frame(mc.build_advert(alice, "Alice"))
         w._render_meshcore_table()

@@ -233,6 +233,20 @@ class GuiTests(unittest.TestCase):
         self.assertEqual((tb.pocsag_ric, tb.pocsag_kind, tb.pocsag_baud, tb.pocsag_text),
                          (4242, "numeric", 2400, "DA2JH test"))
 
+    def test_rx_gui_group_is_narrow_and_the_status_line_wraps(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("")
+        w.show()
+        self.addCleanup(w.close)
+        w.mode_tab_widget.setCurrentIndex(w._digimodes_tab_index)
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("pocsag"))
+        w.pocsag_signal_label.setText("POCSAG 1200 Bd on 466.0750 MHz -- 96 batches, 1540/1553 codewords OK, 11 call(s) shown, "
+                                      "1 damaged hidden (most batches carry no call: idle keep-alive)")
+        self.app.processEvents()
+        self.assertLess(w.pocsag_group_widget.minimumSizeHint().width(), 450)             # was ~760 px
+        self.assertGreater(w.pocsag_signal_label.height(), 30)                              # wrapped onto several lines
+        self.assertGreater(w.pocsag_charset_checkbox.geometry().y(), w.pocsag_interp_combo.geometry().y())
+
     def test_rx_gui_table_and_rerender(self):
         from pluto_advanced_rx import gui
         w = gui.MainWindow("x")

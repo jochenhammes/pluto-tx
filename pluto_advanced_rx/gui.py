@@ -312,7 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.psk31_clear_button.clicked.connect(self._on_psk31_clear_clicked)
         psk31_clear_row.addWidget(self.psk31_clear_button)
         psk31_group_layout.addLayout(psk31_clear_row)
-        digimodes_tab_layout.addWidget(psk31_group)
+        digimodes_tab_layout.addWidget(psk31_group, 1)
         self.psk31_group_widget = psk31_group
 
         # --- RTTY controls -- own group widget, same pattern as
@@ -383,7 +383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rtty_clear_button.clicked.connect(self._on_rtty_clear_clicked)
         rtty_clear_row.addWidget(self.rtty_clear_button)
         rtty_group_layout.addLayout(rtty_clear_row)
-        digimodes_tab_layout.addWidget(rtty_group)
+        digimodes_tab_layout.addWidget(rtty_group, 1)
         self.rtty_group_widget = rtty_group
 
         # --- Meshtastic (LoRa) controls -- own group widget, same pattern as
@@ -420,6 +420,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshtastic_regulatory_label.setWordWrap(True)
         meshtastic_group_layout.addWidget(self.meshtastic_regulatory_label)
         self.meshtastic_signal_label = QtWidgets.QLabel()
+        self.meshtastic_signal_label.setWordWrap(True)
         meshtastic_group_layout.addWidget(self.meshtastic_signal_label)
         self.meshtastic_table = QtWidgets.QTableWidget(0, 6)
         self.meshtastic_table.setHorizontalHeaderLabels(["Time", "From", "To", "Type", "Hops", "Message"])
@@ -438,7 +439,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshtastic_clear_button.clicked.connect(self._on_meshtastic_clear_clicked)
         meshtastic_clear_row.addWidget(self.meshtastic_clear_button)
         meshtastic_group_layout.addLayout(meshtastic_clear_row)
-        digimodes_tab_layout.addWidget(meshtastic_group)
+        digimodes_tab_layout.addWidget(meshtastic_group, 1)
         self.meshtastic_group_widget = meshtastic_group
 
         # --- MeshCore RX: tune to the preset's carrier (done on entering the mode); adverts are shown with their
@@ -453,35 +454,42 @@ class MainWindow(QtWidgets.QMainWindow):
             self.meshcore_preset_combo.addItem(preset.name, i)
         self.meshcore_preset_combo.currentIndexChanged.connect(self._on_meshcore_preset_changed)
         mc_row.addWidget(self.meshcore_preset_combo)
-        mc_row.addWidget(QtWidgets.QLabel("Extra channel:"))
+        mc_row_channel = QtWidgets.QHBoxLayout()   # own row: the group (= left column) stays narrow
+        mc_row_channel.addWidget(QtWidgets.QLabel("Extra channel:"))
         self.meshcore_channel_name_edit = QtWidgets.QLineEdit()
         self.meshcore_channel_name_edit.setPlaceholderText("name")
         self.meshcore_channel_name_edit.setMaximumWidth(100)
-        mc_row.addWidget(self.meshcore_channel_name_edit)
+        mc_row_channel.addWidget(self.meshcore_channel_name_edit)
         self.meshcore_channel_key_edit = QtWidgets.QLineEdit()
         self.meshcore_channel_key_edit.setPlaceholderText("32 hex digits (secret)")
         self.meshcore_channel_key_edit.setMaximumWidth(290)
         self.meshcore_channel_key_edit.setToolTip(
             "Secret of another group channel to decrypt (the Public channel is always active). Kept in memory only.")
-        mc_row.addWidget(self.meshcore_channel_key_edit)
+        mc_row_channel.addWidget(self.meshcore_channel_key_edit)
+        mc_row_channel.addStretch(1)
+        mc_row_options = QtWidgets.QHBoxLayout()   # second row: keeps the (narrow) left column narrow
         self.meshcore_dm_checkbox = QtWidgets.QCheckBox("Decrypt direct messages to this node")
         self.meshcore_dm_checkbox.setToolTip(
             "Uses the node identity of this app (the same key file as the TX app, ~/.config/pluto-tx/). Only messages "
             "addressed to this node can be read, and only from senders whose advert was heard before.")
-        mc_row.addWidget(self.meshcore_dm_checkbox)
+        mc_row_options.addWidget(self.meshcore_dm_checkbox)
         self.meshcore_hide_unverified_checkbox = QtWidgets.QCheckBox("Hide unverified")
         self.meshcore_hide_unverified_checkbox.setToolTip(
             "Hide frames that could not authenticate themselves (only adverts with a valid signature and group texts "
             "with a valid MAC are verified) -- on a weak signal the rest is often damaged.")
-        mc_row.addWidget(self.meshcore_hide_unverified_checkbox)
+        mc_row_options.addWidget(self.meshcore_hide_unverified_checkbox)
+        mc_row_options.addStretch(1)
         mc_row.addStretch(1)
         self.meshcore_clear_button = QtWidgets.QPushButton("Clear")
         mc_row.addWidget(self.meshcore_clear_button)
         mc_layout.addLayout(mc_row)
+        mc_layout.addLayout(mc_row_channel)
+        mc_layout.addLayout(mc_row_options)
         self.meshcore_regulatory_label = QtWidgets.QLabel()
         self.meshcore_regulatory_label.setWordWrap(True)
         mc_layout.addWidget(self.meshcore_regulatory_label)
         self.meshcore_signal_label = QtWidgets.QLabel()
+        self.meshcore_signal_label.setWordWrap(True)
         mc_layout.addWidget(self.meshcore_signal_label)
         self.meshcore_table = QtWidgets.QTableWidget(0, 7)
         self.meshcore_table.setHorizontalHeaderLabels(["Time", "Route", "Type", "Hops", "From", "Content", "OK"])
@@ -491,7 +499,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_table.horizontalHeader().setStretchLastSection(True)
         self.meshcore_table.setMinimumHeight(160)
         self.meshcore_table.setToolTip("OK = the content authenticated itself (advert signature / group MAC).")
-        mc_layout.addWidget(self.meshcore_table)
+        mc_layout.addWidget(self.meshcore_table, 3)
         self.meshcore_own_key_label = QtWidgets.QLabel("")
         self.meshcore_own_key_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         mc_layout.addWidget(self.meshcore_own_key_label)
@@ -504,9 +512,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_nodes_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.meshcore_nodes_table.verticalHeader().setVisible(False)
         self.meshcore_nodes_table.horizontalHeader().setStretchLastSection(True)
-        self.meshcore_nodes_table.setMaximumHeight(120)
-        mc_layout.addWidget(self.meshcore_nodes_table)
-        digimodes_tab_layout.addWidget(meshcore_group)
+        self.meshcore_nodes_table.setMinimumHeight(80)
+        mc_layout.addWidget(self.meshcore_nodes_table, 1)
+        digimodes_tab_layout.addWidget(meshcore_group, 1)
         self.meshcore_group_widget = meshcore_group
         self.meshcore_channel_name_edit.textChanged.connect(self._apply_meshcore_channels)
         self.meshcore_channel_key_edit.textChanged.connect(self._apply_meshcore_channels)
@@ -524,9 +532,12 @@ class MainWindow(QtWidgets.QMainWindow):
         pocsag_layout = QtWidgets.QVBoxLayout(pocsag_group)
         pocsag_layout.setContentsMargins(0, 0, 0, 0)
         pocsag_row = QtWidgets.QHBoxLayout()
+        pocsag_row_options = QtWidgets.QHBoxLayout()   # second row: keeps the (narrow) left column narrow
         pocsag_row.addWidget(QtWidgets.QLabel("Show as:"))
         self.pocsag_interp_combo = QtWidgets.QComboBox()
         self.pocsag_interp_combo.addItem("Auto (function 0 = numeric)", "auto")
+        self.pocsag_interp_combo.setMinimumContentsLength(12)
+        self.pocsag_interp_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.pocsag_interp_combo.addItem("Alphanumeric", "alpha")
         self.pocsag_interp_combo.addItem("Numeric", "numeric")
         self.pocsag_interp_combo.currentIndexChanged.connect(
@@ -537,19 +548,22 @@ class MainWindow(QtWidgets.QMainWindow):
             "DIN 66003 mapping used by German paging networks: [ \\ ] { | } ~ = \u00c4 \u00d6 \u00dc \u00e4 \u00f6 \u00fc \u00df.")
         self.pocsag_charset_checkbox.toggled.connect(
             lambda on: self._pocsag_state.set_charset("de" if on else "ascii"))
-        pocsag_row.addWidget(self.pocsag_charset_checkbox)
+        pocsag_row_options.addWidget(self.pocsag_charset_checkbox)
         self.pocsag_hide_damaged_checkbox = QtWidgets.QCheckBox("Hide damaged calls")
         self.pocsag_hide_damaged_checkbox.setChecked(True)
         self.pocsag_hide_damaged_checkbox.setToolTip(
             "Hide calls with codewords the error correction could not recover -- on a weak signal these are mostly junk.")
         self.pocsag_hide_damaged_checkbox.toggled.connect(self._pocsag_state.set_hide_damaged)
-        pocsag_row.addWidget(self.pocsag_hide_damaged_checkbox)
+        pocsag_row_options.addWidget(self.pocsag_hide_damaged_checkbox)
+        pocsag_row_options.addStretch(1)
         pocsag_row.addStretch(1)
         self.pocsag_clear_button = QtWidgets.QPushButton("Clear")
         self.pocsag_clear_button.clicked.connect(self._on_pocsag_clear_clicked)
         pocsag_row.addWidget(self.pocsag_clear_button)
         pocsag_layout.addLayout(pocsag_row)
+        pocsag_layout.addLayout(pocsag_row_options)
         self.pocsag_signal_label = QtWidgets.QLabel()
+        self.pocsag_signal_label.setWordWrap(True)   # the status line can be long: wrap instead of widening the column
         pocsag_layout.addWidget(self.pocsag_signal_label)
         self.pocsag_table = QtWidgets.QTableWidget(0, 6)
         self.pocsag_table.setHorizontalHeaderLabels(["Time", "Baud", "RIC", "Fn", "Message", "Errors"])
@@ -562,7 +576,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Errors = bit errors corrected by the BCH code / codewords that could not be recovered "
             "(the message text is incomplete then).")
         pocsag_layout.addWidget(self.pocsag_table)
-        digimodes_tab_layout.addWidget(pocsag_group)
+        digimodes_tab_layout.addWidget(pocsag_group, 1)
         self.pocsag_group_widget = pocsag_group
         self._update_pocsag_signal_label()
 
@@ -912,9 +926,8 @@ class MainWindow(QtWidgets.QMainWindow):
         buffer_size_row.addStretch(1)
         device_group_layout.addLayout(buffer_size_row)
 
-        left_column.addWidget(mode_group)
-        left_column.addStretch(1)  # keeps device_group/mode_group at natural height instead of
-        # stretching to fill the (likely taller) right column's height -- see the column-layout comment above
+        left_column.addWidget(mode_group, 1)  # device_group stays at natural height; the mode group (its tab pages,
+        # e.g. the digimode tables) uses all the free height of the column -- see the column-layout comment above
 
         # --- Waterfall / spectrum group -------------------------------------
         waterfall_group = QtWidgets.QGroupBox("Waterfall / Spectrum")
@@ -1725,10 +1738,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if on:
             identity = meshcore_identity.load_or_create()   # creates the key file the first time it is switched on
             self._meshcore_state.set_identity(identity)
-            self.meshcore_own_key_label.setText(f"This node's public key: {identity.public_key.hex()}")
+            key = identity.public_key.hex()
+            self.meshcore_own_key_label.setText(f"This node's public key: {key[:16]}...")  # short: keeps the column narrow
+            self.meshcore_own_key_label.setToolTip(f"Full public key (select + copy):\n{key}")
         else:
             self._meshcore_state.set_identity(None)
             self.meshcore_own_key_label.setText("")
+            self.meshcore_own_key_label.setToolTip("")
 
     def _on_meshcore_clear_clicked(self):
         self._meshcore_state.clear()
