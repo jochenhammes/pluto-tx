@@ -202,6 +202,44 @@ class GuiTests(unittest.TestCase):
             self.pump(0.05)
             self.assertLess(w.mode_tab_widget.geometry().right(), panel.geometry().left())
 
+    def test_tx_aioc_device(self):
+        from pluto_tx import gui, devices
+        if "aioc" not in devices.DEVICE_REGISTRY:
+            self.skipTest("pyserial not installed")
+        w = gui.MainWindow("x")
+        self.assertFalse(w.aioc_serial_combo.isVisibleTo(w))  # hidden for the default device (Pluto)
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("aioc"))
+        self.assertIn("Audio Device", w.device_label.text())
+        self.assertIn("ALSA device", w.uri_combo.toolTip())
+        self.assertTrue(w.aioc_serial_combo.isVisibleTo(w))   # AIOC gets its own serial-port row
+        self.assertTrue(w.aioc_serial_label.isVisibleTo(w))
+        self.assertIn("PTT", w.aioc_serial_combo.toolTip())
+        self.assertFalse(w.freq_spin.isVisibleTo(w))       # audio-only, no RF
+        self.assertFalse(w.power_slider.isVisibleTo(w))
+        fm_item = w.mode_combo.model().item(w.mode_combo.findData(gui.PlutoTxFlowgraph.MODE_FM))
+        self.assertTrue(fm_item.isEnabled())               # FM has an audio-only branch (fm_audio_sink)
+        ssb_item = w.mode_combo.model().item(w.mode_combo.findData(gui.PlutoTxFlowgraph.MODE_SSB))
+        self.assertFalse(ssb_item.isEnabled())              # SSB still needs real RF
+        # switching back to an RF device hides the serial-port row again
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("pluto"))
+        self.assertFalse(w.aioc_serial_combo.isVisibleTo(w))
+
+    def test_tx_aioc_connect_builds_composite_connection_from_both_combos(self):
+        from pluto_tx import gui, devices
+        from unittest import mock
+        if "aioc" not in devices.DEVICE_REGISTRY:
+            self.skipTest("pyserial not installed")
+        w = gui.MainWindow("x")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("aioc"))
+        w.aioc_serial_combo.setEnabled(True)
+        w.uri_combo.setEnabled(True)
+        w.aioc_serial_combo.setCurrentText("/dev/ttyACM3")
+        w.uri_combo.setCurrentText("plughw:CARD=Foo,DEV=0")
+        seen = {}
+        with mock.patch.object(w, "_rebuild", side_effect=lambda connection, wav_path: seen.update(connection=connection)):
+            w._on_connect_clicked()
+        self.assertEqual(seen["connection"], "/dev/ttyACM3|plughw:CARD=Foo,DEV=0")
+
     def test_tx_correction_field(self):
         from pluto_tx import gui
         w = gui.MainWindow("x")

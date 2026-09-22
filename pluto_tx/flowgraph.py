@@ -205,7 +205,23 @@ class PlutoTxFlowgraph(gr.top_block):
         # URI/serial -- must NOT be handed to audio.sink() as a device
         # name, so those sinks stay on "" (system default) exactly as
         # before this device-selection feature existed.
-        self._soundcard_audio_device = self.device.connection if self.device.is_audio_only() else ""
+        self._soundcard_audio_device = self.device.audio_sink_device if self.device.is_audio_only() else ""
+        # ONE real audio.sink() shared by every audio-only-capable mode (FM/RADE/
+        # Digitext/PSK31/RTTY/POCSAG) -- NOT one sink per mode. Found on real AIOC
+        # hardware this session: a plain ALSA hw/plughw: device (no software mixing,
+        # unlike PipeWire's "" default, which tolerates several concurrent opens)
+        # only accepts ONE open stream; a second audio.sink() to the same plughw:
+        # string failed immediately with "audio_alsa_sink: Device or resource busy".
+        # Which producer feeds it is switched exactly like tx_gain's own producer
+        # (_tx_gain_producer_map()/set_mode()) -- see _soundcard_audio_producer_map()
+        # and the wiring/set_mode() code below. A naive sum (blocks.add_ff) of all
+        # branches was tried and reverted: it's a sync block requiring data on EVERY
+        # connected input to produce ANY output, but Digitext/PSK31/RTTY/POCSAG's
+        # sources are one-shot (repeat=False) and sit idle/exhausted between
+        # transmissions -- one starved port silently stalled the whole adder
+        # forever, including the continuously-fed FM/RADE branches (found on real
+        # hardware: PTT keyed, but literally no audio ever reached the sink).
+        self._soundcard_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
 
         # --- Sources ---------------------------------------------------
         self.mic_source = audio_devices.open_input_device(config.AUDIO_RATE, audio_device)
@@ -491,8 +507,8 @@ class PlutoTxFlowgraph(gr.top_block):
             # which unmutes/mutes THIS gate instead of tx_gain/the device.
             self.rade_audio_gain = blocks.multiply_const_ff(0.0)
             self.connect(self.rade_audio_resampler_out, self.rade_audio_gain)
-            self.rade_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
-            self.connect(self.rade_audio_gain, self.rade_audio_sink)
+            # Wired to the shared _soundcard_sink (or its own null_sink) at the end
+            # of __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
         # --- Digitext branch (waterfall-text digimode, pluto_tx/digitext.py):
         # ALWAYS available, unlike M17/FreeDV/RADE above -- Pillow/NumPy are
@@ -562,8 +578,8 @@ class PlutoTxFlowgraph(gr.top_block):
         # rebuilds digitext_source fresh for a new transmission.
         self.digitext_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/rade_audio_gain
         self.connect(self.digitext_source, self.digitext_audio_gain)
-        self.digitext_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
-        self.connect(self.digitext_audio_gain, self.digitext_audio_sink)
+        # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
+        # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
         # --- PSK31 branch (BPSK31 keyboard-chat digimode, pluto_tx/psk31.py
         # -- see the plan). Architecturally a direct structural mirror of
@@ -593,8 +609,8 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.psk31_ssb_mod, self.psk31_ssb_resampler)
         self.psk31_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/digitext_audio_gain
         self.connect(self.psk31_source, self.psk31_audio_gain)
-        self.psk31_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
-        self.connect(self.psk31_audio_gain, self.psk31_audio_sink)
+        # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
+        # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
         # --- RTTY branch (2-tone FSK Baudot digimode, pluto_tx/rtty.py --
         # see the plan). Exact structural mirror of the PSK31 branch above
@@ -624,8 +640,8 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.rtty_ssb_mod, self.rtty_ssb_resampler)
         self.rtty_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/psk31_audio_gain
         self.connect(self.rtty_source, self.rtty_audio_gain)
-        self.rtty_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
-        self.connect(self.rtty_audio_gain, self.rtty_audio_sink)
+        # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
+        # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
         # --- Meshtastic (LoRa CSS) branch. IQ-native like M17/RADE: gr-lora_sdr's
         # modulate emits complex baseband directly at 4x the LoRa bandwidth, so
@@ -827,9 +843,9 @@ class PlutoTxFlowgraph(gr.top_block):
         self.pocsag_audio_gain = None
         if self.device.is_audio_only():
             self.pocsag_audio_gain = blocks.multiply_const_ff(0.0)
-            self.pocsag_audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, self._soundcard_audio_device)
             self.connect(self.pocsag_source, self.pocsag_audio_gain)
-            self.connect(self.pocsag_audio_gain, self.pocsag_audio_sink)
+            # Wired to the shared _soundcard_sink (or its own null_sink) at the end
+            # of __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
@@ -954,6 +970,20 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.fm_resampler, self.fm_mod)
         self.connect(self.fm_mod, (self.mode_selector, self.MODE_FM))
 
+        # --- FM Soundcard/AIOC output alternative: an audio-only device (Soundcard
+        # or AIOC, see devices/soundcard.py, devices/aioc.py) needs the modulating
+        # audio itself (voice + CTCSS/DCS, subtone_adder's output, already at
+        # AUDIO_RATE -- no resampling needed here unlike RADE's branch below)
+        # instead of an FM-modulated IQ carrier: the connected radio (an external
+        # SSB/FM rig, or a UV-K5 via AIOC) does the FM modulation itself from that
+        # audio fed into its mic input. Exact structural mirror of the RADE
+        # Soundcard branch below: starts muted, unmuted only by key_ptt()/
+        # unkey_ptt()'s MODE_FM + is_audio_only() branch.
+        self.fm_audio_gain = blocks.multiply_const_ff(0.0)
+        self.connect(self.subtone_adder, self.fm_audio_gain)
+        # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
+        # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
+
         self.connect(self.limiter, self.ssb_mod)
         self.connect(self.ssb_mod, self.ssb_split)
         self.connect((self.ssb_split, 0), (self.ssb_join, 0))
@@ -1009,6 +1039,27 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.waterfall is not None:
             self.connect(self.tx_gain, self.waterfall_zoom_resampler)
             self.connect(self.waterfall_zoom_resampler, self.waterfall)
+
+        # Exactly one *_audio_gain feeds the shared _soundcard_sink at a time -- the
+        # rest drain into their own dedicated null_sink (see _soundcard_sink's
+        # construction comment above for why summing them all instead broke real
+        # hardware). Same swap-on-mode-change pattern as tx_gain just above; kept as
+        # a SEPARATE lock/unlock in set_mode() since the two producer maps change on
+        # different mode transitions (e.g. FM<->SSB changes this one, not tx_gain's).
+        audio_producers = self._soundcard_audio_producer_map()
+        active_audio_producer = audio_producers.get(self.mode)
+        # EVERY producer gets its own null_sink up front, including the initially
+        # active one -- it needs one ready for later too, the moment set_mode()
+        # ever switches away from it (mirrors the tx_gain null sinks above, which
+        # are likewise all unconditionally pre-built regardless of self.mode).
+        self._soundcard_audio_null_sinks = {
+            producer: blocks.null_sink(gr.sizeof_float) for producer in set(audio_producers.values())
+        }
+        for producer, null_sink in self._soundcard_audio_null_sinks.items():
+            if producer is active_audio_producer:
+                self._wire_soundcard_audio_producer(producer)
+            else:
+                self.connect(producer, null_sink)
 
         # Idle state once construction is done (e.g. Pluto: LO powered back
         # down -- its sink constructor needs the LO up to initialize, see
@@ -1101,6 +1152,32 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_pocsag
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
+    def _soundcard_audio_producer_map(self):
+        """mode -> that mode's own *_audio_gain, for every mode that HAS one (a
+        strict subset of _tx_gain_producer_map()'s modes -- SSB/LSB/M17/FreeDV/LoRa/
+        Filebroadcast/Baseband have no audio-only branch at all). POCSAG's is
+        conditional on is_audio_only() (see its construction in __init__); the
+        other five always exist regardless of device type."""
+        producers = {
+            self.MODE_FM: self.fm_audio_gain,
+            self.MODE_DIGITEXT: self.digitext_audio_gain,
+            self.MODE_PSK31: self.psk31_audio_gain,
+            self.MODE_RTTY: self.rtty_audio_gain,
+        }
+        if RADE_AVAILABLE:
+            producers[self.MODE_RADE] = self.rade_audio_gain
+        if self.pocsag_audio_gain is not None:
+            producers[self.MODE_POCSAG] = self.pocsag_audio_gain
+        return producers
+
+    def _wire_soundcard_audio_producer(self, gain_block):
+        """Connects one *_audio_gain to the shared, single real _soundcard_sink --
+        every OTHER *_audio_gain must instead go to its own dedicated null_sink (see
+        _soundcard_audio_producer_map()'s wiring below/set_mode()), never left
+        unconnected and never summed together (see _soundcard_sink's construction
+        comment in __init__ for why a naive sum stalls)."""
+        self.connect(gain_block, self._soundcard_sink)
+
     def set_mode(self, mode: int):
         prev_mode = self.mode
         producers = self._tx_gain_producer_map()
@@ -1121,6 +1198,24 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.disconnect(new_producer, self._null_sink_for(new_producer))
                 self.connect(new_producer, self.tx_gain)
                 self.connect(prev_producer, self._null_sink_for(prev_producer))
+            finally:
+                self.unlock()
+
+        audio_producers = self._soundcard_audio_producer_map()
+        prev_audio_producer = audio_producers.get(prev_mode)
+        new_audio_producer = audio_producers.get(mode)
+        if new_audio_producer is not prev_audio_producer:
+            # Same swap as tx_gain's above, kept separate: this producer map only
+            # covers the audio-only-capable modes, so it changes on different
+            # transitions (e.g. FM<->SSB changes THIS one, not tx_gain's producer).
+            self.lock()
+            try:
+                if prev_audio_producer is not None:
+                    self.disconnect(prev_audio_producer, self._soundcard_sink)
+                    self.connect(prev_audio_producer, self._soundcard_audio_null_sinks[prev_audio_producer])
+                if new_audio_producer is not None:
+                    self.disconnect(new_audio_producer, self._soundcard_audio_null_sinks[new_audio_producer])
+                    self._wire_soundcard_audio_producer(new_audio_producer)
             finally:
                 self.unlock()
 
@@ -1776,7 +1871,24 @@ class PlutoTxFlowgraph(gr.top_block):
             ok, message, _info = self.prepare_meshcore_tx()
             if not ok:
                 raise ValueError(message)  # refused before any RF action
+        if self.mode == self.MODE_FM and self.device.is_audio_only():
+            # Structural mirror of the RADE branch just below -- see its docstring
+            # comment above for the full is_audio_only()/tx_gain-stays-live
+            # reasoning. Unlike RADE/Digitext/PSK31/RTTY/POCSAG (Soundcard-only so
+            # far), FM is also reachable with AIOC, which has REAL PTT hardware to
+            # key -- device.needs_ptt_control (False for Soundcard, True for AIOC,
+            # see devices/base.py) gates pre_key() here, the one call this early
+            # return would otherwise skip entirely.
+            if self.device.needs_ptt_control:
+                self.device.pre_key()
+            self.ptt_mute.set_k(1.0)
+            self.tx_gain.set_k(1.0 + 0j)
+            self.fm_audio_gain.set_k(1.0)
+            self._keyed = True
+            return
         if self.mode == self.MODE_RADE and self.device.is_audio_only():
+            if self.device.needs_ptt_control:
+                self.device.pre_key()
             self.ptt_mute.set_k(1.0)
             self.tx_gain.set_k(1.0 + 0j)
             self.rade_audio_gain.set_k(1.0)
@@ -1809,7 +1921,10 @@ class PlutoTxFlowgraph(gr.top_block):
                 # so the TX waterfall (which taps it) keeps showing the
                 # live signal (SoundcardDevice.build_sink() is a null_sink,
                 # nothing downstream to protect) -- see that branch's
-                # docstring for the full reasoning, identical here.
+                # docstring for the full reasoning, identical here. AIOC's
+                # needs_ptt_control adds real PTT on top -- see MODE_FM's branch above.
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
                 self.tx_gain.set_k(1.0 + 0j)
                 self.digitext_audio_gain.set_k(1.0)
                 self._keyed = True
@@ -1830,6 +1945,8 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
             if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
                 self.tx_gain.set_k(1.0 + 0j)
                 self.psk31_audio_gain.set_k(1.0)
                 self._keyed = True
@@ -1837,6 +1954,8 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.mode == self.MODE_POCSAG:
             self._ensure_pocsag_audio()  # raises ValueError before any RF action; the source starts last
             if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
                 self.tx_gain.set_k(1.0 + 0j)
                 self.pocsag_audio_gain.set_k(config.POCSAG_SOUNDCARD_LEVEL)
                 self._keyed = True
@@ -1855,6 +1974,8 @@ class PlutoTxFlowgraph(gr.top_block):
             finally:
                 self.unlock()
             if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
                 self.tx_gain.set_k(1.0 + 0j)
                 self.rtty_audio_gain.set_k(1.0)
                 self._keyed = True
@@ -1944,31 +2065,52 @@ class PlutoTxFlowgraph(gr.top_block):
         audio-injected signal into a conventional radio -- out of scope here
         regardless of rade_eoo_enabled). The SDR device is never touched, so
         there's nothing to power down."""
+        if self.mode == self.MODE_FM and self.device.is_audio_only():
+            # Structural mirror of the RADE branch just below. needs_ptt_control's
+            # post_unkey() call (AIOC only -- see devices/base.py) runs AFTER gain
+            # is already muted, same ordering the RF path uses further below.
+            self.ptt_mute.set_k(0.0)
+            self.tx_gain.set_k(0.0 + 0j)
+            self.fm_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
         if self.mode == self.MODE_RADE and self.device.is_audio_only():
             self.ptt_mute.set_k(0.0)
             self.tx_gain.set_k(0.0 + 0j)
             self.rade_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
             self._keyed = False
             return
         if self.mode == self.MODE_DIGITEXT and self.device.is_audio_only():
             # Mirrors RADE's Soundcard early return immediately above.
             self.tx_gain.set_k(0.0 + 0j)
             self.digitext_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
             self._keyed = False
             return
         if self.mode == self.MODE_PSK31 and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.psk31_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
             self._keyed = False
             return
         if self.mode == self.MODE_RTTY and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.rtty_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
             self._keyed = False
             return
         if self.mode == self.MODE_POCSAG and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.pocsag_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
             self._keyed = False
             return
         if self.mode == self.MODE_M17:

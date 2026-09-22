@@ -174,17 +174,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_type_combo = QtWidgets.QComboBox()
         for device_type, device_cls in devices.DEVICE_REGISTRY.items():
             self.device_type_combo.addItem(device_cls.display_name, device_type)
-        if not RADE_AVAILABLE:
-            # Soundcard output only makes sense for RADE (see devices/
-            # soundcard.py) -- grey out rather than hide, same convention as
-            # the M17/FreeDV/RADE mode-combo entries below.
-            sc_idx = self.device_type_combo.findData("soundcard")
-            item = self.device_type_combo.model().item(sc_idx)
-            item.setEnabled(False)
-            self.device_type_combo.setItemData(
-                sc_idx, "librade.so/lpcnet_demo not found -- Soundcard output is RADE-only, see install-rade.sh",
-                QtCore.Qt.ToolTipRole,
-            )
+        # Soundcard used to be greyed out here whenever RADE_AVAILABLE was False
+        # ("Soundcard output is RADE-only") -- stale even before AIOC: FM/Digitext/
+        # PSK31/RTTY/POCSAG have all had their own Soundcard-output branch for a
+        # while (see _AUDIO_ONLY_CAPABLE_MODES), none of them needing RADE at all,
+        # so Soundcard is useful regardless of RADE_AVAILABLE. No mode-combo-style
+        # graying needed for either audio-only device type.
         self.device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
         device_row.addWidget(self.device_type_combo)
         self.device_label = QtWidgets.QLabel("Device (hostname or IP):")
@@ -202,6 +197,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
         section1.addLayout(device_row)
+
+        # AIOC only: a real serial port (PTT) AND a real ALSA device are two
+        # genuinely separate things (unlike every other backend here, where one
+        # opaque connection string is enough) -- uri_combo above becomes the ALSA
+        # device field for AIOC (see _update_device_connection_labels()), and this
+        # extra row carries the serial port. Hidden for every other device type
+        # (_sync_device_dependent_widgets()); Scan (the same button above) fills
+        # both at once for AIOC, see _on_scan_clicked().
+        self.aioc_serial_row = QtWidgets.QHBoxLayout()
+        self.aioc_serial_label = QtWidgets.QLabel("Serial Port (PTT):")
+        self.aioc_serial_row.addWidget(self.aioc_serial_label)
+        self.aioc_serial_combo = QtWidgets.QComboBox()
+        self.aioc_serial_combo.setEditable(True)
+        self.aioc_serial_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.aioc_serial_combo.setEnabled(False)  # editable only while disconnected, like uri_combo
+        self.aioc_serial_row.addWidget(self.aioc_serial_combo, 1)
+        section1.addLayout(self.aioc_serial_row)
+
         self._update_device_connection_labels()
 
         # --- Frequency + fine tune ---------------------------------
@@ -1311,6 +1324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.aioc_serial_combo.setEnabled(True)
         self.device_type_combo.setEnabled(True)
         self._sync_device_dependent_widgets()  # sync freq range/power label/amp visibility to "PlutoSDR"
         # Show whichever tab actually matches the flowgraph's starting mode
@@ -1938,9 +1952,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.device_label.setText("Audio Device (blank = system default):")
             self.uri_combo.setToolTip(
                 "ALSA device name, or leave blank to use the system's default "
-                "audio output -- the RADE/Digitext/PSK31 signal is written there "
-                "for an externally-connected SSB transceiver to transmit. Use "
-                "Scan to list available output devices."
+                "audio output -- the FM/RADE/Digitext/PSK31/RTTY/POCSAG signal is "
+                "written there for an externally-connected FM/SSB transceiver to "
+                "transmit. Use Scan to list available output devices."
+            )
+        elif device_cls.connection_kind == "aioc":
+            self.device_label.setText("Audio Device (AIOC):")
+            self.uri_combo.setToolTip(
+                "ALSA device carrying the audio (FM/RADE/Digitext/PSK31/RTTY/POCSAG), "
+                "e.g. plughw:CARD=AllInOneCable,DEV=0. Use Scan to auto-detect an "
+                "attached AIOC -- fills this AND the Serial Port field below."
             )
         else:
             self.device_label.setText("HackRF Serial (blank = auto):")
@@ -1948,6 +1969,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "HackRF serial number, or leave blank to use the only attached "
                 "HackRF. Use Scan to discover attached HackRF devices (needs "
                 "python3-soapysdr, see install.sh)."
+            )
+        is_aioc = device_cls.connection_kind == "aioc"
+        self.aioc_serial_label.setVisible(is_aioc)
+        self.aioc_serial_combo.setVisible(is_aioc)
+        if is_aioc:
+            self.aioc_serial_combo.setToolTip(
+                "AIOC serial/CDC-ACM device used for PTT (DTR/RTS), e.g. /dev/ttyACM0. "
+                "Use Scan (above) to auto-detect it."
             )
 
     def _on_device_type_changed(self, idx):
@@ -1961,6 +1990,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uri_combo.clear()
         self.uri_combo.clearEditText()
         self.uri_combo.blockSignals(False)
+        self.aioc_serial_combo.blockSignals(True)
+        self.aioc_serial_combo.clear()
+        self.aioc_serial_combo.clearEditText()
+        self.aioc_serial_combo.blockSignals(False)
         self._sync_device_dependent_widgets()
 
     def _sync_device_dependent_widgets(self):
@@ -2002,14 +2035,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_correction_spin.setValue(0.0)
         self._sync_mode_combo_availability()
 
-    # Modes whose IQ/audio output is directly SSB-injectable, so they make
-    # sense with an audio-only (Soundcard) device -- RADE's raw IQ real part
-    # (see devices/soundcard.py), Digitext's own audio (already sits in the
-    # normal SSB voice band from DIGITEXT_MIN_FREQ_HZ upward, see
-    # digitext.py), and PSK31's/RTTY's own audio (likewise already a plain
-    # SSB-injectable tone, see psk31.py/rtty.py) -- no extra shifting needed.
+    # Modes with their own dedicated audio-only output branch in flowgraph.py, so
+    # they make sense with an audio-only device (Soundcard or AIOC, see
+    # devices/soundcard.py, devices/aioc.py) instead of this app's own SDR --
+    # RADE's raw IQ real part, Digitext's/PSK31's/RTTY's own audio (already a
+    # plain SSB-injectable tone, see digitext.py/psk31.py/rtty.py), POCSAG's AFSK
+    # audio, and FM's own modulating audio (voice + CTCSS/DCS, subtone_adder's
+    # output -- fm_audio_sink -- the connected radio does the FM modulation
+    # itself, e.g. a UV-K5 via AIOC or an external FM/SSB rig via Soundcard).
     _AUDIO_ONLY_CAPABLE_MODES = (
-        PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
+        PlutoTxFlowgraph.MODE_FM, PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
         PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
     )
     _LORA_MODES = (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE)
@@ -2858,19 +2893,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText(f"Scan failed: {error}")
             return
         found.pop("local:", None)  # libiio's local-context artifact, never a Pluto (harmless no-op for HackRF)
-        current = self.uri_combo.currentText()
-        self.uri_combo.blockSignals(True)
-        self.uri_combo.clear()
-        for connection, desc in found.items():
-            idx = self.uri_combo.count()
-            self.uri_combo.addItem(connection)
-            self.uri_combo.setItemData(idx, desc, QtCore.Qt.ToolTipRole)
-        if current and self.uri_combo.findText(current) < 0:
-            self.uri_combo.addItem(current)
-        if current:
-            self.uri_combo.setCurrentText(current)
-        self.uri_combo.blockSignals(False)
+        if device_type == "aioc":
+            # AiocDevice.scan_devices_with_timeout() still returns one composite
+            # "<serial>|<alsa>" connection string per candidate (unchanged -- CLI/
+            # probe_with_timeout()/etc. all keep using that single opaque string,
+            # see devices/aioc.py) -- split it back apart here, one combo each.
+            from .devices.aioc import _parse_connection
+            serials, alsas = {}, {}
+            for connection in found:
+                port, alsa = _parse_connection(connection)
+                serials.setdefault(port, port)
+                alsas.setdefault(alsa, alsa)
+            self._fill_connection_combo(self.aioc_serial_combo, serials)
+            self._fill_connection_combo(self.uri_combo, alsas)
+        else:
+            self._fill_connection_combo(self.uri_combo, found)
         self.status_label.setText(f"Found {len(found)} device(s)." if found else "No devices found.")
+
+    def _fill_connection_combo(self, combo, found):
+        """found: {connection_string: tooltip_text}. Shared by _on_scan_clicked()
+        for every backend's connection combo(s) -- keeps the operator's current
+        text if it's not among the freshly scanned entries, rather than silently
+        discarding it."""
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        for connection, desc in found.items():
+            idx = combo.count()
+            combo.addItem(connection)
+            combo.setItemData(idx, desc, QtCore.Qt.ToolTipRole)
+        if current and combo.findText(current) < 0:
+            combo.addItem(current)
+        if current:
+            combo.setCurrentText(current)
+        combo.blockSignals(False)
 
     def _reset_session_ui_state(self):
         """Reset PTT/E-STOP visuals to a fresh, safe, unkeyed, re-armed
@@ -2896,6 +2952,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(False)
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
+        self.aioc_serial_combo.setEnabled(True)
         self.device_type_combo.setEnabled(True)
         self.compressor_gr_label.setText("GR: 0.0 dB")
         self.status_label.setText("Disconnected.")
@@ -2909,6 +2966,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if device_cls.connection_kind == "uri" and not connection:
             self.status_label.setText("Please enter a device hostname, IP, or URI.")
             return
+        if device_cls.connection_kind == "aioc":
+            # uri_text (via the caller, see _on_connect_clicked()) is the ALSA
+            # device from uri_combo; AiocDevice's single connection string is
+            # still "<serial>|<alsa>" (unchanged -- see devices/aioc.py), built
+            # here from the two separate combos the GUI shows for this device type.
+            connection = f"{self.aioc_serial_combo.currentText().strip()}|{connection}"
         self._rebuild(connection, self._wav_path)
 
     def _rebuild(self, connection, wav_path):
@@ -2939,6 +3002,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_connected_controls_enabled(False)
             self.connect_button.setText("Connect")
             self.uri_combo.setEnabled(True)
+            self.aioc_serial_combo.setEnabled(True)
             self.device_type_combo.setEnabled(True)
             return
         try:
@@ -2996,6 +3060,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_connected_controls_enabled(False)
             self.connect_button.setText("Connect")
             self.uri_combo.setEnabled(True)
+            self.aioc_serial_combo.setEnabled(True)
             self.device_type_combo.setEnabled(True)
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
@@ -3030,6 +3095,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connected_controls_enabled(True)
         self.connect_button.setText("Disconnect")
         self.uri_combo.setEnabled(False)
+        self.aioc_serial_combo.setEnabled(False)
         self.device_type_combo.setEnabled(False)
         self.status_label.setText(f"Connected to {device_cls.display_name} ({label}).")
 

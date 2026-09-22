@@ -11,6 +11,17 @@ DEVICE_REGISTRY = {
     "soundcard": SoundcardDevice,
 }
 
+# AIOC needs pyserial (python3-serial), not a hard dependency of this app's other
+# backends -- same defensive posture as flowgraph.py's LORA_AVAILABLE/M17_AVAILABLE
+# etc: degrade to "device just doesn't appear" rather than break Pluto/HackRF/
+# Soundcard on a system that hasn't installed it yet (see install.sh).
+try:
+    from .aioc import AiocDevice
+    DEVICE_REGISTRY["aioc"] = AiocDevice
+    AIOC_AVAILABLE = True
+except ImportError:
+    AIOC_AVAILABLE = False
+
 
 def primary_power_stage(device_type):
     """The PowerStage with is_primary=True for a device type, without

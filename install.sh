@@ -94,6 +94,9 @@ PACKAGES=(
                         # proportional Sans/Serif faces) -- digitext.py's preferred font, not
                         # guaranteed present on a minimal system otherwise; falls back to Pillow's
                         # own built-in bitmap font if this is somehow still missing
+    python3-serial    # pyserial ("import serial"), for pluto_tx's AIOC TX device backend
+                       # (devices/aioc.py, aioc_ptt.py) -- serial DTR/RTS PTT to a radio
+                       # connected via an AIOC adapter (e.g. a Quansheng UV-K5)
     git               # to clone/update this repo
 )
 
@@ -179,6 +182,7 @@ try:
     import pyqtgraph  # noqa: F401  -- pluto_advanced_rx's interactive waterfall
     import SoapySDR  # noqa: F401  -- HackRF/RTL-SDR device scanning in the GUI Scan buttons
     from PIL import Image, ImageDraw, ImageFont  # noqa: F401  -- pluto_tx's Digitext digimode
+    import serial  # noqa: F401  -- pluto_tx's AIOC TX device backend (devices/aioc.py)
 except ImportError as e:
     print(f"FAILED: {e}", file=sys.stderr)
     sys.exit(1)

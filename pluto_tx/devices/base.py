@@ -79,6 +79,14 @@ class TxDevice(abc.ABC):
     # signal is transmitted completely.
     tx_end_loss_s: float = 0.0
     supports_frequency_correction: bool = True
+    # True only for an audio-only device that still has REAL PTT hardware to key
+    # (AIOC: serial DTR/RTS to the connected radio) -- False (default, e.g.
+    # SoundcardDevice: an external rig keyed by VOX or the operator's own hand) skips
+    # pre_key()/post_unkey() entirely in the is_audio_only() early-return branches of
+    # PlutoTxFlowgraph.key_ptt()/unkey_ptt(), which otherwise leave the SDR device
+    # (and, for a Soundcard-kind device, the audio-only device itself) completely
+    # untouched on purpose -- see those branches' docstrings.
+    needs_ptt_control: bool = False
 
     def __init__(self, connection: str, frequency_hz: float, sample_rate_hz: float,
                  bandwidth_hz: Optional[float]):
@@ -95,6 +103,16 @@ class TxDevice(abc.ABC):
     @property
     def primary_stage(self) -> PowerStage:
         return next(s for s in self.power_stages if s.is_primary)
+
+    @property
+    def audio_sink_device(self) -> str:
+        """ALSA device string the audio-only branches (FM/RADE/Digitext/PSK31/RTTY/
+        POCSAG Soundcard-output taps, see flowgraph.py's self._soundcard_audio_device)
+        should write to. Default: the raw connection string -- true for
+        SoundcardDevice, where connection IS the ALSA device name. Overridden by
+        AiocDevice, whose connection also carries a serial port for PTT (see
+        devices/aioc.py)."""
+        return self.connection
 
     @classmethod
     def is_audio_only(cls) -> bool:

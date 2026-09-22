@@ -28,7 +28,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
 | **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
-| **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX) |
+| **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
 
@@ -93,6 +93,23 @@ läuft normal. **MeshCore** braucht nur `gr-lora_sdr` und `cryptography`
 `libcodec2` mit LPCNet/2020/2020B-Support ist bereits transitive
 Abhängigkeit von `gnuradio` — FreeDV funktioniert direkt nach
 `install.sh`.
+
+### AIOC-Adapter (Quansheng UV-K5 & Co.) braucht kein separates Skript
+
+`pyserial` (`python3-serial`) installiert `install.sh` bereits mit. Der
+"AIOC"-Gerätetyp in `pluto-tx` sendet FM/RADE/Waterfall-Writer/PSK31/RTTY/
+POCSAG als reines Audiosignal an ein per [AIOC](https://github.com/skuep/AIOC)
+angeschlossenes analoges Funkgerät (das Funkgerät moduliert selbst,
+z. B. ein Quansheng UV-K5) -- PTT läuft über den seriellen DTR/RTS des
+AIOC, nicht über SDR-Hardware. Verbindungsfeld-Format:
+`<serieller Port>|<ALSA-Gerät>`, z. B.
+`/dev/ttyACM0|plughw:CARD=AllInOneCable,DEV=0` (Scan versucht, beide
+Seiten automatisch zu finden und zu koppeln). Reine Digitalsprache-Modi
+(M17/FreeDV/RADE-über-SDR) und LoRa (Meshtastic/MeshCore) brauchen echte
+RF-Hardware und sind mit diesem Gerätetyp nicht wählbar. Das
+eigenständige Skript `pluto_tx/tx-stdin.py` (Audio von stdin senden,
+z. B. für eine TTS-Pipe ohne die GUI) nutzt dieselbe PTT-Logik
+(`pluto_tx/aioc_ptt.py`) und funktioniert unabhängig von der App weiter.
 
 ### Optional: RADE V1
 
@@ -320,11 +337,12 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | RADE, Waterfall Writer, PSK31, RTTY, POCSAG | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG (Audio + echtes serielles PTT) | — (kein RX-Backend) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und
 Connect/Disconnect-Buttons. **Nur `pluto-tx`** hat zusätzlich ein
-"Device Type"-Dropdown (PlutoSDR/HackRF/Soundcard), das Verbindungsfeld,
+"Device Type"-Dropdown (PlutoSDR/HackRF/Soundcard/AIOC), das Verbindungsfeld,
 Frequenzbereich und Pegel-Regler passend umschaltet.
 
 ## Sicherheit

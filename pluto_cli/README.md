@@ -107,10 +107,10 @@ Common flags (every mode):
 
 | flag | meaning |
 |---|---|
-| `--device {pluto,hackrf,soundcard}` | TX hardware backend (default: `pluto`) |
-| `--uri URI` | Connection string (libiio URI for pluto, serial for hackrf; ignored for soundcard) |
+| `--device {pluto,hackrf,soundcard,aioc}` | TX hardware backend (default: `pluto`) |
+| `--uri URI` | Connection string (libiio URI for pluto, serial for hackrf, ignored for soundcard, `<serial port>|<ALSA device>` for aioc -- e.g. `/dev/ttyACM0|plughw:CARD=AllInOneCable,DEV=0`) |
 | `--freq HZ` | Transmit frequency in Hz |
-| `--freq-correction-ppm PPM` | Oscillator error of the device in ppm (default 0; positive = the device transmits too high, the hardware is tuned lower; scales with `--freq`; ignored for soundcard) |
+| `--freq-correction-ppm PPM` | Oscillator error of the device in ppm (default 0; positive = the device transmits too high, the hardware is tuned lower; scales with `--freq`; ignored for soundcard/aioc) |
 | `--power-ceiling DB` | Max TX power/attenuation (device-specific meaning); omit for the device's own safe default |
 | `--power DB` | Target power within `--power-ceiling` (default: equal to the ceiling) |
 | `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/rtty/pocsag/filebroadcast |
@@ -217,7 +217,7 @@ pluto-cli rx m17 --freq 432150000 --filebroadcast-save-dir ./received --json
 
 `--device` for `scan`/`probe` accepts whatever `pluto-cli tx --help`/
 `pluto-cli rx --help` list under `--device` for that direction (`pluto`,
-`hackrf`, `soundcard` for TX; `pluto`, `hackrf`, `rtlsdr`, `audio` for RX).
+`hackrf`, `soundcard`, `aioc` for TX; `pluto`, `hackrf`, `rtlsdr`, `audio` for RX).
 
 Example:
 
