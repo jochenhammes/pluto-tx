@@ -468,6 +468,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.subtone_kind_combo.currentIndexChanged.connect(self._on_subtone_kind_changed)
         self.subtone_value_combo.currentIndexChanged.connect(self._on_subtone_changed)
         self.subtone_level_spin.valueChanged.connect(self._on_subtone_changed)
+
+        # FM deviation + pre-emphasis -- FM with an RF device only (an audio-only
+        # device's radio sets both itself).
+        fm_voice_row = QtWidgets.QHBoxLayout()
+        fm_voice_row.addWidget(QtWidgets.QLabel("FM deviation:"))
+        self.fm_deviation_combo = QtWidgets.QComboBox()
+        for hz in config.FM_DEVIATION_CHOICES_HZ:
+            kind = "narrow, 12.5 kHz channel" if hz < 4000 else "wide, 25 kHz channel"
+            self.fm_deviation_combo.addItem(f"±{hz / 1000:g} kHz ({kind})", hz)
+        self.fm_deviation_combo.setCurrentIndex(self.fm_deviation_combo.findData(config.FM_DEVIATION_HZ))
+        self.fm_deviation_combo.setToolTip(
+            "Peak deviation. Many 2m repeaters and rigs still expect ±5 kHz; ±2.5 kHz into a wide "
+            "receiver arrives 6 dB quieter.")
+        fm_voice_row.addWidget(self.fm_deviation_combo)
+        self.fm_preemph_check = QtWidgets.QCheckBox("Pre-emphasis")
+        self.fm_preemph_check.setChecked(config.FM_PREEMPH_DEFAULT)
+        self.fm_preemph_check.setToolTip(
+            "6 dB/octave treble boost (750 µs) that every FM receiver/repeater undoes with its "
+            "de-emphasis. Without it the highs arrive ~20 dB too quiet (muffled, hard to understand).")
+        fm_voice_row.addWidget(self.fm_preemph_check)
+        fm_voice_row.addStretch(1)
+        self.fm_voice_row_widget = QtWidgets.QWidget()
+        self.fm_voice_row_widget.setLayout(fm_voice_row)
+        audio_tab_layout.addWidget(self.fm_voice_row_widget)
+        self.fm_deviation_combo.currentIndexChanged.connect(self._on_fm_voice_changed)
+        self.fm_preemph_check.toggled.connect(self._on_fm_voice_changed)
         self._update_subtone_controls_enabled()
         self._update_m17_controls_enabled()
 
@@ -1444,6 +1470,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.subtone_kind_combo.setEnabled(connected)
         self.subtone_value_combo.setEnabled(connected and kind != "off")
         self.subtone_level_spin.setEnabled(connected and kind != "off")
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        self.fm_voice_row_widget.setVisible(is_fm_mode and not device_cls.is_audio_only())
+        self.fm_deviation_combo.setEnabled(connected)
+        self.fm_preemph_check.setEnabled(connected)
+
+    def _apply_fm_voice(self, tb):
+        tb.set_fm_deviation(self.fm_deviation_combo.currentData())
+        tb.set_fm_preemphasis(self.fm_preemph_check.isChecked())
+
+    def _on_fm_voice_changed(self, *_):
+        if self.tb is not None:
+            self._apply_fm_voice(self.tb)
 
     def _fill_subtone_values(self):
         kind = self.subtone_kind_combo.currentData()
@@ -2026,6 +2064,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.amp_checkbox.setVisible(False)
         self.freq_correction_label.setVisible(device_cls.supports_frequency_correction)
+        self._update_subtone_controls_enabled()
         self.freq_correction_spin.setVisible(device_cls.supports_frequency_correction)
         # Reset to this device type's default correction -- safe to do
         # unconditionally here: this method only runs on an actual device-
@@ -3066,6 +3105,7 @@ class MainWindow(QtWidgets.QMainWindow):
         new_tb.set_fine_offset(float(self.fine_slider.value()))
         new_tb.set_baseband_deviation(float(self.baseband_deviation_slider.value()))
         self._apply_subtone(new_tb)
+        self._apply_fm_voice(new_tb)
         new_tb.set_nf_gain(self.nf_gain_slider.value() / 100.0)
         new_tb.set_target_power(float(self.power_slider.value()))
         new_tb.set_secondary_power("AMP", self.amp_checkbox.isChecked())

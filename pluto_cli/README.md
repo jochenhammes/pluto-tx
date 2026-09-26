@@ -124,7 +124,7 @@ Common flags (every mode):
 
 | mode | extra flags | notes |
 |---|---|---|
-| `fm` | `--ctcss HZ` or `--dcs CODE[N\|I]`, `--tone-level PCT` | analog voice; optional CTCSS tone (50 standard tones, e.g. `88.5`) or DCS code (83 standard octal codes, `N` normal / `I` inverted, e.g. `023`, `754I`); tone level in % of the deviation (default 12, 5-25), the voice is reduced by the same amount; the tone starts with PTT |
+| `fm` | `--ctcss HZ` or `--dcs CODE[N\|I]`, `--tone-level PCT`, `--deviation 2500\|5000`, `--no-preemphasis` | analog voice; optional CTCSS tone (50 standard tones, e.g. `88.5`) or DCS code (83 standard octal codes, `N` normal / `I` inverted, e.g. `023`, `754I`); tone level in % of the deviation (default 12, 5-25), the voice is reduced by the same amount; the tone starts with PTT; peak deviation ±2.5 kHz (default, narrow) or ±5 kHz (wide, what many 2m repeaters expect); 750 µs pre-emphasis is on by default |
 | `ssb`, `lsb` | -- | analog voice, upper / lower sideband |
 | `m17` | `--src-callsign`, `--dst-callsign` | requires `install-m17.sh`; holds keyed briefly after unkey to send the EOT frame |
 | `freedv` | `--variant {2020,2020b}`, `--callsign` | digital voice |
@@ -195,6 +195,7 @@ for the whole process lifetime via `--digimode` at startup.
 | mode | extra flags | notes |
 |---|---|---|
 | `fm`, `ssb`, `lsb`, `baseband` | `--width-hz` | demod filter width |
+| `fm` | `--no-deemphasis` | turn off the 750 µs de-emphasis (on by default, like a real FM receiver) |
 | `rade` | -- | requires `install-rade.sh` |
 | `m17` | -- | requires `install-m17.sh`; each decoded frame is emitted as an `m17_fields` event |
 

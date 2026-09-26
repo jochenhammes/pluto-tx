@@ -324,12 +324,15 @@ def add_fm_subparser(subparsers):
     add_common_args(p)
     p.add_argument("--width-hz", type=float, default=rx_config.FM_DEMOD_WIDTH_DEFAULT_HZ,
                    help=f"IF channel filter width in Hz (default: {rx_config.FM_DEMOD_WIDTH_DEFAULT_HZ:.0f})")
+    p.add_argument("--no-deemphasis", action="store_true",
+                   help="Disable the 750 us de-emphasis (on by default, like a real FM receiver)")
     p.set_defaults(func=run_fm)
 
 
 def run_fm(args):
     return _build_and_run(
         args, AdvancedRxFlowgraph.MODE_FM, runtime.Emitter(args.json), fm_demod_width_hz=args.width_hz,
+        fm_deemphasis=not args.no_deemphasis,
     )
 
 

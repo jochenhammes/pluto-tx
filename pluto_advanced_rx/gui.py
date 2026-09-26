@@ -757,6 +757,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.width_label = QtWidgets.QLabel(f"{int(config.FM_DEMOD_WIDTH_DEFAULT_HZ)} Hz")
         self.width_label.setMinimumWidth(60)
         demod_row.addWidget(self.width_label)
+        # FM only: 750 us de-emphasis like a real FM rig (off = flat, e.g. for data signals).
+        self.fm_deemph_check = QtWidgets.QCheckBox("De-emphasis")
+        self.fm_deemph_check.setChecked(config.FM_DEEMPH_DEFAULT)
+        self.fm_deemph_check.setToolTip(
+            "750 µs de-emphasis (6 dB/octave) as in every FM receiver -- matches the pre-emphasis "
+            "of real FM transmitters and of pluto-tx.")
+        self.fm_deemph_check.setVisible(demod_mode == AdvancedRxFlowgraph.MODE_FM)
+        self.fm_deemph_check.toggled.connect(self._on_fm_deemph_changed)
+        demod_row.addWidget(self.fm_deemph_check)
         audio_tab_layout.addLayout(demod_row)
 
         # RADE status row -- only VISIBLE in RADE mode, same "hide the whole
@@ -2180,6 +2189,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m17_row_widget.setVisible(is_m17_mode)
         if not is_m17_mode:
             self.m17_status_label.setText("No signal")
+        self.fm_deemph_check.setVisible(mode == AdvancedRxFlowgraph.MODE_FM)
 
         if not is_rade_mode and not is_m17_mode:
             # The width slider always shows/edits whichever mode is now
@@ -2208,6 +2218,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.tb.set_demod_mode(mode)
         self._sync_waterfall()
+
+    def _on_fm_deemph_changed(self, checked):
+        if self.tb is not None:
+            self.tb.set_fm_deemphasis(checked)
 
     def _on_width_changed(self, value):
         self.width_label.setText(f"{value} Hz")
@@ -2570,7 +2584,8 @@ class MainWindow(QtWidgets.QMainWindow):
             new_tb = AdvancedRxFlowgraph(
                 uri=self.tb.uri, frequency=freq, sample_rate=new_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                fm_demod_width_hz=fm_width, fm_deemphasis=self.fm_deemph_check.isChecked(),
+                ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
                 buffer_size=self.buffer_size_combo.currentData(),
@@ -2627,7 +2642,8 @@ class MainWindow(QtWidgets.QMainWindow):
             new_tb = AdvancedRxFlowgraph(
                 uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                fm_demod_width_hz=fm_width, fm_deemphasis=self.fm_deemph_check.isChecked(),
+                ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
                 buffer_size=new_buffer_size,
@@ -2705,7 +2721,8 @@ class MainWindow(QtWidgets.QMainWindow):
             new_tb = AdvancedRxFlowgraph(
                 uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                fm_demod_width_hz=fm_width, fm_deemphasis=self.fm_deemph_check.isChecked(),
+                ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=self._audio_device, on_m17_fields=self._on_m17_fields,
                 buffer_size=self.buffer_size_combo.currentData(),
@@ -2769,7 +2786,8 @@ class MainWindow(QtWidgets.QMainWindow):
             new_tb = AdvancedRxFlowgraph(
                 uri=self.tb.uri, frequency=freq, sample_rate=self.tb.sample_rate,
                 demod_mode=demod_mode, nf_gain=nf_gain, fft_size=fft_size,
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                fm_demod_width_hz=fm_width, fm_deemphasis=self.fm_deemph_check.isChecked(),
+                ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 audio_device=new_device, on_m17_fields=self._on_m17_fields,
                 buffer_size=self.buffer_size_combo.currentData(),
@@ -2913,7 +2931,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 demod_mode=self.demod_combo.currentData(),
                 nf_gain=self.nf_gain_slider.value() / 100.0,
                 fft_size=self.fft_size_combo.currentData(),
-                fm_demod_width_hz=fm_width, ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
+                fm_demod_width_hz=fm_width, fm_deemphasis=self.fm_deemph_check.isChecked(),
+                ssb_demod_width_hz=ssb_width, baseband_width_hz=baseband_width,
                 device_type=device_cls.device_type, on_filebroadcast_frame=self._on_filebroadcast_frame,
                 on_m17_fields=self._on_m17_fields,
                 audio_device=self._audio_device,

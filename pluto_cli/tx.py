@@ -154,6 +154,16 @@ def add_fm_subparser(subparsers):
         help=f"Tone deviation in %% of the FM deviation (default {tx_config.SUBTONE_LEVEL_DEFAULT_PCT}, "
              f"range {lo}-{hi}); the voice is reduced by the same amount",
     )
+    p.add_argument(
+        "--deviation", type=float, default=tx_config.FM_DEVIATION_HZ, metavar="HZ",
+        choices=tx_config.FM_DEVIATION_CHOICES_HZ,
+        help=f"Peak FM deviation: {' or '.join(f'{d:g}' for d in tx_config.FM_DEVIATION_CHOICES_HZ)} "
+             f"(default {tx_config.FM_DEVIATION_HZ:g}; 5000 = wide, what many 2m repeaters expect)",
+    )
+    p.add_argument(
+        "--no-preemphasis", action="store_true",
+        help="Disable the 750 us pre-emphasis (on by default; every FM receiver de-emphasises)",
+    )
     p.set_defaults(func=run_fm)
 
 
@@ -183,6 +193,8 @@ def run_fm(args):
         return 2
 
     def post_construct(tb):
+        tb.set_fm_deviation(args.deviation)
+        tb.set_fm_preemphasis(not args.no_preemphasis)
         tb.set_subtone_level(args.tone_level)
         if args.ctcss is not None:
             tb.set_subtone("ctcss", args.ctcss)

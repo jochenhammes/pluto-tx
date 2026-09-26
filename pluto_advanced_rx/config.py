@@ -74,6 +74,8 @@ SSB_AUDIO_BAND_HZ = (300.0, 2700.0, 300.0)  # (f_lo, f_hi, trans_width), USB
 # quadrature_demod_cf -- distinct from FM_DEMOD_WIDTH below, which band-limits
 # the IF/RF signal BEFORE demod).
 FM_AUDIO_CUTOFF_HZ = 3000.0
+FM_DEEMPH_DEFAULT = True
+FM_DEEMPH_TAU_S = 750e-6  # narrowband voice FM, matches pluto_tx's pre-emphasis
 FM_AUDIO_TRANS_HZ = 500.0
 
 # --- Demodulator width: an actual, operator-adjustable channel filter, not

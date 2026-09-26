@@ -29,6 +29,7 @@ import sys
 from gnuradio import gr, blocks, filter, analog, digital
 
 from pluto_tx import audio_devices
+from pluto_tx import emphasis
 from gnuradio.filter import firdes
 from gnuradio.fft import window
 
@@ -97,6 +98,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  manual_gain_db=config.DEFAULT_MANUAL_GAIN_DB, demod_mode=MODE_FM,
                  nf_gain=config.DEFAULT_NF_GAIN, fft_size=config.DEFAULT_FFT_SIZE,
                  fm_demod_width_hz=config.FM_DEMOD_WIDTH_DEFAULT_HZ,
+                 fm_deemphasis=config.FM_DEEMPH_DEFAULT,
                  ssb_demod_width_hz=config.SSB_DEMOD_WIDTH_DEFAULT_HZ, device_type="pluto",
                  gain_values=None, on_filebroadcast_frame=None, on_psk31_char=None,
                  psk31_tone_hz=config.PSK31_DEFAULT_TONE_HZ, audio_device="",
@@ -366,6 +368,11 @@ class AdvancedRxFlowgraph(gr.top_block):
             taps=[], fractional_bw=0.47,
         )
         self.connect(self.fm_audio_filter, self.fm_resampler)
+        # 750 us de-emphasis at AUDIO_RATE, like every FM rig (pluto_tx pre-emphasises the
+        # same way); set_fm_deemphasis(False) swaps in unity taps.
+        self.fm_deemphasis = bool(fm_deemphasis)
+        self.fm_deemph = filter.iir_filter_ffd(*self._fm_deemph_taps(), False)
+        self.connect(self.fm_resampler, self.fm_deemph)
         self.connect(self.ssb_to_real, self.ssb_resampler)
         self.connect(self.baseband_demod, self.baseband_resampler)
 
@@ -402,7 +409,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         # does NOT -- port index 2 is the correct, explicit 3rd port here,
         # matching _initial_selector_index/set_demod_mode()'s own
         # {MODE_SSB: 1, MODE_BASEBAND: 2} port-index maps below.
-        self.connect(self.fm_resampler, (self.demod_selector, self.MODE_FM))
+        self.connect(self.fm_deemph, (self.demod_selector, self.MODE_FM))
         self.connect(self.ssb_resampler, (self.demod_selector, self.MODE_SSB))
         self.connect(self.baseband_resampler, (self.demod_selector, 2))
 
@@ -965,6 +972,15 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.fm_demod_width_hz = width_hz
         taps = firdes.low_pass(1.0, self.if_rate, width_hz / 2, config.FM_CHANNEL_TRANS_HZ, window.WIN_HAMMING)
         self.fm_channel_filter.set_taps(taps)
+
+    def set_fm_deemphasis(self, enabled: bool):
+        self.fm_deemphasis = bool(enabled)
+        self.fm_deemph.set_taps(*self._fm_deemph_taps())
+
+    def _fm_deemph_taps(self):
+        if not self.fm_deemphasis:
+            return [1.0], [1.0]
+        return emphasis.deemphasis_taps(config.AUDIO_RATE, config.FM_DEEMPH_TAU_S)
 
     def set_baseband_width(self, width_hz: float):
         """Retapes baseband_channel_filter in place -- exact mirror of

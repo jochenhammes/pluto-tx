@@ -164,7 +164,15 @@ Gesamthub bleibt gleich). Der Ton läuft ab PTT-Druck; dem Empfänger ~0,3 s
 Vorlauf geben, bevor gesprochen wird. Ein Squelch-Tail (Reverse-Burst bzw.
 DCS-Abschaltcode) wird nicht gesendet. SSB gibt es als USB und LSB
 (HF-Konvention: unter 10 MHz LSB); die Digimodes (PSK31, RTTY, …) bleiben USB.
-CLI: `pluto-cli tx fm --ctcss 88.5` bzw. `--dcs 023` / `--dcs 754I`,
+FM-Hub wählbar **±2,5 kHz** (schmal, 12,5-kHz-Raster) oder **±5 kHz** (breit — was
+viele 2m-Relais und Funkgeräte erwarten; schmal klingt dort 6 dB leiser). Die
+FM-Sprache wird wie bei jedem Funkgerät mit **750 µs Pre-Emphasis** gesendet
+(abschaltbar), damit sie nach der De-Emphasis des Empfängers nicht dumpf ankommt;
+`pluto-advanced-rx` macht im FM-Modus die passende De-Emphasis (ebenfalls
+abschaltbar). Tipp: Ein Headset/Nahbesprechungsmikro klingt deutlich besser als
+das eingebaute Laptop-Mikrofon (Raumhall).
+CLI: `pluto-cli tx fm --ctcss 88.5` bzw. `--dcs 023` / `--dcs 754I`, `--deviation 5000`,
+`--no-preemphasis`,
 `pluto-cli tx lsb`, `pluto-cli rx lsb`.
 
 **Digitalsprache mit M17.** `pluto-tx` sendet, jeder M17-fähige

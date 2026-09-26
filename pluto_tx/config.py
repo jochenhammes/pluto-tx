@@ -86,6 +86,21 @@ NF_FILTER_PRESETS = {
 }
 
 FM_DEVIATION_HZ = 2500.0  # narrowband voice FM default
+# Selectable peak deviation: 2.5 kHz = 12.5 kHz channel ("narrow"), 5 kHz = classic 25 kHz
+# ("wide") -- many 2m repeaters/rigs still expect wide; narrow into a wide rig is 6 dB quieter.
+FM_DEVIATION_CHOICES_HZ = (2500.0, 5000.0)
+# --- FM-only voice stages after the shared dynamics chain (limiter), in this order:
+# drive -> pre-emphasis -> clipper -> splatter low-pass -> subtone mix. Measured offline on
+# da2jh-test.wav: without the drive the compressor (no makeup gain) left speech peaks at ~0.3,
+# i.e. only ~800 Hz p99 deviation of 2.5 kHz; with these values p99 ~74 %, peak ~103 %
+# (low-pass overshoot of the clipped peaks), ~1 % of samples clipped. SSB never sees them.
+FM_DRIVE_DB = 12.0
+FM_PREEMPH_DEFAULT = True
+FM_PREEMPH_TAU_S = 750e-6  # narrowband voice FM (6 dB/oct across 300-3000 Hz), see emphasis.py
+FM_PREEMPH_F_HI_HZ = 12_000.0
+FM_CLIP_LEVEL = 0.75
+FM_SPLATTER_CUTOFF_HZ = 3000.0
+FM_SPLATTER_TRANS_HZ = 500.0
 # Sub-audible tone (CTCSS/DCS) in FM mode: level as a fraction of FM_DEVIATION_HZ; the voice is
 # scaled to (1 - level) while a tone is active so the total stays within FM_DEVIATION_HZ.
 SUBTONE_LEVEL_DEFAULT_PCT = 12
@@ -114,6 +129,8 @@ DEFAULT_NF_GAIN = 1.0  # manual audio drive multiplier, applied after the compre
 # flowgraph.py for the wiring. Values below are starting points from general
 # broadcast-audio convention, not yet re-validated against this project's
 # actual mic/WAV levels -- treat as a reasonable default, not gospel.
+AGC_ATTACK_RATE = 0.01  # analog.agc2_ff rates, per sample (see flowgraph.py)
+AGC_DECAY_RATE = 1e-4
 GATE_THRESHOLD_DB = -50.0
 GATE_ALPHA = 0.0001  # analog.pwr_squelch_ff's internal averaging filter gain
 GATE_RAMP_SAMPLES = 480  # ~10ms at AUDIO_RATE, sinusoidal attack/release ramp

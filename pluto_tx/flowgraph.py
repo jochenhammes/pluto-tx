@@ -32,6 +32,7 @@ from . import dcs
 from . import devices
 from . import digitext
 from . import dynamics
+from . import emphasis
 from . import filebroadcast
 from .filebroadcast_source import FileBroadcastSource
 from . import psk31
@@ -283,7 +284,11 @@ class PlutoTxFlowgraph(gr.top_block):
         # seen on the RTL-SDR waterfall. A bounded max_gain keeps normal
         # operation clean; the rail_ff below is the hard backstop for the
         # rare transient that still overshoots.
-        self.agc = analog.agc2_ff(0.2, 0.005, 0.3, 1.0)
+        # Rates are per sample: attack 0.01 (~2 ms), decay 1e-4 (~0.2 s). The former
+        # 0.2/0.005 (decay ~4 ms) re-levelled INSIDE each speech pitch period
+        # (two-tone IMD only -36 dB, a hard/"tinny" sound); these give -70 dB with
+        # the same levelling range (measured offline, steady-state output unchanged).
+        self.agc = analog.agc2_ff(config.AGC_ATTACK_RATE, config.AGC_DECAY_RATE, 0.3, 1.0)
         self.agc.set_max_gain(4.0)
 
         # Manual "mic gain" trim, applied AFTER the AGC so it's a direct,
@@ -330,8 +335,22 @@ class PlutoTxFlowgraph(gr.top_block):
             interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
             taps=[], fractional_bw=0.4,
         )
-        self.fm_sensitivity = 2 * math.pi * config.FM_DEVIATION_HZ / quad_rate
+        self._quad_rate = quad_rate
+        self.fm_deviation_hz = config.FM_DEVIATION_HZ
+        self.fm_sensitivity = 2 * math.pi * self.fm_deviation_hz / quad_rate
         self.fm_mod = analog.frequency_modulator_fc(self.fm_sensitivity)
+
+        # FM-only voice stages (config.FM_DRIVE_DB comment): drive, pre-emphasis
+        # (bypass = unity taps), clipper, splatter low-pass removing the clipper's
+        # harmonics. Only the RF FM branch uses them -- an audio-only device's radio
+        # pre-emphasises itself (see fm_audio_adder below), SSB taps the limiter.
+        self.fm_preemphasis = config.FM_PREEMPH_DEFAULT
+        self.fm_drive = blocks.multiply_const_ff(10 ** (config.FM_DRIVE_DB / 20))
+        self.fm_preemph = filter.iir_filter_ffd(*self._fm_preemph_taps(), False)
+        self.fm_clipper = analog.rail_ff(-config.FM_CLIP_LEVEL, config.FM_CLIP_LEVEL)
+        self.fm_splatter = filter.fir_filter_fff(1, firdes.low_pass(
+            1.0, config.AUDIO_RATE, config.FM_SPLATTER_CUTOFF_HZ, config.FM_SPLATTER_TRANS_HZ,
+            window.WIN_HAMMING))
 
         # --- SSB branch: Hilbert AT AUDIO RATE (see module docstring),
         # then resample the resulting complex analytic signal up to TX rate.
@@ -363,6 +382,10 @@ class PlutoTxFlowgraph(gr.top_block):
         self.dcs_source = blocks.vector_source_f(dcs.render_loop(dcs.STANDARD_CODES[0]).tolist(), True)
         self.dcs_gain = blocks.multiply_const_ff(0.0)
         self.subtone_adder = blocks.add_ff(1)
+        # Audio-only devices get the voice straight from the limiter (no FM-only stages)
+        # plus the same tone outputs, summed separately.
+        self.fm_audio_voice = blocks.multiply_const_ff(1.0)
+        self.fm_audio_adder = blocks.add_ff(1)
 
         # --- M17 branch (optional, only if gr-m17 is installed): deliberately
         # bypasses the entire analog dynamics chain above (nf_filter/gate/
@@ -960,8 +983,16 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.nf_gain, self.limiter_smooth)
         self.connect(self.limiter_smooth, self.limiter)
 
-        self.connect(self.limiter, self.subtone_voice)
+        self.connect(self.limiter, self.fm_drive)
+        self.connect(self.fm_drive, self.fm_preemph)
+        self.connect(self.fm_preemph, self.fm_clipper)
+        self.connect(self.fm_clipper, self.fm_splatter)
+        self.connect(self.fm_splatter, self.subtone_voice)
         self.connect(self.subtone_voice, (self.subtone_adder, 0))
+        self.connect(self.limiter, self.fm_audio_voice)
+        self.connect(self.fm_audio_voice, (self.fm_audio_adder, 0))
+        self.connect(self.ctcss_gain, (self.fm_audio_adder, 1))
+        self.connect(self.dcs_gain, (self.fm_audio_adder, 2))
         self.connect(self.ctcss_source, self.ctcss_gain)
         self.connect(self.ctcss_gain, (self.subtone_adder, 1))
         self.connect(self.dcs_source, self.dcs_gain)
@@ -972,15 +1003,16 @@ class PlutoTxFlowgraph(gr.top_block):
 
         # --- FM Soundcard/AIOC output alternative: an audio-only device (Soundcard
         # or AIOC, see devices/soundcard.py, devices/aioc.py) needs the modulating
-        # audio itself (voice + CTCSS/DCS, subtone_adder's output, already at
-        # AUDIO_RATE -- no resampling needed here unlike RADE's branch below)
+        # audio itself (voice + CTCSS/DCS, fm_audio_adder's output -- without the
+        # RF-only drive/pre-emphasis/clipper stages, the radio does its own --
+        # already at AUDIO_RATE, no resampling needed here unlike RADE's branch below)
         # instead of an FM-modulated IQ carrier: the connected radio (an external
         # SSB/FM rig, or a UV-K5 via AIOC) does the FM modulation itself from that
         # audio fed into its mic input. Exact structural mirror of the RADE
         # Soundcard branch below: starts muted, unmuted only by key_ptt()/
         # unkey_ptt()'s MODE_FM + is_audio_only() branch.
         self.fm_audio_gain = blocks.multiply_const_ff(0.0)
-        self.connect(self.subtone_adder, self.fm_audio_gain)
+        self.connect(self.fm_audio_adder, self.fm_audio_gain)
         # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
         # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
@@ -1336,6 +1368,26 @@ class PlutoTxFlowgraph(gr.top_block):
         self.ctcss_gain.set_k(level if kind == "ctcss" else 0.0)
         self.dcs_gain.set_k(level if kind == "dcs" else 0.0)
         self.subtone_voice.set_k(1.0 if kind == "off" else 1.0 - level)
+        self.fm_audio_voice.set_k(1.0 if kind == "off" else 1.0 - level)
+
+    # --- FM deviation / pre-emphasis ----------------------------------------
+
+    def set_fm_deviation(self, hz):
+        """Peak FM deviation (config.FM_DEVIATION_CHOICES_HZ); live, no rebuild. The
+        sub-audible tone level is a fraction of it and scales along."""
+        self.fm_deviation_hz = float(hz)
+        self.fm_sensitivity = 2 * math.pi * self.fm_deviation_hz / self._quad_rate
+        self.fm_mod.set_sensitivity(self.fm_sensitivity)
+
+    def set_fm_preemphasis(self, enabled):
+        self.fm_preemphasis = bool(enabled)
+        self.fm_preemph.set_taps(*self._fm_preemph_taps())
+
+    def _fm_preemph_taps(self):
+        if not self.fm_preemphasis:
+            return [1.0], [1.0]
+        return emphasis.preemphasis_taps(config.AUDIO_RATE, config.FM_PREEMPH_TAU_S,
+                                         config.FM_PREEMPH_F_HI_HZ)
 
     # --- Meshtastic ----------------------------------------------------
 
