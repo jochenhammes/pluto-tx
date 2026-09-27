@@ -256,10 +256,15 @@ TX-Aussendungen über Luft auf kurze Distanz (Pluto+ mit −40 dB → RTL-SDR) v
 und ft8_lib dekodiert, Tonabstand exakt 6,25 Hz, Zeitlage DT +0,1 s (die App
 sendet Stille, bis die Uhr den Slotstart erreicht, unabhängig davon, wie lange das
 Umschalten des Flowgraphen dauert); RX gegen echte 20-m-Aufnahmen (KiwiSDR) und
-die Referenzaufnahmen von ft8_lib. Direkt nach dem Start von Sender und Empfänger
-wurde eine Drift bis etwa −1,3 Hz/s innerhalb einer Aussendung gemessen (klingt
-nach wenigen Minuten ab, welches Gerät es ist, ist noch offen): die erste Aussendung
-wurde dann nicht dekodiert, die folgenden schon. Geräte vor dem Betrieb warmlaufen lassen.
+die Referenzaufnahmen von ft8_lib.
+**Driftkompensation (Pluto):** Der Referenzoszillator des Pluto+ erwärmt sich beim Senden;
+gemessen wurden −3 ppb/s in der ersten Aussendung nach dem Start, danach ≈ −1 ppb/s (auf
+23 cm −1,2 bis −3,8 Hz/s innerhalb einer Aussendung, also mehrere Tonabstände: nicht
+dekodierbar). Die App verzerrt das Signal deshalb mit einem gegenläufigen Chirp vor, nach
+einem gemessenen Modell (Dauerdrift beim Senden + Aufwärmen nach dem Start + Abkühlen in
+Pausen, `config.FT8_DRIFT_MODEL`). Auf 23 cm blieb damit ≤ 0,5 Hz/s Restdrift, 3 von 3
+Aussendungen wurden dekodiert, ohne Kompensation 0 von 3. Das Modell stammt von einem
+Gerät; abschaltbar per „Drift comp.“ bzw. `--no-drift-comp`.
 CLI: `pluto-cli tx ft8 --call DA2JH --locator JO31` (CQ) bzw. `--kind report
 --dx DL1ABC --report -12`, `--message "..."`, `--slot even|odd`, und
 `pluto-cli rx ssb --freq 14074000 --digimode ft8`.

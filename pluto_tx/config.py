@@ -721,4 +721,15 @@ FT8_LATE_START_MAX_S = 1.0
 # unlock() alone takes 0.5-2 s on a Pluto+); Ft8TimedSource (ft8_source.py) sends silence until then.
 FT8_KEY_EARLY_S = 3.0
 # Buffering between Ft8TimedSource and the antenna: the source switches to the signal this much early.
-FT8_TX_LATENCY_S = 0.0
+# Measured 0.11 s on a Pluto+ (signal onset vs. slot start in time-stamped RTL-SDR captures).
+FT8_TX_LATENCY_S = 0.11
+# Reference-oscillator drift of the device while it transmits FT8, pre-compensated with an opposite
+# chirp (PlutoTxFlowgraph.ft8_drift_hz_per_s()), in ppb/s of the carrier frequency:
+#   tx + warmup * exp(-t_since_flowgraph_start / warmup_tau) + cooldown * (1 - exp(-pause / cooldown_tau))
+# Fitted to a Pluto+ (Tezuka) on 2026-09-27 over the air at 432.15 and 1296.15 MHz, 22 frames measured
+# against their known tones: -2.8..-3.0 ppb/s in the first frame after start, ~-0.95 ppb/s once warm at
+# a 30 s cadence, ~-1.2 ppb/s after 2-5 min pauses. Residual error ~+-0.3 ppb/s (+-0.4 Hz/s at
+# 1296 MHz instead of -1.2..-1.4 Hz/s uncompensated; FT8's tone spacing is 6.25 Hz per 12.6 s frame).
+FT8_DRIFT_MODEL = {
+    "pluto": dict(tx_ppb_s=-0.95, warmup_ppb_s=-1.9, warmup_tau_s=45.0, cooldown_ppb_s=-0.3, cooldown_tau_s=60.0),
+}

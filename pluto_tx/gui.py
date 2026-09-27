@@ -996,6 +996,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ft8_slot_combo.setToolTip("Transmit in the even or odd 15 s period; answer a station in the "
                                        "opposite period to the one it transmits in. Repeats go every 30 s.")
         ft8_row3.addWidget(self.ft8_slot_combo)
+        self.ft8_drift_check = QtWidgets.QCheckBox("Drift comp.")
+        self.ft8_drift_check.setChecked(True)
+        self.ft8_drift_check.setToolTip(
+            "Pre-compensate the Pluto's oscillator drift while transmitting (measured model, "
+            "config.FT8_DRIFT_MODEL): without it a Pluto+ drifts ~1-4 Hz/s on 23 cm within a frame, "
+            "enough to make it undecodable. Only shown for devices with a drift model.")
+        self.ft8_drift_check.toggled.connect(self._on_ft8_drift_toggled)
+        ft8_row3.addWidget(self.ft8_drift_check)
         self.ft8_clock_label = QtWidgets.QLabel("")
         self.ft8_clock_label.setStyleSheet("font-family: monospace;")
         ft8_row3.addWidget(self.ft8_clock_label)
@@ -1915,8 +1923,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ft8_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_FT8)
         connected = getattr(self, "_ft8_connected", True)
         for w in (self.ft8_mycall_edit, self.ft8_locator_edit, self.ft8_dxcall_edit, self.ft8_report_spin,
-                  self.ft8_kind_combo, self.ft8_message_edit, self.ft8_offset_spin, self.ft8_slot_combo):
+                  self.ft8_kind_combo, self.ft8_message_edit, self.ft8_offset_spin, self.ft8_slot_combo,
+                  self.ft8_drift_check):
             w.setEnabled(connected)
+        self.ft8_drift_check.setVisible(self.device_type_combo.currentData() in config.FT8_DRIFT_MODEL)
 
     def _on_ft8_fields_changed(self, *_):
         for key, edit in (("my_call", self.ft8_mycall_edit), ("locator", self.ft8_locator_edit)):
@@ -1937,6 +1947,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is not None:
             self.tb.set_ft8_text(text)
         self._update_ft8_info()
+
+    def _on_ft8_drift_toggled(self, on):
+        if self.tb is not None:
+            self.tb.ft8_drift_comp_enabled = bool(on)
 
     def _on_ft8_offset_changed(self, value):
         if self.tb is not None:
@@ -2311,6 +2325,8 @@ class MainWindow(QtWidgets.QMainWindow):
         to sync the initial (PlutoSDR) selection -- split out from that
         handler so the initial call doesn't also wipe the uri_combo value
         the constructor was given."""
+        if hasattr(self, "ft8_drift_check"):
+            self.ft8_drift_check.setVisible(self.device_type_combo.currentData() in config.FT8_DRIFT_MODEL)
         self._update_device_connection_labels()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         is_rf = not device_cls.is_audio_only()
@@ -3390,6 +3406,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.device_type_combo.setEnabled(True)
             return
         new_tb.set_fine_offset(float(self.fine_slider.value()))
+        new_tb.ft8_drift_comp_enabled = self.ft8_drift_check.isChecked()
         new_tb.set_baseband_deviation(float(self.baseband_deviation_slider.value()))
         self._apply_subtone(new_tb)
         self._apply_fm_voice(new_tb)

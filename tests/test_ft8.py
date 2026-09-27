@@ -158,7 +158,8 @@ class TxFlowgraphTests(unittest.TestCase):
         self.assertIsNone(fg.ft8_start_at)                                       # consumed
         self.assertAlmostEqual(time.time() + fg.ft8_hold_s, start + fg.ft8_duration_s, delta=0.1)
         time.sleep(fg.ft8_hold_s + 0.5)
-        self.assertAlmostEqual(fg.ft8_source.signal_started_at, start, delta=0.05)   # silence until then
+        from pluto_tx import config          # silence until then, minus the device latency it compensates
+        self.assertAlmostEqual(fg.ft8_source.signal_started_at, start - config.FT8_TX_LATENCY_S, delta=0.05)
         fg.unkey_ptt()
         iq = np.array(fg.device.sink.data(), dtype=np.complex64)
         on = np.flatnonzero(np.abs(iq) > 0.05)
@@ -176,6 +177,43 @@ class TxFlowgraphTests(unittest.TestCase):
                 ph = np.unwrap(np.angle(seg))
                 f = np.polyfit(np.arange(len(ph)) / 12000, ph, 1)[0] / (2 * np.pi)
                 self.assertAlmostEqual(f, 1500 + 6.25 * tones[k], delta=0.05)
+
+    def test_drift_precompensation_chirp_and_model(self):
+        from pluto_tx import config
+        model = dict(tx_ppb_s=-1.0, warmup_ppb_s=-2.0, warmup_tau_s=45.0, cooldown_ppb_s=-0.3, cooldown_tau_s=60.0)
+        with mock.patch.dict(config.FT8_DRIFT_MODEL, {"fake": model}):
+            fg = txf.PlutoTxFlowgraph(device_type="fake", mode=FT8, ft8_text="CQ DA2JH JO31",
+                                      frequency=1_000_000_000.0)
+            fg.start()
+            self.addCleanup(lambda: (fg.stop(), fg.wait()))
+            # right after start: tx + warm-up (pause ~0) -> about -3 ppb/s = -3 Hz/s at 1 GHz
+            self.assertAlmostEqual(fg.ft8_drift_hz_per_s(), -3.0, delta=0.1)
+            with mock.patch("pluto_tx.flowgraph.time.monotonic", lambda: fg._run_started + 1000.0):
+                self.assertAlmostEqual(fg.ft8_drift_hz_per_s(), -1.3, delta=0.01)   # warm, long pause
+                fg._ft8_last_tx_end = fg._run_started + 1000.0 - 17.0
+                self.assertAlmostEqual(fg.ft8_drift_hz_per_s(), -1.0 - 0.3 * (1 - np.exp(-17 / 60)), delta=0.01)
+            fg.ft8_drift_comp_enabled = False
+            self.assertEqual(fg.ft8_drift_hz_per_s(), 0.0)
+            fg.ft8_drift_comp_enabled = True
+            with mock.patch.object(fg, "ft8_drift_hz_per_s", lambda: -1.0):
+                fg.key_ptt()
+                time.sleep(fg.ft8_hold_s + 0.5)
+                fg.unkey_ptt()
+        iq = np.array(fg.device.sink.data(), dtype=np.complex64)
+        on = np.flatnonzero(np.abs(iq) > 0.05)
+        bb = signal.resample_poly(iq[on[0]:on[-1]], 3, 625)
+        tones = ft8_ctypes.encode_message("CQ DA2JH JO31")
+        offs = []
+        for k in range(79):
+            seg = bb[k * 1920 + 480:(k + 1) * 1920 - 480]
+            sp = np.abs(np.fft.fft(seg * np.hanning(len(seg)), 1 << 16))
+            f = np.fft.fftfreq(1 << 16, 1 / 12000)
+            m = (f > 1400) & (f < 1600)
+            offs.append(f[m][np.argmax(sp[m])] - 6.25 * tones[k])
+        # the baseband rises by +1 Hz/s so that a device falling by 1 Hz/s stays put on the air
+        self.assertAlmostEqual(np.polyfit(np.arange(79) * 0.16, offs, 1)[0], 1.0, delta=0.05)
+        self.assertEqual(config.FT8_DRIFT_MODEL.get("fake"), None)
+        self.assertIn("pluto", config.FT8_DRIFT_MODEL)
 
     def test_problem_reports(self):
         fg = txf.PlutoTxFlowgraph(device_type="fake", mode=FT8, ft8_text="")

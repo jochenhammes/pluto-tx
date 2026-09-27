@@ -690,6 +690,12 @@ class PlutoTxFlowgraph(gr.top_block):
         self.ft8_start_at = None
         self.ft8_hold_s = 0.0          # keyed time of the current transmission (silence + signal)
         self.ft8_swap_s = None         # duration of the last swap, informational
+        # Oscillator drift pre-compensation (see ft8_drift_hz_per_s()): on by default where the device
+        # has measured drift parameters (config.FT8_DRIFT_MODEL), off everywhere else.
+        self.ft8_drift_comp_enabled = True
+        self.ft8_last_drift_comp_hz_s = 0.0
+        self._run_started = None
+        self._ft8_last_tx_end = None   # monotonic time the last FT8 transmission ended (cool-down term)
         self.ft8_source = blocks.vector_source_c([0j], repeat=False)
         ft8_interp, ft8_decim = quad_rate // g, config.AUDIO_RATE // g
         self.ft8_tx_resampler = filter.rational_resampler_ccf(
@@ -1859,17 +1865,46 @@ class PlutoTxFlowgraph(gr.top_block):
         """Synthesize the pending message ahead of its slot (raises ValueError if it can't be sent)."""
         self._ensure_ft8_iq()
 
+    def start(self, *args, **kwargs):
+        self._run_started = time.monotonic()
+        return super().start(*args, **kwargs)
+
+    def ft8_drift_hz_per_s(self):
+        """Predicted carrier drift (Hz/s) during the next FT8 transmission, from the measured
+        per-device model (config.FT8_DRIFT_MODEL): a constant part while transmitting (the TX chain
+        heats the reference oscillator), a warm-up part decaying with the time since the flowgraph
+        started, and a part that grows with the pause since the previous transmission (the device
+        cools down in between). 0 for devices without a model."""
+        model = config.FT8_DRIFT_MODEL.get(self.device.device_type)
+        if model is None or not self.ft8_drift_comp_enabled:
+            return 0.0
+        now = time.monotonic()
+        age = 0.0 if self._run_started is None else now - self._run_started
+        last = self._ft8_last_tx_end if self._ft8_last_tx_end is not None else self._run_started
+        pause = age if last is None else now - last
+        ppb = (model["tx_ppb_s"] + model["warmup_ppb_s"] * math.exp(-age / model["warmup_tau_s"])
+               + model["cooldown_ppb_s"] * (1.0 - math.exp(-pause / model["cooldown_tau_s"])))
+        return ppb * 1e-9 * self.nominal_freq_hz
+
     def _ft8_start_source(self):
         """Mirrors _pocsag_start_source(): fresh one-shot source, swapped in only once the path is keyed.
         With ft8_start_at set, the Ft8TimedSource sends silence until then, so the swap's own
         (variable) duration doesn't shift the signal."""
         t0 = time.monotonic()
         start_at, self.ft8_start_at = self.ft8_start_at, None
+        # Pre-compensate the predicted drift with an opposite linear chirp, so the frequency on the air
+        # stays constant over the 12.6 s frame (FT8 tolerates an offset, not drift within a frame).
+        drift = self.ft8_drift_hz_per_s()
+        self.ft8_last_drift_comp_hz_s = drift
+        iq = self._ft8_iq
+        if drift:
+            t = np.arange(len(iq)) / config.AUDIO_RATE
+            iq = (iq * np.exp(-1j * np.pi * drift * t * t)).astype(np.complex64)
         self.lock()
         try:
             self.disconnect(self.ft8_source, self.ft8_tx_resampler)
             self.disconnect(self.ft8_source, self.ft8_to_audio)
-            self.ft8_source = Ft8TimedSource(self._ft8_iq, config.AUDIO_RATE, start_at,
+            self.ft8_source = Ft8TimedSource(iq, config.AUDIO_RATE, start_at,
                                              lead_s=config.FT8_TX_LATENCY_S)
             # small output buffer: little silence queued ahead, so the clock-based switch stays exact
             self.ft8_source.set_max_output_buffer(2048)
@@ -2228,6 +2263,8 @@ class PlutoTxFlowgraph(gr.top_block):
         audio-injected signal into a conventional radio -- out of scope here
         regardless of rade_eoo_enabled). The SDR device is never touched, so
         there's nothing to power down."""
+        if self.mode == self.MODE_FT8 and self._keyed:
+            self._ft8_last_tx_end = time.monotonic()
         if self.mode == self.MODE_FM and self.device.is_audio_only():
             # Structural mirror of the RADE branch just below. needs_ptt_control's
             # post_unkey() call (AIOC only -- see devices/base.py) runs AFTER gain

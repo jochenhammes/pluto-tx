@@ -425,6 +425,9 @@ def add_ft8_subparser(subparsers):
     p.add_argument("--slot", choices=("any", "even", "odd"), default="any",
                    help="Transmit in the next slot (any), in :00/:30 (even) or :15/:45 (odd). Repeats of "
                         "--repeat-count go every 30 s in the same parity; --repeat-interval is ignored.")
+    p.add_argument("--no-drift-comp", action="store_true",
+                   help="Don't pre-compensate the device's oscillator drift during the frame (on by default "
+                        "for devices with a measured drift model, currently pluto)")
     p.set_defaults(func=run_ft8)
 
 
@@ -439,6 +442,7 @@ def run_ft8(args):
         return 1
 
     def preflight(tb):
+        tb.ft8_drift_comp_enabled = not args.no_drift_comp
         problem = tb.ft8_problem()
         if problem:  # before any RF action
             emitter.error(problem)
