@@ -26,11 +26,13 @@ established in this project for e.g. psk31's own Varicode table copies
 (see pluto_advanced_rx/psk31_deframer.py's own docstring).
 """
 import ctypes
+import os
 
 import numpy as np
 
 FT8_AVAILABLE = False
 _lib = None
+_REPO_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ft8_lib", "libft8wrap.so")
 
 # --- Protocol constants (ft8/constants.h) -- fixed, not queried at runtime.
 FTX_PAYLOAD_LENGTH_BYTES = 10  # holds 77 bits of payload
@@ -62,7 +64,9 @@ class FtxMessageOffsets(ctypes.Structure):
     ]
 
 
-_LOOKUP_HASH_FN = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_uint32, ctypes.c_char_p)
+# callsign_out is a writable char[12] buffer owned by ft8_lib -- c_void_p (not c_char_p, which ctypes
+# would hand over as an immutable bytes copy) so a real lookup can memmove the callsign into it.
+_LOOKUP_HASH_FN = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_uint32, ctypes.c_void_p)
 _SAVE_HASH_FN = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_uint32)
 
 
@@ -155,9 +159,16 @@ class Monitor(ctypes.Structure):
 def _load():
     global _lib, FT8_AVAILABLE
 
-    try:
-        lib = ctypes.CDLL("libft8wrap.so")
-    except OSError:
+    # LD_LIBRARY_PATH (launcher) first, then the in-repo build install-ft8.sh produces, so tests and
+    # a plain `python3 -m pluto_tx` find it without a regenerated launcher.
+    lib = None
+    for name in ("libft8wrap.so", _REPO_LIB):
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if lib is None:
         return
 
     try:

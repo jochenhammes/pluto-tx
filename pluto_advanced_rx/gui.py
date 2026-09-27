@@ -35,6 +35,8 @@ from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_
 from .meshcore_state import MeshcoreState
 from .meshtastic_state import MeshtasticState
 from .pocsag_state import PocsagState
+from .ft8_rx import Ft8State
+from . import ft8_decoder
 if LORA_AVAILABLE:
     from pluto_tx import meshtastic_codec
 if MESHCORE_AVAILABLE:
@@ -46,6 +48,17 @@ from .devices.rtlsdr import DIRECT_SAMPLING_NYQUIST_HZ, DIRECT_SAMPLING_RANGE_HZ
 
 DIRECT_SAMPLING_MHZ = (DIRECT_SAMPLING_RANGE_HZ[0] / 1e6, DIRECT_SAMPLING_RANGE_HZ[1] / 1e6)
 DIRECT_SAMPLING_DEFAULT_MHZ = 7.1  # start frequency when direct sampling is switched on out of range
+
+
+def _ntp_synchronized():
+    """True if systemd reports the clock as NTP-synchronised (or if that can't be determined)."""
+    import subprocess
+    try:
+        out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        return out != "no"
+    except Exception:
+        return True
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -104,6 +117,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pocsag_rendered_version = -1
         self._pocsag_last_batches = 0
         self._pocsag_last_activity_time = 0.0
+        # FT8 decodes -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._ft8_state = Ft8State()
+        self._ft8_rendered_version = -1
         self._link_state = None  # (id(tb), status) of the last network-link status shown, see _update_link_status()
         # Carrier (Hz) to restore when leaving Meshtastic, whose presets retune the receiver.
         self._freq_before_lora = None
@@ -254,6 +270,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", "psk31")
         self.digimode_combo.addItem("RTTY", "rtty")
         self.digimode_combo.addItem("POCSAG (Paging)", "pocsag")
+        self.digimode_combo.addItem("FT8", "ft8")
+        if not ft8_decoder.available_backends():
+            ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData("ft8"))
+            ft8_item.setEnabled(False)
+            ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
         self.digimode_combo.addItem("MeshCore (LoRa)", "meshcore")
         if not MESHCORE_AVAILABLE:
@@ -579,6 +600,47 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(pocsag_group, 1)
         self.pocsag_group_widget = pocsag_group
         self._update_pocsag_signal_label()
+
+        # --- FT8: decode list per 15 s UTC slot (USB at the tuned dial frequency, e.g. 14.074 /
+        # 144.174 MHz). Double-click a row to copy the sending station's call for the TX app.
+        ft8_group = QtWidgets.QWidget()
+        ft8_layout = QtWidgets.QVBoxLayout(ft8_group)
+        ft8_layout.setContentsMargins(0, 0, 0, 0)
+        ft8_row = QtWidgets.QHBoxLayout()
+        self.ft8_cq_only_checkbox = QtWidgets.QCheckBox("Only CQ")
+        self.ft8_cq_only_checkbox.toggled.connect(lambda _on: self._render_ft8_table())
+        ft8_row.addWidget(self.ft8_cq_only_checkbox)
+        ft8_row.addWidget(QtWidgets.QLabel("Highlight:"))
+        self.ft8_highlight_edit = QtWidgets.QLineEdit()
+        self.ft8_highlight_edit.setPlaceholderText("your call")
+        self.ft8_highlight_edit.setFixedWidth(90)
+        self.ft8_highlight_edit.setToolTip("Messages containing this text (e.g. your callsign) are highlighted")
+        self.ft8_highlight_edit.textChanged.connect(lambda _t: self._render_ft8_table())
+        ft8_row.addWidget(self.ft8_highlight_edit)
+        ft8_row.addStretch(1)
+        self.ft8_clear_button = QtWidgets.QPushButton("Clear")
+        self.ft8_clear_button.clicked.connect(self._on_ft8_clear_clicked)
+        ft8_row.addWidget(self.ft8_clear_button)
+        ft8_layout.addLayout(ft8_row)
+        self.ft8_signal_label = QtWidgets.QLabel()
+        self.ft8_signal_label.setWordWrap(True)
+        ft8_layout.addWidget(self.ft8_signal_label)
+        self.ft8_table = QtWidgets.QTableWidget(0, 5)
+        self.ft8_table.setHorizontalHeaderLabels(["UTC", "dB", "DT", "Freq", "Message"])
+        self.ft8_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.ft8_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.ft8_table.verticalHeader().setVisible(False)
+        self.ft8_table.horizontalHeader().setStretchLastSection(True)
+        self.ft8_table.setMinimumHeight(160)
+        self.ft8_table.setStyleSheet("font-family: monospace;")
+        self.ft8_table.setToolTip("Decoded FT8 messages (dB = SNR in 2500 Hz, DT = time offset in s, Freq = "
+                                  "audio offset above the dial frequency). Double-click copies the sender's call.")
+        self.ft8_table.cellDoubleClicked.connect(self._on_ft8_row_double_clicked)
+        ft8_layout.addWidget(self.ft8_table)
+        digimodes_tab_layout.addWidget(ft8_group, 1)
+        self.ft8_group_widget = ft8_group
+        self._ft8_clock_ok = _ntp_synchronized()
+        self._update_ft8_signal_label()
 
         self._apply_meshtastic_channels()
         self._update_meshtastic_regulatory_label()
@@ -1117,6 +1179,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshtastic_group_widget.setVisible(selected == "meshtastic")
         self.meshcore_group_widget.setVisible(selected == "meshcore")
         self.pocsag_group_widget.setVisible(selected == "pocsag")
+        self.ft8_group_widget.setVisible(selected == "ft8")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -1404,6 +1467,8 @@ class MainWindow(QtWidgets.QMainWindow):
             on_meshcore_packet=self._meshcore_state.on_frame,
             meshcore_preset_index=self._meshcore_preset_index(),
             on_pocsag_message=self._pocsag_state.on_message,
+            on_ft8_decodes=self._ft8_state.on_decodes,
+            ft8_my_call=self._ft8_tx_setting("my_call"), ft8_my_grid=self._ft8_tx_setting("locator"),
         )
 
     def _sync_waterfall(self):
@@ -1929,6 +1994,81 @@ class MainWindow(QtWidgets.QMainWindow):
         if at_bottom:
             table.scrollToBottom()
 
+    @staticmethod
+    def _ft8_tx_setting(key):
+        """Own call/locator as entered in pluto-tx's FT8 group (shared QSettings) -- lets jt9 decode
+        replies to us with a-priori knowledge."""
+        try:
+            return str(QtCore.QSettings("pluto-tx", "ft8").value(key, "") or "")
+        except Exception:
+            return ""
+
+    def _on_ft8_clear_clicked(self):
+        self._ft8_state.clear()
+        self._render_ft8_table()
+
+    def _update_ft8_signal_label(self):
+        clock = "" if self._ft8_clock_ok else (
+            "WARNING: system clock not NTP-synchronised -- FT8 needs UTC within ~1 s. ")
+        if self.tb is None:
+            self.ft8_signal_label.setText(clock + "Not connected.")
+            return
+        if self.tb.active_digimode != "ft8" or self.tb.ft8_receiver is None:
+            self.ft8_signal_label.setText(clock + "Not listening.")
+            return
+        recv = self.tb.ft8_receiver
+        if recv.last_error:
+            self.ft8_signal_label.setText(clock + f"Decoder error: {recv.last_error}")
+            return
+        backend = recv.decoder.backend if recv.decoder is not None else "starting"
+        backend = {"jt9": "WSJT-X jt9", "ft8lib": "ft8_lib"}.get(backend, backend)
+        if self.tb.device.is_audio_only():
+            where = "the audio input"
+        else:
+            where = f"{(self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6:.4f} MHz USB"
+        now = time.time()
+        next_decode = (now - config.FT8_DECODE_AT_S) // 15 * 15 + 15 + config.FT8_DECODE_AT_S
+        last = self._ft8_state.last_slot
+        last_txt = "" if last is None else \
+            f", last slot {time.strftime('%H:%M:%S', time.gmtime(last[0]))}: {last[1]} decode(s)"
+        self.ft8_signal_label.setText(clock + f"Listening on {where} ({backend}), next decode in "
+                                      f"{max(0, next_decode - now):.0f} s{last_txt}.")
+
+    def _render_ft8_table(self):
+        version, rows = self._ft8_state.get_snapshot()
+        self._ft8_rendered_version = version
+        if self.ft8_cq_only_checkbox.isChecked():
+            rows = [r for r in rows if r["text"].startswith("CQ ")]
+        mark = self.ft8_highlight_edit.text().strip().upper()
+        table = self.ft8_table
+        scrollbar = table.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            cells = [row["utc"], f"{row['snr']:+.0f}", f"{row['dt']:+.1f}", f"{row['freq']:.0f}", row["text"]]
+            hit = bool(mark) and mark in row["text"].split()
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c < 4:
+                    item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                if hit:
+                    item.setBackground(QtCore.Qt.yellow)
+                elif row["text"].startswith("CQ "):
+                    item.setForeground(QtCore.Qt.darkGreen)
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        if at_bottom:
+            table.scrollToBottom()
+
+    def _on_ft8_row_double_clicked(self, row, _col):
+        item = self.ft8_table.item(row, 4)
+        if item is None:
+            return
+        call = ft8_decoder.sender_call(item.text())
+        if call:
+            QtWidgets.QApplication.clipboard().setText(call)
+            self.status_label.setText(f"Copied {call} to the clipboard.")
+
     def _update_meshtastic_signal_label(self):
         if self._meshtastic_psk_error:
             self.meshtastic_signal_label.setText(
@@ -2025,6 +2165,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._render_meshtastic_table()
         if self._pocsag_state.version != self._pocsag_rendered_version:
             self._render_pocsag_table()
+        self._update_ft8_signal_label()
+        if self._ft8_state.version != self._ft8_rendered_version:
+            self._render_ft8_table()
         # Independent of self.tb's connection state (unlike the AFC step
         # below) -- each transcript lives on MainWindow and should keep
         # showing whatever was already received even across a rebuild,

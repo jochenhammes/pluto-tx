@@ -39,7 +39,11 @@ from . import psk31
 from . import pocsag
 from . import pocsag_codec
 from . import rtty
+from . import ft8
+from .ft8_source import Ft8TimedSource
 from . import lora_airtime
+
+FT8_AVAILABLE = ft8.ft8_ctypes.FT8_AVAILABLE  # needs libft8wrap.so (install-ft8.sh)
 
 # LoRa/Meshtastic is optional: gr-lora_sdr is a from-source build (see
 # install-lora.sh) and the protocol layer needs the `meshtastic` +
@@ -131,6 +135,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_LSB = 11
     MODE_POCSAG = 12
     MODE_MESHCORE = 13
+    MODE_FT8 = 14
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -143,6 +148,7 @@ class PlutoTxFlowgraph(gr.top_block):
                  rtty_text="", rtty_mark_hz=config.RTTY_MARK_HZ_DEFAULT,
                  rtty_shift_hz=config.RTTY_SHIFT_HZ_DEFAULT, rtty_baud_rate=config.RTTY_BAUD_RATE_DEFAULT,
                  rtty_reverse=False,
+                 ft8_text="", ft8_tone_hz=config.FT8_DEFAULT_TONE_HZ,
                  meshtastic_preset_index=0, meshtastic_text="", meshtastic_node_id=None,
                  meshtastic_channel_name=None, meshtastic_psk_b64=config.MESHTASTIC_DEFAULT_PSK_B64,
                  meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign="",
@@ -179,6 +185,8 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode == self.MODE_FREEDV and not FREEDV_AVAILABLE:
             mode = self.MODE_FM
         if mode == self.MODE_RADE and not RADE_AVAILABLE:
+            mode = self.MODE_FM
+        if mode == self.MODE_FT8 and not FT8_AVAILABLE:
             mode = self.MODE_FM
         if mode == self.MODE_MESHCORE and (not MESHCORE_AVAILABLE or device_cls.is_audio_only()):
             mode = self.MODE_FM  # LoRa needs an RF device and gr-lora_sdr + cryptography
@@ -666,6 +674,34 @@ class PlutoTxFlowgraph(gr.top_block):
         # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
         # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
+        # --- FT8 branch (pluto_tx/ft8.py). IQ-native: the GFSK is synthesised directly as complex
+        # baseband exp(j*phi) (an ideal USB signal by construction, no Hilbert step), resampled up with
+        # EXPLICIT taps (flat to 4 kHz, images at 48 kHz - f fully rejected). Its real part is the
+        # Soundcard/AIOC audio. One-shot source per transmission, started only after keying like
+        # POCSAG's (unthrottled source, see _pocsag_start_source()); slot timing is the caller's job.
+        self.ft8_text = ft8_text
+        self.ft8_tone_hz = float(ft8_tone_hz)
+        self._ft8_iq = None
+        self._ft8_iq_dirty = True
+        self.ft8_duration_s = 0.0
+        # Slot timing: the source swap (lock()/unlock() of the running graph) takes 0.5-2 s on a
+        # Pluto, so the caller keys a few seconds early and sets ft8_start_at (epoch s); the swapped-in
+        # Ft8TimedSource emits silence until the wall clock reaches it (see ft8_source.py).
+        self.ft8_start_at = None
+        self.ft8_hold_s = 0.0          # keyed time of the current transmission (silence + signal)
+        self.ft8_swap_s = None         # duration of the last swap, informational
+        self.ft8_source = blocks.vector_source_c([0j], repeat=False)
+        ft8_interp, ft8_decim = quad_rate // g, config.AUDIO_RATE // g
+        self.ft8_tx_resampler = filter.rational_resampler_ccf(
+            interpolation=ft8_interp, decimation=ft8_decim,
+            taps=firdes.low_pass(ft8_interp, config.AUDIO_RATE * ft8_interp, 12_000, 16_000, window.WIN_HAMMING),
+        )
+        self.ft8_to_audio = blocks.complex_to_real()
+        self.ft8_audio_gain = blocks.multiply_const_ff(0.0)  # starts muted, like tx_gain/psk31_audio_gain
+        self.connect(self.ft8_source, self.ft8_tx_resampler)
+        self.connect(self.ft8_source, self.ft8_to_audio)
+        self.connect(self.ft8_to_audio, self.ft8_audio_gain)
+
         # --- Meshtastic (LoRa CSS) branch. IQ-native like M17/RADE: gr-lora_sdr's
         # modulate emits complex baseband directly at 4x the LoRa bandwidth, so
         # the only thing needed on top is a resampler up to the device rate --
@@ -933,6 +969,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
         self._null_sink_pocsag = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see POCSAG branch above
+        self._null_sink_ft8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see FT8 branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -1157,6 +1194,7 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         producers[self.MODE_POCSAG] = self.pocsag_mod  # always available, see its branch above
+        producers[self.MODE_FT8] = self.ft8_tx_resampler  # always built (mode falls back without ft8_lib)
         return producers
 
     def _null_sink_for(self, producer):
@@ -1182,6 +1220,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_baseband
         if producer is self.pocsag_mod:
             return self._null_sink_pocsag
+        if producer is self.ft8_tx_resampler:
+            return self._null_sink_ft8
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def _soundcard_audio_producer_map(self):
@@ -1195,6 +1235,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self.MODE_DIGITEXT: self.digitext_audio_gain,
             self.MODE_PSK31: self.psk31_audio_gain,
             self.MODE_RTTY: self.rtty_audio_gain,
+            self.MODE_FT8: self.ft8_audio_gain,
         }
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_audio_gain
@@ -1255,7 +1296,7 @@ class PlutoTxFlowgraph(gr.top_block):
 
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
                     self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
-                    self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG):
+                    self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG, self.MODE_FT8):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
@@ -1782,6 +1823,64 @@ class PlutoTxFlowgraph(gr.top_block):
             )
             self._rtty_audio_dirty = False
 
+    # --- FT8 ------------------------------------------------------------
+    def set_ft8_text(self, text: str):
+        self.ft8_text = text
+        self._ft8_iq_dirty = True
+
+    def set_ft8_tone_hz(self, tone_hz: float):
+        self.ft8_tone_hz = float(tone_hz)
+        self._ft8_iq_dirty = True
+
+    def ft8_problem(self):
+        """None if the current FT8 message can be sent, else a short reason."""
+        if not FT8_AVAILABLE:
+            return "FT8 not available (run install-ft8.sh)"
+        lo, hi = config.FT8_TONE_RANGE_HZ
+        if not lo <= self.ft8_tone_hz <= hi:
+            return f"audio offset must be {lo:.0f}..{hi:.0f} Hz"
+        if not self.ft8_text.strip():
+            return "no message"
+        if ft8.ft8_ctypes.encode_message(self.ft8_text.strip().upper()) is None:
+            return "message can't be packed as FT8 (check callsigns/locator/report)"
+        return None
+
+    def _ensure_ft8_iq(self):
+        problem = self.ft8_problem()
+        if problem:
+            raise ValueError(problem)
+        if self._ft8_iq_dirty or self._ft8_iq is None:
+            self._ft8_iq, self.ft8_duration_s = ft8.encode_iq(
+                self.ft8_text.strip().upper(), config.AUDIO_RATE, self.ft8_tone_hz, amplitude=config.FT8_IQ_LEVEL,
+                tail_s=config.FT8_TAIL_S + self.device.tx_end_loss_s)
+            self._ft8_iq_dirty = False
+
+    def prepare_ft8(self):
+        """Synthesize the pending message ahead of its slot (raises ValueError if it can't be sent)."""
+        self._ensure_ft8_iq()
+
+    def _ft8_start_source(self):
+        """Mirrors _pocsag_start_source(): fresh one-shot source, swapped in only once the path is keyed.
+        With ft8_start_at set, the Ft8TimedSource sends silence until then, so the swap's own
+        (variable) duration doesn't shift the signal."""
+        t0 = time.monotonic()
+        start_at, self.ft8_start_at = self.ft8_start_at, None
+        self.lock()
+        try:
+            self.disconnect(self.ft8_source, self.ft8_tx_resampler)
+            self.disconnect(self.ft8_source, self.ft8_to_audio)
+            self.ft8_source = Ft8TimedSource(self._ft8_iq, config.AUDIO_RATE, start_at,
+                                             lead_s=config.FT8_TX_LATENCY_S)
+            # small output buffer: little silence queued ahead, so the clock-based switch stays exact
+            self.ft8_source.set_max_output_buffer(2048)
+            self.connect(self.ft8_source, self.ft8_tx_resampler)
+            self.connect(self.ft8_source, self.ft8_to_audio)
+        finally:
+            self.unlock()
+        self.ft8_swap_s = time.monotonic() - t0
+        wait_s = 0.0 if start_at is None else max(0.0, start_at - time.time())
+        self.ft8_hold_s = wait_s + len(self._ft8_iq) / config.AUDIO_RATE
+
     def add_filebroadcast_file(self, filename: str, data: bytes):
         """Adds a file to the rotation -- can be called at ANY time,
         including while already keyed/mid-broadcast (Phase 2's whole point,
@@ -2003,6 +2102,16 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.psk31_audio_gain.set_k(1.0)
                 self._keyed = True
                 return
+        if self.mode == self.MODE_FT8:
+            self._ensure_ft8_iq()  # raises ValueError before any RF action; the source starts last
+            if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
+                self.tx_gain.set_k(1.0 + 0j)
+                self.ft8_audio_gain.set_k(config.FT8_SOUNDCARD_LEVEL)
+                self._keyed = True
+                self._ft8_start_source()
+                return
         if self.mode == self.MODE_POCSAG:
             self._ensure_pocsag_audio()  # raises ValueError before any RF action; the source starts last
             if self.device.is_audio_only():
@@ -2073,6 +2182,8 @@ class PlutoTxFlowgraph(gr.top_block):
         self._keyed = True
         if self.mode == self.MODE_POCSAG:
             self._pocsag_start_source()
+        if self.mode == self.MODE_FT8:
+            self._ft8_start_source()
 
     def unkey_ptt(self):
         """PTT release. FM/SSB: mute tx_gain FIRST (severs the actual RF
@@ -2154,6 +2265,13 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.mode == self.MODE_RTTY and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.rtty_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
+        if self.mode == self.MODE_FT8 and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.ft8_audio_gain.set_k(0.0)
             if self.device.needs_ptt_control:
                 self.device.post_unkey()
             self._keyed = False

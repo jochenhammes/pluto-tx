@@ -24,11 +24,9 @@
 # (pack a message, encode tones, decode it back) that it actually works,
 # not just that the symbols are present.
 #
-# FT8 touches BOTH pluto_tx (TX) and pluto_advanced_rx (RX) -- like RADE,
-# unlike M17 -- so this script updates both launchers, merge-safely (see
-# install-rade.sh's own identical comment for the full reasoning: a
-# pre-existing LD_LIBRARY_PATH entry from M17/RADE's own installers must
-# survive, not get clobbered).
+# FT8 touches BOTH pluto_tx (TX) and pluto_advanced_rx (RX). The RX side
+# prefers WSJT-X's jt9 decoder when installed (this script installs the
+# wsjtx apt package for it) and falls back to ft8_lib.
 #
 # Usage:
 #   ./install.sh        # first, if you haven't already
@@ -37,11 +35,9 @@
 # Safe to re-run.
 set -euo pipefail
 
-# See install-m17.sh/install-rade.sh's identical guard for the full
-# reasoning: this script builds into $SCRIPT_DIR/ft8_lib and regenerates
-# launchers under $HOME/.local/bin -- running it with sudo/as root sets
-# $HOME=/root and silently sends the regenerated launchers to the wrong
-# place.
+# See install-m17.sh/install-rade.sh's identical guard: run as root, the
+# build in $SCRIPT_DIR/ft8_lib would end up root-owned and the apt step
+# below already calls sudo itself.
 if [ "$(id -u)" = "0" ]; then
     echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
     echo "Richtig: ./install-ft8.sh   (das Skript ruft sudo intern fuer apt-get auf)" >&2
@@ -92,7 +88,10 @@ fi
 echo
 echo "Checking out the pinned commit $FT8_LIB_COMMIT..."
 git -C "$FT8_LIB_DIR" fetch origin
+git -C "$FT8_LIB_DIR" checkout -- common/monitor.c 2>/dev/null || true   # undo the log patch below
 git -C "$FT8_LIB_DIR" checkout "$FT8_LIB_COMMIT"
+# monitor_init() logs its FFT sizes to stderr at INFO level, once per decoded slot -- quiet it.
+sed -i 's/^#define LOG_LEVEL LOG_INFO$/#define LOG_LEVEL LOG_WARN/' "$FT8_LIB_DIR/common/monitor.c"
 
 echo
 echo "Building libft8.a (position-independent, so it can be re-linked into"
@@ -136,66 +135,23 @@ for fn in ("ftx_message_encode", "ftx_message_decode", "ft8_encode", "ft4_encode
 print("libft8wrap.so imports cleanly via ctypes, expected function surface present")
 EOF
 
-# Fold this script's LIBDIR addition into an existing launcher's current
-# export lines instead of overwriting them -- see install-rade.sh's own
-# identical comment for why (M17/RADE's own LD_LIBRARY_PATH entries must
-# survive). Membership-checked against every ':'-separated component, not
-# just whole-string equality -- a plain equality check only catches the
-# single-entry case; on a launcher that already has multiple entries, it
-# would keep re-prepending LIBDIR on every rerun.
-prepend_if_missing() {
-    local dir="$1" list="$2"
-    if [ -z "$list" ]; then
-        echo "$dir"
-        return
-    fi
-    local IFS=':'
-    local part
-    for part in $list; do
-        if [ "$part" = "$dir" ]; then
-            echo "$list"
-            return
-        fi
-    done
-    echo "$dir:$list"
-}
-
-regenerate_launcher() {
-    local name="$1" module_invocation="$2"
-    local launcher="$HOME/.local/bin/$name"
-    local existing_ld="" existing_path=""
-    if [ -f "$launcher" ]; then
-        existing_ld="$(grep -oP '(?<=export LD_LIBRARY_PATH=")[^"]*(?=:\$\{LD_LIBRARY_PATH:-\}")' "$launcher" 2>/dev/null || true)"
-        # FT8 itself has no companion executable to add to PATH (unlike
-        # RADE's lpcnet_demo) -- but a PRE-EXISTING PATH export line (from
-        # install-rade.sh's own launcher regeneration) must still be
-        # preserved here, or rewriting the launcher below would silently
-        # drop it.
-        existing_path="$(grep -oP '(?<=export PATH=")[^"]*(?=:\$\{PATH:-\}")' "$launcher" 2>/dev/null || true)"
-    fi
-    local new_ld
-    new_ld="$(prepend_if_missing "$LIBDIR" "$existing_ld")"
-
-    mkdir -p "$HOME/.local/bin"
-    {
-        echo "#!/usr/bin/env bash"
-        echo "export LD_LIBRARY_PATH=\"$new_ld:\${LD_LIBRARY_PATH:-}\""
-        if [ -n "$existing_path" ]; then
-            echo "export PATH=\"$existing_path:\${PATH:-}\""
-        fi
-        echo "cd \"$SCRIPT_DIR\" && exec python3 -m $module_invocation \"\$@\""
-    } > "$launcher"
-    chmod +x "$launcher"
-    echo "Updated $launcher"
-}
+# No launcher changes needed: pluto_tx/ft8_ctypes.py and pluto_advanced_rx/ft8_ctypes.py load
+# $SCRIPT_DIR/ft8_lib/libft8wrap.so directly when it isn't on LD_LIBRARY_PATH.
 
 echo
-echo "Updating the pluto-tx and pluto-advanced-rx launchers..."
-regenerate_launcher "pluto-tx" "pluto_tx.app --gui"
-regenerate_launcher "pluto-advanced-rx" "pluto_advanced_rx.app"
+if command -v jt9 >/dev/null 2>&1; then
+    echo "WSJT-X's jt9 decoder found ($(command -v jt9)) -- the RX app uses it for FT8 (finds ~1.5x as"
+    echo "many signals as ft8_lib alone)."
+else
+    echo "Installing WSJT-X for its jt9 decoder (the RX app's preferred FT8 decoder; ft8_lib is the"
+    echo "fallback and finds ~2/3 as many signals). You may be asked for your sudo password."
+    export NEEDRESTART_MODE=a
+    if ! sudo apt-get install -y wsjtx; then
+        echo "WARNING: could not install wsjtx -- FT8 RX will use ft8_lib only." >&2
+    fi
+fi
 
 echo
 echo "== Done =="
-echo "FT8 support will be wired into pluto_tx/pluto_advanced_rx in a later"
-echo "step of this integration -- this script only builds libft8wrap.so and"
-echo "updates the launchers so it'll be found once that code lands."
+echo "FT8 is available in pluto-tx (Digimodes tab), pluto-advanced-rx (Digimodes tab) and"
+echo "pluto-cli (tx ft8 / rx ... --digimode ft8)."

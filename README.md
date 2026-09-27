@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, Meshtastic/LoRa, MeshCore/LoRa) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, Meshtastic/LoRa, MeshCore/LoRa) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -27,7 +27,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
@@ -111,6 +111,18 @@ eigenständige Skript `pluto_tx/tx-stdin.py` (Audio von stdin senden,
 z. B. für eine TTS-Pipe ohne die GUI) nutzt dieselbe PTT-Logik
 (`pluto_tx/aioc_ptt.py`) und funktioniert unabhängig von der App weiter.
 
+### Optional: FT8
+
+```
+./install-ft8.sh
+```
+
+Baut [`kgoba/ft8_lib`](https://github.com/kgoba/ft8_lib) (MIT, gepinnter
+Commit) nach `ft8_lib/` im Projektverzeichnis (Encoder für TX, Ersatz-Decoder
+für RX) und installiert, falls noch nicht vorhanden, das apt-Paket `wsjtx`,
+dessen Decoder `jt9` die RX-App bevorzugt nutzt (findet rund 1,5-mal so viele
+Signale wie ft8_lib). Ohne das Skript ist FT8 in beiden Apps ausgegraut.
+
 ### Optional: RADE V1
 
 ```
@@ -184,7 +196,7 @@ Ziel) direkt in der GUI einstellbar.
 Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
 gewählten primären Empfangsmodus (man kann z.B. FM hören und
 gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
-aber nur einer der Digimodes (PSK31, RTTY, POCSAG **oder** Meshtastic) kann
+aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8 **oder** Meshtastic) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
@@ -222,6 +234,35 @@ Die Inhalte fremder, nichtöffentlicher Funkrufe sind nicht für den Empfänger
 bestimmt: die App zeigt sie an, speichert sie aber nicht.
 CLI: `pluto-cli tx pocsag --ric 1234567 --text "DA2JH Test" --baud 1200`,
 `pluto-cli rx fm --digimode pocsag`.
+
+**FT8.** Im Digimodes-Reiter beider Apps, mit manueller QSO-Führung: man wählt
+pro 15-s-Slot die Nachricht selbst (CQ, Antwort mit Locator, Rapport, R+Rapport,
+RRR, RR73, 73 oder Freitext bis 13 Zeichen), ein automatischer QSO-Ablauf wie in
+WSJT-X ist bewusst nicht eingebaut. **TX:** Eigenes Rufzeichen und Locator werden
+gespeichert, DX-Rufzeichen und Rapport einstellbar, Audio-Offset 200–2900 Hz
+(Signal 50 Hz breit), Slot „Next“, „1st (:00/:30)“ oder „2nd (:15/:45)“. PTT
+schaltet die Aussendung für den nächsten passenden UTC-Slot scharf (Countdown
+auf dem PTT-Knopf, ein erneuter Klick bricht ab). Gesendet wird 0,5 s nach
+Slotbeginn, Repeat wiederholt alle 30 s im selben Slot. Das GFSK-Signal wird
+direkt als komplexes Basisband erzeugt (USB, kein Hilbert-Umweg), Soundkarte
+und AIOC bekommen dasselbe Signal als Audio. **RX:** USB-Demodulation auf der
+eingestellten Dial-Frequenz (z. B. 14,074 / 144,174 MHz), Dekodierung jedes
+Slots am Slotende mit WSJT-X' `jt9` (oder ft8_lib als Rückfall), Tabelle mit
+UTC, SNR, DT, Frequenz und Nachricht; „Only CQ“-Filter, Hervorhebung des
+eigenen Rufzeichens, Doppelklick kopiert das Rufzeichen des Absenders. Mit der
+Soundkarte wird das Audio eines USB-Empfängers dekodiert. Die Systemuhr muss
+per NTP synchron sein (±1 s), beide Apps warnen sonst. Verifiziert:
+TX-Aussendungen über Luft auf kurze Distanz (Pluto+ mit −40 dB → RTL-SDR) von `jt9`
+und ft8_lib dekodiert, Tonabstand exakt 6,25 Hz, Zeitlage DT +0,1 s (die App
+sendet Stille, bis die Uhr den Slotstart erreicht, unabhängig davon, wie lange das
+Umschalten des Flowgraphen dauert); RX gegen echte 20-m-Aufnahmen (KiwiSDR) und
+die Referenzaufnahmen von ft8_lib. Direkt nach dem Start von Sender und Empfänger
+wurde eine Drift bis etwa −1,3 Hz/s innerhalb einer Aussendung gemessen (klingt
+nach wenigen Minuten ab, welches Gerät es ist, ist noch offen): die erste Aussendung
+wurde dann nicht dekodiert, die folgenden schon. Geräte vor dem Betrieb warmlaufen lassen.
+CLI: `pluto-cli tx ft8 --call DA2JH --locator JO31` (CQ) bzw. `--kind report
+--dx DL1ABC --report -12`, `--message "..."`, `--slot even|odd`, und
+`pluto-cli rx ssb --freq 14074000 --digimode ft8`.
 
 **Meshtastic (LoRa).** Sendet und empfängt echte Meshtastic-Pakete
 (alle neun Modem-Presets LongFast … ShortTurbo, je EU433/EU868; Träger und
@@ -345,8 +386,8 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
-| **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG (Audio + echtes serielles PTT) | — (kein RX-Backend) |
+| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8 | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8 (Audio + echtes serielles PTT) | — (kein RX-Backend) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und
 Connect/Disconnect-Buttons. **Nur `pluto-tx`** hat zusätzlich ein
@@ -377,7 +418,7 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
 ## Struktur
 
 ```
-install.sh / install-m17.sh / install-rade.sh / install-lora.sh
+install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh
 pluto_tx/                 # Sende-App
 ├── config.py                # geräteunabhängige Konstanten
 ├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard)
@@ -388,11 +429,13 @@ pluto_tx/                 # Sende-App
 ├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
 ├── meshcore_codec.py / meshcore_identity.py  # MeshCore: Paketformat, Adverts (Ed25519), Gruppentext (AES-ECB+HMAC), Knotenidentität
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
+├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib
 ├── gui.py / app.py
 └── da2jh-test.wav              # Standard-Testaufnahme
 pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
 ├── waterfall_widget.py         # eigenes pyqtgraph-Wasserfall-Widget
+├── ft8_decoder.py / ft8_rx.py   # FT8: Slot-Decoder (jt9 oder ft8_lib), UTC-Slot-Empfänger
 └── ...
 tests/                     # Unit-/Loopback-Tests: python3 -m unittest discover tests
 pluto_cli/                 # headless CLI, importiert die beiden Apps oben, siehe pluto_cli/README.md
@@ -466,13 +509,15 @@ offene Punkte stehen am Ende dieser Datei.
 
 [GPLv3](LICENSE) — Copyright (C) 2026 Jochen Hammes (DA2JH).
 
-Die optionalen Abhängigkeiten `gr-m17` (GPLv2) und `rade_c`/RADE
-(BSD-2-Clause) werden von `install-m17.sh`/`install-rade.sh` separat aus
-ihren jeweiligen Quellen gebaut, nicht in diesem Repo vendort.
+Die optionalen Abhängigkeiten `gr-m17` (GPLv2), `rade_c`/RADE
+(BSD-2-Clause) und `ft8_lib` (MIT) werden von `install-m17.sh`/`install-rade.sh`/
+`install-ft8.sh` separat aus ihren jeweiligen Quellen gebaut, nicht in diesem Repo
+vendort. WSJT-X (`jt9`, GPLv3) wird als eigenständiges Programm aufgerufen.
 
 ## Danksagungen
 
 - [gr-m17](https://github.com/M17-Project/gr-m17) / [M17-Project](https://m17project.org/) — offener Digitalsprache-Standard
 - [freedv/rade_c](https://github.com/freedv/rade_c) — RADE (Radio Autoencoder)
 - [FreeDV](https://freedv.org/) / [codec2](https://github.com/drowe67/codec2) — HF-Digitalsprache
+- [kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) und [WSJT-X](https://wsjt.sourceforge.io/) — FT8
 - [GNU Radio](https://www.gnuradio.org/) — das Fundament, auf dem alles hier aufbaut

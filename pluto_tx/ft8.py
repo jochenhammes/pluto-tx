@@ -1,17 +1,14 @@
-"""Pure-function FT8 audio encoder: renders a plain-text FT8 message (e.g.
-"CQ DA2JH JO31") into a real audio waveform (8-tone Gaussian-filtered
-continuous-phase FSK, GFSK, at the fixed 31.25/... no -- FT8's fixed
-6.25 baud symbol rate) suitable for injection into this app's existing
-Hilbert-based USB modulation chain -- same architectural role as
-digitext.py's/psk31.py's own encode_text()/encode_message(), same
-(audio, duration_s) return shape.
+"""FT8 transmit side: renders a plain-text FT8 message (e.g. "CQ DA2JH JO31") into the 8-tone
+Gaussian-filtered continuous-phase FSK (GFSK) waveform -- as complex baseband for the SDR path
+(encode_iq(), an ideal USB signal by construction) or as real audio (encode_message()) -- plus the
+standard QSO message texts (compose()) and UTC slot planning (plan_transmission()).
 
 Message packing (text -> 77-bit payload -> 79 tone indices 0..7) is done
 by ft8_ctypes.encode_message(), which calls into kgoba/ft8_lib (a real,
 existing open-source FT8 codec, built by install-ft8.sh) -- NOT
-reimplemented here. This module's own job is exactly one thing: turn
-those 79 tone indices into an actual audio waveform, ourselves, in pure
-Python/numpy.
+reimplemented here. This module's own job is turning those 79 tone
+indices into the actual waveform, in pure Python/numpy. Verified with
+WSJT-X's jt9 as an independent decoder, in software and over the air.
 
 ## GFSK synthesis
 
@@ -71,12 +68,12 @@ def _gfsk_pulse(n_spsym: int, symbol_bt: float) -> np.ndarray:
     return (erf(arg1) - erf(arg2)) / 2
 
 
-def _synth_gfsk(symbols: np.ndarray, f0_hz: float, symbol_bt: float,
-                 symbol_period: float, sample_rate: float) -> np.ndarray:
-    """Direct port of ft8_lib's synth_gfsk() (demo/gen_ft8.c). symbols:
-    tone indices (0..7 for FT8). Returns real audio samples (unnormalized
-    sin() output, amplitude ~1.0, matching the reference exactly --
-    encode_message() below applies the operator-facing amplitude scale)."""
+def _gfsk_phase(symbols: np.ndarray, f0_hz: float, symbol_bt: float,
+                symbol_period: float, sample_rate: float):
+    """Direct port of ft8_lib's synth_gfsk() (demo/gen_ft8.c), split into its two halves: returns
+    (phi, env) -- the continuous GFSK phase for tone indices `symbols` (0..7) on a base tone of f0_hz,
+    and the raised-cosine key-up/key-down envelope. _synth_gfsk() turns them into real audio,
+    encode_iq() into complex baseband."""
     n_sym = len(symbols)
     n_spsym = int(round(sample_rate * symbol_period))
     n_wave = n_sym * n_spsym
@@ -104,19 +101,41 @@ def _synth_gfsk(symbols: np.ndarray, f0_hz: float, symbol_bt: float,
     # fmodf(..., 2*pi) in the original is a numerical-range nicety with no
     # effect on sin()'s own output, safely dropped in this vectorized port.
     phase_increments = dphi[n_spsym:n_spsym + n_wave]
-    phi_at_k = np.cumsum(phase_increments) - phase_increments
-    signal = np.sin(phi_at_k)
+    phi = np.cumsum(phase_increments) - phase_increments
 
     # Raised-cosine (half-Hann) ramp at the very start/end, same as the
     # reference -- a clean key-up/key-down envelope.
+    env = np.ones(n_wave)
     n_ramp = n_spsym // 8
     if n_ramp > 0:
         i = np.arange(n_ramp)
-        env = (1 - np.cos(2 * np.pi * i / (2 * n_ramp))) / 2
-        signal[:n_ramp] *= env
-        signal[n_wave - n_ramp:n_wave] *= env[::-1]
+        ramp = (1 - np.cos(2 * np.pi * i / (2 * n_ramp))) / 2
+        env[:n_ramp] = ramp
+        env[n_wave - n_ramp:] = ramp[::-1]
+    return phi, env
 
-    return signal.astype(np.float32)
+
+def _synth_gfsk(symbols: np.ndarray, f0_hz: float, symbol_bt: float,
+                 symbol_period: float, sample_rate: float) -> np.ndarray:
+    """Real audio (sin(phi)), exactly ft8_lib's synth_gfsk() output."""
+    phi, env = _gfsk_phase(symbols, f0_hz, symbol_bt, symbol_period, sample_rate)
+    return (np.sin(phi) * env).astype(np.float32)
+
+
+def encode_iq(text: str, sample_rate: float, tone_hz: float, amplitude: float = 0.7, tail_s: float = 0.0):
+    """Complex baseband exp(j*phi) of the message, tone 0 at +tone_hz: an ideal single-sideband signal
+    by construction (no Hilbert transform involved), for the SDR TX path. Its real part is valid FT8
+    audio for Soundcard/AIOC. Returns (iq: complex64, duration_s), or (None, 0.0) if the message can't
+    be packed. Only the 12.64 s signal plus tail_s of silence; slot timing is the caller's job."""
+    tones = ft8_ctypes.encode_message(text)
+    if tones is None:
+        return None, 0.0
+    phi, env = _gfsk_phase(tones, tone_hz, FT8_SYMBOL_BT, FT8_SYMBOL_PERIOD, sample_rate)
+    iq = amplitude * env * np.exp(1j * phi)
+    n_tail = int(round(tail_s * sample_rate))
+    if n_tail > 0:
+        iq = np.concatenate([iq, np.zeros(n_tail)])
+    return iq.astype(np.complex64), len(iq) / sample_rate
 
 
 def encode_message(text: str, sample_rate: float, tone_hz: float, amplitude: float = 0.7,
@@ -148,3 +167,84 @@ def encode_message(text: str, sample_rate: float, tone_hz: float, amplitude: flo
     else:
         duration_s = len(audio) / sample_rate
     return audio, duration_s
+
+
+# --- Standard QSO messages (manual sequencing: the operator picks one per slot) ---------------------
+MESSAGE_KINDS = (
+    ("cq", "CQ"),                    # CQ MYCALL LOC4
+    ("reply", "Reply (call + locator)"),  # DXCALL MYCALL LOC4
+    ("report", "Report"),            # DXCALL MYCALL -12
+    ("r_report", "R + report"),      # DXCALL MYCALL R-12
+    ("rrr", "RRR"),
+    ("rr73", "RR73"),
+    ("73", "73"),
+    ("free", "Free text"),           # up to 13 characters
+)
+FREE_TEXT_MAX = 13
+
+
+def format_report(db: int) -> str:
+    """WSJT-X style signal report: always signed, two digits (-09, +05)."""
+    db = max(-30, min(30, int(db)))
+    return f"{db:+03d}"
+
+
+def compose(kind: str, my_call: str, my_locator: str = "", dx_call: str = "", report_db: int = -10,
+            free_text: str = "") -> str:
+    """Build a standard FT8 message text; returns "" if a required field is missing."""
+    my = my_call.strip().upper()
+    dx = dx_call.strip().upper()
+    loc = my_locator.strip().upper()[:4]
+    if kind == "free":
+        return free_text.strip().upper()[:FREE_TEXT_MAX]
+    if not my:
+        return ""
+    if kind == "cq":
+        return f"CQ {my} {loc}".strip()
+    if not dx:
+        return ""
+    tail = {"reply": loc, "report": format_report(report_db), "r_report": "R" + format_report(report_db),
+            "rrr": "RRR", "rr73": "RR73", "73": "73"}.get(kind)
+    if tail is None:
+        raise ValueError(f"unknown FT8 message kind {kind!r}")
+    return f"{dx} {my} {tail}".strip()
+
+
+def can_encode(text: str) -> bool:
+    return bool(text.strip()) and ft8_ctypes.FT8_AVAILABLE and ft8_ctypes.encode_message(text.strip().upper()) is not None
+
+
+def next_slot_start(now: float, parity: str = "any", slot_s: float = FT8_SLOT_TIME) -> float:
+    """UTC epoch time of the next slot boundary matching `parity` ("even": :00/:30, "odd": :15/:45,
+    "any"), strictly after `now`."""
+    t = (int(now // slot_s) + 1) * slot_s
+    while parity != "any" and (int(t // slot_s) % 2 == 0) != (parity == "even"):
+        t += slot_s
+    return t
+
+
+def current_slot_start(now: float, slot_s: float = FT8_SLOT_TIME) -> float:
+    return (now // slot_s) * slot_s
+
+
+def slot_parity(t: float, slot_s: float = FT8_SLOT_TIME) -> str:
+    return "even" if int(t // slot_s) % 2 == 0 else "odd"
+
+
+def plan_transmission(now: float, parity: str = "any", key_early_s: float = 3.0, start_in_slot_s: float = 0.5,
+                      late_max_s: float = 1.0, slot_s: float = FT8_SLOT_TIME):
+    """-> (key_at, start_at): when to call key_ptt() and when the signal should start. The flowgraph
+    pads the signal with silence up to start_at at the moment it swaps the source in (see
+    PlutoTxFlowgraph.ft8_start_at), so keying just has to happen early enough (key_early_s covers the
+    graph lock, which varies from 0.05 to ~2.5 s on a Pluto). A matching slot whose nominal start is
+    at most late_max_s past still gets used (start as soon as possible: a larger DT at the receiver);
+    otherwise the next slot of the wanted parity ("even" = :00/:30, "odd" = :15/:45, "any")."""
+    cur = current_slot_start(now, slot_s)
+    ok = parity == "any" or slot_parity(cur, slot_s) == parity
+    nominal = cur + start_in_slot_s
+    if ok and now <= nominal + late_max_s:
+        start = max(nominal, now)
+        return max(now, start - key_early_s), start
+    slot = next_slot_start(now, parity, slot_s)
+    start = slot + start_in_slot_s
+    return max(now, start - key_early_s), start

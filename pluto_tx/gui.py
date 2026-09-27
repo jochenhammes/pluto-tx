@@ -5,6 +5,7 @@ against Qt5, and mixing two Qt runtimes in one process is a crash risk.
 """
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -18,10 +19,12 @@ from . import digitext
 from . import filebroadcast
 from . import pocsag
 from . import pocsag_codec
+from . import ft8
 from . import freq_correction
 from .devices import pluto as pluto_device
 from .flowgraph import (
     PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, MESHCORE_AVAILABLE,
+    FT8_AVAILABLE,
     _default_wav_path,
 )
 if LORA_AVAILABLE:
@@ -33,6 +36,16 @@ from .freedv_ctypes import FREEDV_MODE_2020, FREEDV_MODE_2020B
 
 # Right-hand waterfall column: about half of the width the waterfall had when it spanned the single-column window.
 WATERFALL_PANEL_MIN_WIDTH_PX = 400
+
+
+def _ntp_synchronized():
+    """True if systemd reports the clock as NTP-synchronised (or if that can't be determined)."""
+    try:
+        out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        return out != "no"
+    except Exception:
+        return True
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -80,7 +93,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
                                   PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
                                   PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE,
-                                  PlutoTxFlowgraph.MODE_POCSAG)
+                                  PlutoTxFlowgraph.MODE_POCSAG, PlutoTxFlowgraph.MODE_FT8)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -98,6 +111,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # Same per-press staleness guard for POCSAG's one-shot call timers.
         self._pocsag_ptt_epoch = 0
         self._meshcore_ptt_epoch = 0
+        # FT8: a PTT press arms a transmission for the next matching UTC slot; bumping this epoch
+        # cancels a pending one (and makes its auto-unkey timers stale, same guard as the others).
+        self._ft8_ptt_epoch = 0
+        self._ft8_waiting = False
+        self._ft8_tx_at = 0.0
+        self._ft8_start_at = 0.0
+        self._ft8_tick_timer = QtCore.QTimer(self)
+        self._ft8_tick_timer.setInterval(500)
+        self._ft8_tick_timer.timeout.connect(self._ft8_tick)
         # Repeat series state, see _repeat_begin()/_finish_one_shot().
         self._repeat_active = False
         self._repeat_total = 1
@@ -578,6 +600,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
         self.digimode_combo.addItem("RTTY", PlutoTxFlowgraph.MODE_RTTY)
         self.digimode_combo.addItem("POCSAG (Paging)", PlutoTxFlowgraph.MODE_POCSAG)
+        self.digimode_combo.addItem("FT8", PlutoTxFlowgraph.MODE_FT8)
+        if not FT8_AVAILABLE:
+            ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_FT8))
+            ft8_item.setEnabled(False)
+            ft8_item.setToolTip("ft8_lib is not built -- run install-ft8.sh")
         self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
         self.digimode_combo.addItem("MeshCore (LoRa)", PlutoTxFlowgraph.MODE_MESHCORE)
         if not MESHCORE_AVAILABLE:
@@ -905,6 +932,96 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.pocsag_charset_checkbox.toggled):
             signal_.connect(self._on_pocsag_changed)
 
+        # --- FT8 controls. Manual sequencing: the operator picks the message for the next slot
+        # (CQ, reply, report, RR73, ...), PTT arms it for the next matching 15 s UTC slot.
+        ft8_group = QtWidgets.QWidget()
+        ft8_layout = QtWidgets.QVBoxLayout(ft8_group)
+        ft8_layout.setContentsMargins(0, 0, 0, 0)
+        ft8_row1 = QtWidgets.QHBoxLayout()
+        ft8_row1.addWidget(QtWidgets.QLabel("My call:"))
+        self.ft8_mycall_edit = QtWidgets.QLineEdit(self._ft8_setting("my_call"))
+        self.ft8_mycall_edit.setMaxLength(11)
+        self.ft8_mycall_edit.setFixedWidth(100)
+        ft8_row1.addWidget(self.ft8_mycall_edit)
+        ft8_row1.addWidget(QtWidgets.QLabel("Locator:"))
+        self.ft8_locator_edit = QtWidgets.QLineEdit(self._ft8_setting("locator"))
+        self.ft8_locator_edit.setMaxLength(6)
+        self.ft8_locator_edit.setFixedWidth(70)
+        self.ft8_locator_edit.setToolTip("Maidenhead locator; FT8 carries the first 4 characters")
+        ft8_row1.addWidget(self.ft8_locator_edit)
+        ft8_row1.addWidget(QtWidgets.QLabel("DX call:"))
+        self.ft8_dxcall_edit = QtWidgets.QLineEdit()
+        self.ft8_dxcall_edit.setMaxLength(11)
+        self.ft8_dxcall_edit.setFixedWidth(100)
+        ft8_row1.addWidget(self.ft8_dxcall_edit)
+        ft8_row1.addWidget(QtWidgets.QLabel("Report:"))
+        self.ft8_report_spin = QtWidgets.QSpinBox()
+        self.ft8_report_spin.setRange(-30, 30)
+        self.ft8_report_spin.setValue(-10)
+        self.ft8_report_spin.setSuffix(" dB")
+        self.ft8_report_spin.setToolTip("The SNR you received the DX station with (the RX app shows it)")
+        ft8_row1.addWidget(self.ft8_report_spin)
+        ft8_row1.addStretch(1)
+        ft8_layout.addLayout(ft8_row1)
+        ft8_row2 = QtWidgets.QHBoxLayout()
+        ft8_row2.addWidget(QtWidgets.QLabel("Send:"))
+        self.ft8_kind_combo = QtWidgets.QComboBox()
+        for kind, label in ft8.MESSAGE_KINDS:
+            self.ft8_kind_combo.addItem(label, kind)
+        ft8_row2.addWidget(self.ft8_kind_combo)
+        self.ft8_message_edit = QtWidgets.QLineEdit()
+        self.ft8_message_edit.setMaxLength(37)
+        self.ft8_message_edit.setMinimumWidth(300)
+        self.ft8_message_edit.setStyleSheet("font-size: 13pt; font-family: monospace;")
+        self.ft8_message_edit.setToolTip("The message that goes out -- generated from the fields, "
+                                         "or type a free text (max. 13 characters)")
+        ft8_row2.addWidget(self.ft8_message_edit)
+        ft8_row2.addStretch(1)
+        ft8_layout.addLayout(ft8_row2)
+        ft8_row3 = QtWidgets.QHBoxLayout()
+        ft8_row3.addWidget(QtWidgets.QLabel("Audio offset:"))
+        self.ft8_offset_spin = QtWidgets.QSpinBox()
+        self.ft8_offset_spin.setRange(int(config.FT8_TONE_RANGE_HZ[0]), int(config.FT8_TONE_RANGE_HZ[1]))
+        self.ft8_offset_spin.setSingleStep(10)
+        self.ft8_offset_spin.setValue(int(config.FT8_DEFAULT_TONE_HZ))
+        self.ft8_offset_spin.setSuffix(" Hz")
+        self.ft8_offset_spin.setToolTip("Audio frequency of the lowest tone above the USB dial frequency "
+                                        "(the signal is 50 Hz wide). Pick a free spot in the RX app's waterfall.")
+        ft8_row3.addWidget(self.ft8_offset_spin)
+        ft8_row3.addWidget(QtWidgets.QLabel("Slot:"))
+        self.ft8_slot_combo = QtWidgets.QComboBox()
+        self.ft8_slot_combo.addItem("Next", "any")
+        self.ft8_slot_combo.addItem("1st (:00/:30)", "even")
+        self.ft8_slot_combo.addItem("2nd (:15/:45)", "odd")
+        self.ft8_slot_combo.setToolTip("Transmit in the even or odd 15 s period; answer a station in the "
+                                       "opposite period to the one it transmits in. Repeats go every 30 s.")
+        ft8_row3.addWidget(self.ft8_slot_combo)
+        self.ft8_clock_label = QtWidgets.QLabel("")
+        self.ft8_clock_label.setStyleSheet("font-family: monospace;")
+        ft8_row3.addWidget(self.ft8_clock_label)
+        ft8_row3.addStretch(1)
+        ft8_layout.addLayout(ft8_row3)
+        self.ft8_info_label = QtWidgets.QLabel("")
+        ft8_layout.addWidget(self.ft8_info_label)
+        self.ft8_sent_log = QtWidgets.QTextEdit()
+        self.ft8_sent_log.setReadOnly(True)
+        self.ft8_sent_log.setMaximumHeight(120)
+        self.ft8_sent_log.setToolTip("Local echo of the FT8 messages THIS station has sent (UTC).")
+        ft8_layout.addWidget(self.ft8_sent_log)
+        digimodes_tab_layout.addWidget(ft8_group)
+        self.ft8_group_widget = ft8_group
+        self._ft8_clock_ok = _ntp_synchronized()
+        for signal_ in (self.ft8_mycall_edit.textChanged, self.ft8_locator_edit.textChanged,
+                        self.ft8_dxcall_edit.textChanged, self.ft8_report_spin.valueChanged,
+                        self.ft8_kind_combo.currentIndexChanged):
+            signal_.connect(self._on_ft8_fields_changed)
+        self.ft8_message_edit.textChanged.connect(self._on_ft8_message_changed)
+        self.ft8_offset_spin.valueChanged.connect(self._on_ft8_offset_changed)
+        self._ft8_clock_timer = QtCore.QTimer(self)
+        self._ft8_clock_timer.setInterval(250)
+        self._ft8_clock_timer.timeout.connect(self._update_ft8_clock)
+        self._ft8_clock_timer.start()
+
         # --- Meshtastic (LoRa) controls -- own group widget, same pattern as
         # rtty_group above. One-shot: PTT builds one real Meshtastic packet from
         # the fields below, sends it, and auto-unkeys after its airtime.
@@ -1113,6 +1230,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
         self._update_pocsag_info()
+        self._on_ft8_fields_changed()
+        self._update_ft8_controls_enabled()
         self._update_meshcore_controls_enabled()
         self._update_meshcore_regulatory_label()
         self._update_meshtastic_controls_enabled()
@@ -1364,7 +1483,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mode_tab_widget.setCurrentIndex(2)
         elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31,
                                     PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
-                                    PlutoTxFlowgraph.MODE_MESHCORE,
+                                    PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_FT8,
                                     PlutoTxFlowgraph.MODE_MESHTASTIC):
             self.mode_tab_widget.setCurrentIndex(1)
         # Connected AFTER the initial sync above (and after every widget it
@@ -1449,6 +1568,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_meshtastic_controls_enabled()
         self._pocsag_connected = enabled
         self._update_pocsag_controls_enabled()
+        self._ft8_connected = enabled
+        self._update_ft8_controls_enabled()
         self._meshcore_connected = enabled
         self._update_meshcore_controls_enabled()
         self._filebroadcast_connected = enabled
@@ -1782,6 +1903,156 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._finish_one_shot()
 
+    # --- FT8 -------------------------------------------------------------
+    @staticmethod
+    def _ft8_setting(key):
+        try:
+            return str(QtCore.QSettings("pluto-tx", "ft8").value(key, "") or "")
+        except Exception:
+            return ""
+
+    def _update_ft8_controls_enabled(self):
+        self.ft8_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_FT8)
+        connected = getattr(self, "_ft8_connected", True)
+        for w in (self.ft8_mycall_edit, self.ft8_locator_edit, self.ft8_dxcall_edit, self.ft8_report_spin,
+                  self.ft8_kind_combo, self.ft8_message_edit, self.ft8_offset_spin, self.ft8_slot_combo):
+            w.setEnabled(connected)
+
+    def _on_ft8_fields_changed(self, *_):
+        for key, edit in (("my_call", self.ft8_mycall_edit), ("locator", self.ft8_locator_edit)):
+            try:
+                QtCore.QSettings("pluto-tx", "ft8").setValue(key, edit.text().strip().upper())
+            except Exception:
+                pass
+        kind = self.ft8_kind_combo.currentData()
+        if kind == "free":
+            self.ft8_message_edit.setPlaceholderText(f"free text, max. {ft8.FREE_TEXT_MAX} characters")
+            self._on_ft8_message_changed(self.ft8_message_edit.text())
+            return
+        self.ft8_message_edit.setText(ft8.compose(
+            kind, self.ft8_mycall_edit.text(), self.ft8_locator_edit.text(), self.ft8_dxcall_edit.text(),
+            self.ft8_report_spin.value()))
+
+    def _on_ft8_message_changed(self, text):
+        if self.tb is not None:
+            self.tb.set_ft8_text(text)
+        self._update_ft8_info()
+
+    def _on_ft8_offset_changed(self, value):
+        if self.tb is not None:
+            self.tb.set_ft8_tone_hz(float(value))
+
+    def _update_ft8_info(self):
+        text = self.ft8_message_edit.text().strip()
+        if not text:
+            msg = "Enter your call (and the DX call) to build a message."
+        elif not ft8.can_encode(text):
+            msg = "This message can't be sent as FT8 (check callsigns, locator, report)."
+        else:
+            msg = f"Ready: \"{text.upper()}\" -- 12.6 s on air, starts 0.5 s into the slot."
+        if not self._ft8_clock_ok:
+            msg += "  WARNING: system clock not NTP-synchronised -- FT8 needs UTC within ~1 s."
+        self.ft8_info_label.setText(msg)
+
+    def _update_ft8_clock(self):
+        if self._current_mode != PlutoTxFlowgraph.MODE_FT8:
+            return
+        now = time.time()
+        sec = now % ft8.FT8_SLOT_TIME
+        parity = "1st" if ft8.slot_parity(now) == "even" else "2nd"
+        self.ft8_clock_label.setText(f"UTC {time.strftime('%H:%M:%S', time.gmtime(now))}  "
+                                     f"{parity} slot +{sec:4.1f} s")
+
+    def _ft8_ptt_allowed(self):
+        """Pre-flight for an FT8 PTT press (True outside FT8 mode): refuses BEFORE any RF action."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_FT8:
+            return True
+        problem = self.tb.ft8_problem()
+        if problem:
+            self.status_label.setText(f"Not sent: {problem}")
+        return problem is None
+
+    def _ft8_arm(self):
+        """Arm the next FT8 transmission: synthesize it now, key FT8_KEY_EARLY_S before its start and
+        let the flowgraph pad the gap with silence (PlutoTxFlowgraph.ft8_start_at), so the signal
+        starts FT8_START_IN_SLOT_S into the slot however long the graph lock takes. A matching slot
+        that started at most FT8_LATE_START_MAX_S ago is still used (larger DT at the receiver).
+        Repeats of a series stay in the parity of its first transmission (every 30 s, as in FT8)."""
+        self.tb.prepare_ft8()
+        now = time.time()
+        parity = self.ft8_slot_combo.currentData()
+        if parity == "any" and self._repeat_active and getattr(self, "_ft8_series_parity", None):
+            parity = self._ft8_series_parity
+        at, start = ft8.plan_transmission(now, parity, config.FT8_KEY_EARLY_S, config.FT8_START_IN_SLOT_S,
+                                          config.FT8_LATE_START_MAX_S)
+        if not self._repeat_active:
+            self._ft8_series_parity = ft8.slot_parity(start)
+        self._ft8_ptt_epoch += 1
+        epoch, token = self._ft8_ptt_epoch, self.tb
+        self._ft8_waiting = True
+        self._ft8_tx_at = at
+        self._ft8_start_at = start
+        self._repeat_next_time = time.monotonic() + max(0.0, start - now)
+        QtCore.QTimer.singleShot(max(0, int((at - time.time()) * 1000)), lambda: self._ft8_fire(token, epoch))
+        self._ft8_tick_timer.start()
+        self.tx_indicator.setText("FT8 WAIT")
+        self.tx_indicator.setStyleSheet(
+            "background-color: #e67e22; color: white; font-size: 18pt; font-weight: bold;")
+        self._ft8_tick()
+
+    def _ft8_tick(self):
+        if not self._ft8_waiting:
+            self._ft8_tick_timer.stop()
+            return
+        if self._repeat_active:
+            self._repeat_update_button()
+            return
+        wait = max(0, int(round(self._ft8_start_at - time.time())))
+        at = time.strftime("%H:%M:%S", time.gmtime(self._ft8_start_at))
+        self.ptt_button.setText(f"FT8 at {at} UTC, in {wait} s (click to cancel)")
+
+    def _ft8_fire(self, token, epoch):
+        if self.tb is not token or epoch != self._ft8_ptt_epoch or not self._ft8_waiting:
+            return
+        self._ft8_waiting = False
+        self._ft8_tick_timer.stop()
+        try:
+            self.tb.ft8_start_at = self._ft8_start_at
+            self.tb.key_ptt()
+        except Exception as e:
+            self.status_label.setText(f"FT8 not sent: {e}")
+            self._repeat_cancel()
+            self._reset_digitext_ptt_visual()
+            self._set_indicator_idle()
+            return
+        self._set_indicator_on_air()
+        if self._repeat_active:
+            self._repeat_update_button()
+        else:
+            self.ptt_button.setText("FT8 sending (click to stop)")
+        slot = ft8.current_slot_start(self._ft8_start_at)
+        self.ft8_sent_log.append(f"{time.strftime('%H%M%S', time.gmtime(slot))}  {self.ft8_offset_spin.value():4d} Hz  "
+                                 f"{self.ft8_message_edit.text().strip().upper()}")
+        hold_s = self.tb.ft8_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._finish_ft8_auto_unkey(token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.FT8_AUTO_UNKEY_WATCHDOG_S) * 1000),
+                                 lambda: self._finish_ft8_auto_unkey(token, epoch))
+
+    def _finish_ft8_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._ft8_ptt_epoch or not self.tb.keyed:
+            return
+        self._finish_one_shot()
+
+    def _ft8_cancel_wait(self):
+        """Drop a transmission armed for a later slot (no-op if none is pending)."""
+        if not self._ft8_waiting:
+            return
+        self._ft8_waiting = False
+        self._ft8_ptt_epoch += 1
+        self._ft8_tick_timer.stop()
+        if self.tb is None or not self.tb.keyed:
+            self._set_indicator_idle()
+
     def _update_rtty_controls_enabled(self):
         # Structural mirror of _update_psk31_controls_enabled() above.
         is_rtty_mode = self._current_mode == PlutoTxFlowgraph.MODE_RTTY
@@ -2085,6 +2356,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _AUDIO_ONLY_CAPABLE_MODES = (
         PlutoTxFlowgraph.MODE_FM, PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
         PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
+        PlutoTxFlowgraph.MODE_FT8,
     )
     _LORA_MODES = (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE)
 
@@ -2248,6 +2520,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
+        self._update_ft8_controls_enabled()
         self._update_baseband_controls_enabled()
         self._update_subtone_controls_enabled()
 
@@ -2601,6 +2874,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._key_and_schedule()
             self.ptt_button.setText("PTT (click to stop)")
             self._repeat_begin()
+            if self._ft8_waiting:
+                self._ft8_tick()
         else:
             self._repeat_cancel("Repeat stopped.")
             self.ptt_button.setText("PTT (click to send)")
@@ -2623,15 +2898,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_ptt_released(self):
         if self._repeat_active:  # the series keeps running after the button is let go
             return
+        if self._ft8_waiting:  # let go before the slot came: nothing is sent
+            self._ft8_cancel_wait()
+            return
         if self.tb is None or not self.tb.keyed:
             return
         self._release_ptt()
 
     def _all_ptt_allowed(self):
-        return self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._meshcore_ptt_allowed()
+        return (self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._meshcore_ptt_allowed()
+                and self._ft8_ptt_allowed())
 
     def _key_and_schedule(self):
-        """Key the transmitter and start the per-mode auto-unkey timers/logs (one-shot modes)."""
+        """Key the transmitter and start the per-mode auto-unkey timers/logs (one-shot modes).
+        FT8 instead arms the transmission for its next UTC slot (see _ft8_arm())."""
+        if self._current_mode == PlutoTxFlowgraph.MODE_FT8:
+            self._ft8_arm()
+            return
         self.tb.key_ptt()
         self._set_indicator_on_air()
         self._schedule_digitext_auto_unkey()
@@ -2648,7 +2931,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- Repeat series (one-shot digimodes) ------------------------------
     _ONE_SHOT_MODES = (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
-                       PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_POCSAG)
+                       PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_POCSAG,
+                       PlutoTxFlowgraph.MODE_FT8)
 
     def _repeat_begin(self):
         """Called right after a user PTT press keyed the first transmission."""
@@ -2739,6 +3023,7 @@ class MainWindow(QtWidgets.QMainWindow):
         back to READY, and a bounded timer finishes the job. E-STOP is
         NOT routed through here -- it calls tb.unkey_ptt() + force_safe_state()
         directly, an unconditional override of any pending M17 tail."""
+        self._ft8_cancel_wait()
         if self.tb is None:
             return
         self.tb.unkey_ptt()
@@ -3083,6 +3368,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 pocsag_text=self.pocsag_text_edit.text(),
                 pocsag_baud=self.pocsag_baud_combo.currentData(),
                 pocsag_charset="de" if self.pocsag_charset_checkbox.isChecked() else "ascii",
+                ft8_text=self.ft8_message_edit.text(),
+                ft8_tone_hz=float(self.ft8_offset_spin.value()),
                 meshcore_preset_index=max(0, self.meshcore_preset_combo.currentData() or 0),
                 meshcore_kind=self.meshcore_kind_combo.currentData(),
                 meshcore_name=self.meshcore_name_edit.text(),

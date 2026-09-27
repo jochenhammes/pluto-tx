@@ -203,6 +203,8 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                     tb.unkey_ptt()
                     emitter.emit("unkeyed", mode=mode)
                     _tail_wait_tx(tb, mode)
+        elif mode == PlutoTxFlowgraph.MODE_FT8:
+            _run_ft8_series(tb, args, emitter)
         else:
             count = getattr(args, "repeat_count", 1) or 1
             interval = getattr(args, "repeat_interval", 0.0)
@@ -238,6 +240,34 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
     finally:
         tb.shutdown_safe()
         emitter.emit("shutdown")
+
+
+def _run_ft8_series(tb, args, emitter: Emitter):
+    """FT8: every transmission waits for its UTC slot (pluto_tx.ft8.plan_transmission(): keyed
+    FT8_KEY_EARLY_S ahead, the flowgraph pads with silence up to tb.ft8_start_at -- same as the GUI);
+    repeats stay in the parity of the first one."""
+    from pluto_tx.flowgraph import PlutoTxFlowgraph
+    from pluto_tx import config as tx_config
+    from pluto_tx import ft8 as tx_ft8
+
+    count = getattr(args, "repeat_count", 1) or 1
+    parity = args.slot
+    for i in range(count):
+        tb.prepare_ft8()
+        at, start = tx_ft8.plan_transmission(time.time(), parity, tx_config.FT8_KEY_EARLY_S,
+                                             tx_config.FT8_START_IN_SLOT_S, tx_config.FT8_LATE_START_MAX_S)
+        parity = tx_ft8.slot_parity(start)
+        emitter.emit("ft8_waiting", slot_utc=time.strftime("%H:%M:%S", time.gmtime(tx_ft8.current_slot_start(start))),
+                     seconds=round(max(0.0, start - time.time()), 1),
+                     **({"repetition": i + 1, "of": count} if count > 1 else {}))
+        while time.time() < at:
+            time.sleep(min(0.05, max(0.0, at - time.time())))
+        tb.ft8_start_at = start
+        tb.key_ptt()
+        emitter.emit("keyed", mode=PlutoTxFlowgraph.MODE_FT8)
+        time.sleep(tb.ft8_hold_s)
+        tb.unkey_ptt()
+        emitter.emit("unkeyed", mode=PlutoTxFlowgraph.MODE_FT8)
 
 
 def _tail_wait_tx(tb, mode):

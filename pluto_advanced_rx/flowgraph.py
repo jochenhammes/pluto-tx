@@ -108,7 +108,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  rtty_reverse=False, active_digimode=None, buffer_size=None,
                  on_meshtastic_frame=None, meshtastic_preset_index=0,
                  frequency_correction_ppm=0.0, direct_sampling=0, on_pocsag_message=None,
-                 on_meshcore_packet=None, meshcore_preset_index=0):
+                 on_meshcore_packet=None, meshcore_preset_index=0, on_ft8_decodes=None,
+                 ft8_backend=config.FT8_DECODER_BACKEND, ft8_my_call="", ft8_my_grid=""):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -789,7 +790,34 @@ class AdvancedRxFlowgraph(gr.top_block):
                 self.connect(sync, slicer)
                 self.connect(slicer, deframer)
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag"):
+        # --- FT8 RX: USB audio at the tuned (dial) frequency -> 12 kHz -> Ft8Receiver, which cuts it
+        # into 15 s UTC slots and decodes each in a worker thread (jt9 or ft8_lib, see ft8_decoder.py).
+        # Resample first (explicit low-pass taps, complex), then the sideband-selecting complex
+        # band-pass at 12 kHz where its 200 Hz transition only costs ~200 taps. With a sound card the
+        # input is the audio from a receiver in USB: the tuning rotator shifts the operator's chosen
+        # audio frequency to "dial" 0 Hz, so the band is relative to that (0 = the audio as it is).
+        self.ft8_receiver = None
+        if active_digimode == "ft8":
+            from .ft8_rx import Ft8Receiver
+            from .ft8_decoder import SAMPLE_RATE as FT8_RATE
+            if_rate_i = int(round(self.if_rate))
+            g_ft8 = math.gcd(FT8_RATE, if_rate_i)
+            ft8_interp, ft8_decim = FT8_RATE // g_ft8, if_rate_i // g_ft8
+            self.ft8_resampler = filter.rational_resampler_ccf(
+                interpolation=ft8_interp, decimation=ft8_decim,
+                taps=firdes.low_pass(ft8_interp, if_rate_i * ft8_interp, 4000, 2000, window.WIN_HAMMING))
+            lo, hi = config.FT8_BAND_HZ
+            self.ft8_band_filter = filter.fir_filter_ccc(1, firdes.complex_band_pass(
+                1.0, FT8_RATE, lo, hi, config.FT8_BAND_TRANS_HZ, window.WIN_HAMMING))
+            self.ft8_to_real = blocks.complex_to_real()
+            self.ft8_receiver = Ft8Receiver(on_ft8_decodes or (lambda slot, decodes: None), backend=ft8_backend,
+                                            my_call=ft8_my_call, my_grid=ft8_my_grid)
+            self.connect(self.if_filter, self.ft8_resampler)
+            self.connect(self.ft8_resampler, self.ft8_band_filter)
+            self.connect(self.ft8_band_filter, self.ft8_to_real)
+            self.connect(self.ft8_to_real, self.ft8_receiver)
+
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the

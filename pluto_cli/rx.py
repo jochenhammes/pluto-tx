@@ -13,6 +13,8 @@ GNU Radio limitation, not a CLI simplification, see flowgraph.py's own
 Digimodes comment), so `--digimode {psk31,rtty,meshtastic}` is a single, mutually-
 exclusive selector rather than a monitor flag per mode -- see
 pluto_cli/README.md."""
+import time
+
 from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_AVAILABLE
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
@@ -83,12 +85,26 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
              "simplification (see pluto_cli/README.md). Omit to disable digimode decoding "
              "entirely.",
+    )
+    parser.add_argument(
+        "--ft8-decoder", choices=("auto", "jt9", "ft8lib"), default=rx_config.FT8_DECODER_BACKEND,
+        help="FT8 decoder for --digimode ft8: jt9 = WSJT-X's (apt install wsjtx, finds the most), "
+             "ft8lib = kgoba/ft8_lib (install-ft8.sh), auto = jt9 if installed (default: auto). "
+             "Tune --freq to the USB dial frequency, e.g. 14074000 or 144174000.",
+    )
+    parser.add_argument(
+        "--ft8-mycall", default="", metavar="CALL",
+        help="Your callsign for --digimode ft8 with jt9: replies to you are decoded with a-priori "
+             "knowledge (more sensitive)",
+    )
+    parser.add_argument(
+        "--ft8-mygrid", default="", metavar="LOCATOR", help="Your locator (with --ft8-mycall)",
     )
     parser.add_argument(
         "--pocsag-charset", choices=("ascii", "de"), default="ascii",
@@ -251,6 +267,13 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         emitter.emit("pocsag_message", baud=row["baud"], ric=row["ric"], function=row["function"],
                      text=row["text"], corrected=row["corrected"], uncorrectable=row["uncorrectable"])
 
+    def on_ft8_decodes(slot_start, decodes):
+        utc = time.strftime("%H%M%S", time.gmtime(slot_start))
+        for d in decodes:
+            emitter.emit("ft8_decode", utc=utc, snr_db=round(d.snr_db), dt_s=round(d.dt_s, 1),
+                         freq_hz=round(d.freq_hz), text=d.text)
+        emitter.emit("ft8_slot", utc=utc, decodes=len(decodes))
+
     def on_m17_fields(fields):
         emitter.emit("m17_fields", **runtime.json_safe(fields))
 
@@ -306,6 +329,8 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             on_rtty_char=on_rtty_char,
             on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
             on_pocsag_message=on_pocsag_message,
+            on_ft8_decodes=on_ft8_decodes, ft8_backend=args.ft8_decoder,
+            ft8_my_call=args.ft8_mycall, ft8_my_grid=args.ft8_mygrid,
             on_meshcore_packet=on_meshcore_packet, meshcore_preset_index=meshcore_preset_index,
             frequency_correction_ppm=args.freq_correction_ppm, direct_sampling=direct_sampling,
             **mode_kwargs,

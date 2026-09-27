@@ -701,3 +701,24 @@ def in_amateur_band(freq_hz: float):
         if lo <= freq_hz <= hi:
             return name
     return None
+
+
+# --- FT8 (pluto_tx/ft8.py, RX: pluto_advanced_rx/ft8_decoder.py) -------------------------------------
+# Audio frequency of tone 0 (the signal occupies tone_hz .. tone_hz + 50 Hz), inside the SSB passband.
+FT8_DEFAULT_TONE_HZ = 1500.0
+FT8_TONE_RANGE_HZ = (200.0, 2900.0)
+FT8_IQ_LEVEL = 0.7            # constant-envelope signal, same headroom as the other digimodes
+FT8_SOUNDCARD_LEVEL = 0.5     # audio level into Soundcard/AIOC (the radio's mic input)
+FT8_TAIL_S = 0.1
+FT8_AUTO_UNKEY_WATCHDOG_S = 2.0
+# Signals start 0.5 s into the 15 s UTC slot (WSJT-X convention; receivers accept roughly -2..+2.5 s).
+FT8_SLOT_S = 15.0
+FT8_START_IN_SLOT_S = 0.5
+# A PTT press this late into a matching slot still keys immediately (the receiver sees DT up to ~+1.5 s,
+# well inside the decoders' window); later presses wait for the next matching slot.
+FT8_LATE_START_MAX_S = 1.0
+# key_ptt() is called this long before the signal is due: covers the source swap (the graph's
+# unlock() alone takes 0.5-2 s on a Pluto+); Ft8TimedSource (ft8_source.py) sends silence until then.
+FT8_KEY_EARLY_S = 3.0
+# Buffering between Ft8TimedSource and the antenna: the source switches to the signal this much early.
+FT8_TX_LATENCY_S = 0.0

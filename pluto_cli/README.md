@@ -113,7 +113,7 @@ Common flags (every mode):
 | `--freq-correction-ppm PPM` | Oscillator error of the device in ppm (default 0; positive = the device transmits too high, the hardware is tuned lower; scales with `--freq`; ignored for soundcard/aioc) |
 | `--power-ceiling DB` | Max TX power/attenuation (device-specific meaning); omit for the device's own safe default |
 | `--power DB` | Target power within `--power-ceiling` (default: equal to the ceiling) |
-| `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/rtty/pocsag/filebroadcast |
+| `--source {mic,file}` | Audio source for voice/analog modes (default: `mic`); ignored for digitext/psk31/rtty/pocsag/ft8/filebroadcast |
 | `--wav-file PATH` | WAV file, when `--source file` |
 | `--audio-device STR` | Mic device string, from `pluto-cli devices list-audio-inputs` |
 | `--duration SECONDS` | Seconds to stay keyed (default: 3.0); ignored for digitext/psk31/rtty (see below) and `--interactive` |
@@ -133,6 +133,7 @@ Common flags (every mode):
 | `psk31` | `--text` (required), `--tone-hz` | BPSK31 chat; `--duration` ignored, same reason as digitext |
 | `rtty` | `--text` (required), `--mark-hz`, `--shift-hz`, `--baud-rate`, `--reverse` | 2-tone FSK Baudot; `--duration` ignored, same reason as digitext |
 | `pocsag` | `--ric`, `--kind {alpha,numeric,tone}`, `--text`, `--function 0-3`, `--baud {512,1200,2400}`, `--charset {ascii,de}` | POCSAG paging call (ITU-R M.584, direct FM +-4.5 kHz; with `--device soundcard` the NRZ audio goes to the sound card for an external FM radio); `--duration` ignored; emits a `pocsag_message` event before keying |
+| `ft8` | `--call`, `--locator`, `--kind {cq,reply,report,r_report,rrr,rr73,73,free}`, `--dx`, `--report dB`, `--message TEXT`, `--offset-hz` (default 1500), `--slot {any,even,odd}` | FT8 message (needs `install-ft8.sh`). Waits for the next matching 15 s UTC slot and starts 0.5 s into it (keyed 3 s early, the gap is filled with silence so the start is exact); `--message` overrides the composed text. `--repeat-count N` repeats every 30 s in the same slot parity (`--repeat-interval`, `--duration` ignored). Emits `ft8_message`, then `ft8_waiting` (`slot_utc`, `seconds`) before each transmission |
 | `meshcore` | `--kind {advert,group,direct}`, `--to-key HEX64` (addressee of `direct`), `--name`, `--route {flood,direct}`, `--role {chat,repeater,room,sensor}`, `--position LAT LON`, `--text`, `--channel-name`, `--channel-key HEX32`, `--preset NAME` | One MeshCore (LoRa) frame: a signed advert of this app's own node identity (`~/.config/pluto-tx/meshcore_identity.json`) an encrypted group text (Public channel unless `--channel-key`) or an encrypted direct message to `--to-key`; carrier from the preset, `--freq`/`--duration` ignored; 10 % duty cycle enforced; on amateur-band frequencies only adverts with a name (callsign) are allowed. Requires gr-lora_sdr + cryptography |
 | `meshtastic` | `--text` (required), `--region {eu433,eu868}`, `--modem-preset NAME`, `--callsign`, `--node-id HEX`, `--channel`, `--psk`, `--hop-limit` | One Meshtastic (LoRa) broadcast frame; `--freq`/`--duration` ignored (carrier from the preset, hold time from the frame's airtime). carrier and default channel name follow the preset (firmware slot formula); `eu433` = Ham Mode (callsign required, unencrypted); `eu868` = ISM/SRD, 10 % duty cycle enforced. Requires gr-lora_sdr, see `install-lora.sh` |
 | `filebroadcast` | `--file PATH` (repeatable, >=1 required) | round-robin file broadcast; each `--file` is read from disk once at startup |
@@ -160,7 +161,7 @@ Common flags (every mode):
 | `--gain DB` | Manual gain, used when `--gain-mode manual` |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
-| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
+| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
 | `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency, used with `--digimode psk31` |
 | `--rtty-mark-hz HZ` | RTTY mark tone frequency, used with `--digimode rtty` |
 | `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
@@ -168,6 +169,8 @@ Common flags (every mode):
 | `--rtty-reverse` | Swap which tone is Mark vs. Space, used with `--digimode rtty` |
 | `--pocsag-show-damaged` | Also report POCSAG calls with unrecoverable codewords (default: only clean calls) |
 | `--pocsag-charset {ascii,de}` | Text charset for `--digimode pocsag` (`de` = DIN 66003 umlaut mapping) |
+| `--ft8-decoder {auto,jt9,ft8lib}` | Decoder for `--digimode ft8`: WSJT-X's `jt9` (default when installed, finds the most) or ft8_lib. Tune `--freq` to the USB dial frequency (e.g. 14074000) |
+| `--ft8-mycall CALL`, `--ft8-mygrid LOC` | Your call/locator for `--digimode ft8` with jt9: replies to you are decoded with a-priori knowledge |
 | `--meshtastic-region {eu433,eu868}` / `--meshtastic-modem-preset NAME` | Region (default `eu868`) and Meshtastic modem preset (LongFast, LongModerate, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo, LongTurbo; default LongFast, the only one verified against real hardware) for `--digimode meshtastic`; retunes to the preset's carrier, `--freq` is ignored; RX `--bandwidth` must be at least twice the preset's LoRa bandwidth. Requires gr-lora_sdr, see `install-lora.sh` |
 | `--meshcore-decrypt-dm` | With `--digimode meshcore`: also decrypt direct messages addressed to this app's node identity (created if missing; emits `meshcore_identity`); senders must have advertised first |
 | `--meshcore-preset NAME` / `--meshcore-channel NAME:HEX32` | MeshCore preset (default `MeshCore EU/UK Narrow`, retunes to its carrier, `--freq` is ignored) and extra group channels to decrypt (repeatable; the Public channel is always decoded) for `--digimode meshcore`. Requires gr-lora_sdr + cryptography |
@@ -286,6 +289,8 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `meshtastic_listen` | RX `--digimode meshtastic`: once at startup | `preset`, `freq_hz`, `regulatory` |
 | `meshtastic_frame` | TX `meshtastic`: the frame about to be sent (`preset`, `freq_hz`, `text`, `bytes`, `airtime_s`). RX: one received frame | RX: `kind`, `bytes`, and for decodable frames `from`, `to` (hex), `id`, `hop_limit`, `hop_start`, `text` |
 | `pocsag_message` | TX `pocsag`: the call about to be sent (`ric`, `function`, `kind`, `baud`, `text`, `duration_s`). RX `--digimode pocsag`: one decoded call | RX: `baud`, `ric`, `function`, `text`, `corrected` (bit errors fixed), `uncorrectable` (codewords lost) |
+| `ft8_message` / `ft8_waiting` | TX `ft8`: the message (`text`, `offset_hz`, `duration_s`); before each transmission the slot it goes out in | `slot_utc` (HH:MM:SS), `seconds` until keying, `repetition`/`of` in a series |
+| `ft8_decode` / `ft8_slot` | RX `--digimode ft8`: one decoded message; then one summary per decoded slot | `utc` (HHMMSS slot start), `snr_db`, `dt_s`, `freq_hz` (audio offset), `text`; summary: `decodes` |
 | `rtty_char` | RX `--digimode rtty`: one decoded character (RX-only; TX `rtty` prints nothing) | `char` (single character string) |
 | `m17_fields` | RX `m17` mode: one decoded M17 frame | the decoded LSF fields dict as reported by `gr-m17` (`dst`, `src`, `type`, `meta`, ...; numpy arrays are converted to plain lists) |
 | `filebroadcast_added` | TX `filebroadcast`: a `--file` was registered at startup | `file_id`, `filename`, `bytes` |

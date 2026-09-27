@@ -1,3 +1,11 @@
+> **Superseded (2026-09-27).** FT8 was resumed following `FT8_PLAN_V2.md` and is now implemented
+> in both apps and the CLI. The PHY passed over the air at short range (Pluto+ at -40 dB -> RTL-SDR; the user clarified
+> on 2026-09-27 that this link was never a cable, contrary to the notes below): 5/5 frames
+> decoded by WSJT-X's jt9 and by ft8_lib, measured tone spacing 6.2505 Hz (100.01 %). The "deviation
+> compression" below does not occur with the new TX chain (direct complex-baseband synthesis,
+> explicit resampler taps, source started after keying) and a drift-robust measurement; this file is
+> kept as history only.
+
 # FT8 digimode: handoff notes for a fresh implementation attempt
 
 ## BACKLOG — not actively worked on

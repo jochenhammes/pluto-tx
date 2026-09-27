@@ -457,3 +457,14 @@ RTTY_AFC_POLL_INTERVAL_S = 1.0
 RTTY_AFC_SEARCH_MARGIN_HZ = 300.0  # search radius = shift_hz/2 + this
 RTTY_AFC_THRESHOLD_DB = 25.0  # starting point, mirrors PSK31_AFC_THRESHOLD_DB's real-hardware-verified value
 RTTY_AFC_DEADBAND_HZ = 60.0
+
+# --- FT8 (pluto_advanced_rx/ft8_rx.py, ft8_decoder.py) ------------------------------------------------
+# USB audio band handed to the decoder (the decoders search it all; WSJT-X's default is 200-3000 Hz).
+FT8_BAND_HZ = (100.0, 3100.0)
+FT8_BAND_TRANS_HZ = 200.0
+# Decode a slot this long after its start: signals end at 13.14 s + their DT (decoders accept up to ~+2.5 s).
+FT8_DECODE_AT_S = 14.8
+# Wall-clock delay between a sample being on the air and reaching Ft8Receiver.work() (device buffering).
+FT8_RX_LATENCY_S = 0.0
+# "auto" = WSJT-X's jt9 if installed (finds ~1.5x more), else ft8_lib; or force "jt9" / "ft8lib".
+FT8_DECODER_BACKEND = "auto"

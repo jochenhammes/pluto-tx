@@ -3,7 +3,7 @@ __pycache__/
 pluto_tx/_silence.wav
 gr-m17/
 rade_c/
-backlog/ft8/ft8_lib/
+ft8_lib/
 gr-lora_sdr/
 # Local working notes/briefings -- not meant to be synced to GitHub.
 install-improvements.md

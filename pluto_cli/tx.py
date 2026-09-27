@@ -10,7 +10,9 @@ import sys
 
 from pluto_tx.flowgraph import (
     PlutoTxFlowgraph, M17_AVAILABLE, FREEDV_AVAILABLE, RADE_AVAILABLE, LORA_AVAILABLE, MESHCORE_AVAILABLE,
+    FT8_AVAILABLE,
 )
+from pluto_tx import ft8 as tx_ft8
 from pluto_tx import config as tx_config
 from pluto_tx import dcs as tx_dcs
 from pluto_tx import pocsag_codec as tx_pocsag
@@ -18,7 +20,7 @@ from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "meshtastic", "meshcore", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "ft8", "meshtastic", "meshcore", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -401,6 +403,54 @@ def run_pocsag(args):
     )
 
 
+def add_ft8_subparser(subparsers):
+    p = subparsers.add_parser(
+        "ft8", help="FT8 message in the next 15 s UTC slot (USB; manual sequencing -- one message per call; "
+                    "needs ft8_lib, see install-ft8.sh)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    add_repeat_args(p)
+    p.add_argument("--message", default="",
+                   help='Message text as-is, e.g. "CQ DA2JH JO31" (overrides --kind/--call/...)')
+    p.add_argument("--kind", choices=[k for k, _ in tx_ft8.MESSAGE_KINDS], default="cq",
+                   help="Standard message to build from --call/--locator/--dx/--report (default: cq)")
+    p.add_argument("--call", default="", help="Your callsign")
+    p.add_argument("--locator", default="", help="Your locator (first 4 characters are sent)")
+    p.add_argument("--dx", default="", help="The other station's callsign (all kinds except cq)")
+    p.add_argument("--report", type=int, default=-10, help="Signal report in dB for report/r_report (default: -10)")
+    p.add_argument("--offset-hz", type=float, default=tx_config.FT8_DEFAULT_TONE_HZ,
+                   help=f"Audio offset of the lowest tone above the dial frequency "
+                        f"(default: {tx_config.FT8_DEFAULT_TONE_HZ:.0f})")
+    p.add_argument("--slot", choices=("any", "even", "odd"), default="any",
+                   help="Transmit in the next slot (any), in :00/:30 (even) or :15/:45 (odd). Repeats of "
+                        "--repeat-count go every 30 s in the same parity; --repeat-interval is ignored.")
+    p.set_defaults(func=run_ft8)
+
+
+def run_ft8(args):
+    emitter = runtime.Emitter(args.json)
+    if not FT8_AVAILABLE:
+        emitter.error("FT8 not available: ft8_lib is not built (run install-ft8.sh)")
+        return 1
+    text = args.message.strip().upper() or tx_ft8.compose(args.kind, args.call, args.locator, args.dx, args.report)
+    if not text:
+        emitter.error("no message: give --message, or --call (and --dx for replies)")
+        return 1
+
+    def preflight(tb):
+        problem = tb.ft8_problem()
+        if problem:  # before any RF action
+            emitter.error(problem)
+            tb.shutdown_safe()
+            sys.exit(1)
+        tb.prepare_ft8()
+        emitter.emit("ft8_message", text=text, offset_hz=args.offset_hz, duration_s=round(tb.ft8_duration_s, 2))
+
+    return _run(args, PlutoTxFlowgraph.MODE_FT8, emitter, post_construct=preflight,
+                ft8_text=text, ft8_tone_hz=args.offset_hz)
+
+
 def add_meshtastic_subparser(subparsers):
     p = subparsers.add_parser(
         "meshtastic",
@@ -593,6 +643,7 @@ def add_subparsers(tx_subparsers):
     add_psk31_subparser(tx_subparsers)
     add_rtty_subparser(tx_subparsers)
     add_pocsag_subparser(tx_subparsers)
+    add_ft8_subparser(tx_subparsers)
     add_meshtastic_subparser(tx_subparsers)
     add_meshcore_subparser(tx_subparsers)
     add_filebroadcast_subparser(tx_subparsers)
