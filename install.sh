@@ -193,23 +193,34 @@ echo
 echo "Setting up launcher scripts in ~/.local/bin ..."
 mkdir -p "$HOME/.local/bin"
 
-cat > "$HOME/.local/bin/pluto-tx" <<EOF
-#!/usr/bin/env bash
-cd "$SCRIPT_DIR" && exec python3 -m pluto_tx.app --gui "\$@"
-EOF
-chmod +x "$HOME/.local/bin/pluto-tx"
+# Keep the LD_LIBRARY_PATH/PATH lines that install-m17.sh / install-rade.sh /
+# install-lora.sh added to an existing launcher: re-running this script used to
+# rewrite the launchers without them, which silently disabled M17, RADE and LoRa
+# until those installers were run again.
+write_launcher() {
+    local name="$1" module_invocation="$2"
+    local launcher="$HOME/.local/bin/$name"
+    local existing_ld="" existing_path=""
+    if [ -f "$launcher" ]; then
+        existing_ld="$(grep -oP '(?<=export LD_LIBRARY_PATH=")[^"]*(?=:\$\{LD_LIBRARY_PATH:-\}")' "$launcher" 2>/dev/null || true)"
+        existing_path="$(grep -oP '(?<=export PATH=")[^"]*(?=:\$\{PATH:-\}")' "$launcher" 2>/dev/null || true)"
+    fi
+    {
+        echo '#!/usr/bin/env bash'
+        if [ -n "$existing_ld" ]; then
+            echo "export LD_LIBRARY_PATH=\"$existing_ld:\${LD_LIBRARY_PATH:-}\""
+        fi
+        if [ -n "$existing_path" ]; then
+            echo "export PATH=\"$existing_path:\${PATH:-}\""
+        fi
+        echo "cd \"$SCRIPT_DIR\" && exec python3 -m $module_invocation \"\$@\""
+    } > "$launcher"
+    chmod +x "$launcher"
+}
 
-cat > "$HOME/.local/bin/pluto-advanced-rx" <<EOF
-#!/usr/bin/env bash
-cd "$SCRIPT_DIR" && exec python3 -m pluto_advanced_rx.app "\$@"
-EOF
-chmod +x "$HOME/.local/bin/pluto-advanced-rx"
-
-cat > "$HOME/.local/bin/pluto-cli" <<EOF
-#!/usr/bin/env bash
-cd "$SCRIPT_DIR" && exec python3 -m pluto_cli.app "\$@"
-EOF
-chmod +x "$HOME/.local/bin/pluto-cli"
+write_launcher "pluto-tx" "pluto_tx.app --gui"
+write_launcher "pluto-advanced-rx" "pluto_advanced_rx.app"
+write_launcher "pluto-cli" "pluto_cli.app"
 
 echo "Created $HOME/.local/bin/pluto-tx, pluto-advanced-rx and pluto-cli"
 

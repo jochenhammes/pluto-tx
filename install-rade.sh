@@ -78,7 +78,7 @@ fi
 # the top-level build failing early).
 BUILD_PACKAGES=(cmake make git build-essential autoconf automake libtool wget)
 MISSING=()
-for pkg_cmd in cmake:cmake make:make git:git autoconf:autoconf automake:automake libtoolize:libtool wget:wget; do
+for pkg_cmd in cmake:cmake make:make git:git g++:build-essential autoconf:autoconf automake:automake libtoolize:libtool wget:wget; do
     cmd="${pkg_cmd%%:*}"
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${pkg_cmd##*:}")
 done

@@ -73,7 +73,7 @@ BUILD_PACKAGES=(cmake make doxygen git build-essential gnuradio-dev)
 # already correctly called out in the non-Debian fallback message below,
 # just never added to this actual apt-installed list.
 MISSING=()
-for pkg_cmd in cmake:cmake make:make doxygen:doxygen git:git; do
+for pkg_cmd in cmake:cmake make:make doxygen:doxygen git:git g++:build-essential; do
     cmd="${pkg_cmd%%:*}"
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${pkg_cmd##*:}")
 done

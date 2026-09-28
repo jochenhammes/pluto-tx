@@ -64,7 +64,7 @@ fi
 # own explicit check on a system with APT::Install-Recommends disabled.
 BUILD_PACKAGES=(cmake make git build-essential gnuradio-dev libvolk-dev libboost-all-dev libuhd-dev pybind11-dev)
 MISSING=()
-for pkg_cmd in cmake:cmake make:make git:git; do
+for pkg_cmd in cmake:cmake make:make git:git g++:build-essential; do
     cmd="${pkg_cmd%%:*}"
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${pkg_cmd##*:}")
 done
