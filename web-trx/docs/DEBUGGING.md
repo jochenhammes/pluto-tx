@@ -33,9 +33,9 @@ siehe unten).
 ## 2. `GnuRadioBackend` — nur auf einem System mit GNU Radio + Hardware
 
 Verdrahtet `PlutoTxFlowgraph`/`AdvancedRxFlowgraph`/`FftProbe`/
-`PlutoSafety` aus `vendor/pluto-tx`, nach dem Muster von
-`vendor/pluto-tx/pluto_cli/runtime.py`. Läuft nur dort, wo
-`vendor/pluto-tx/install.sh` bereits gelaufen ist (echter Radio-Server).
+`PlutoSafety` aus pluto-tx (Repo-Wurzel, eine Ebene über `web-trx/`),
+nach dem Muster von `pluto_cli/runtime.py`. Läuft nur dort, wo
+`install.sh` bereits gelaufen ist (echter Radio-Server).
 Bewusst so dünn wie möglich gehalten — die eigentliche Komplexität
 (Protokoll, Zustandsautomat, UI, Audio-Framing) ist bereits gegen
 `SimBackend` durchgetestet, bevor sie auf echte Hardware trifft.

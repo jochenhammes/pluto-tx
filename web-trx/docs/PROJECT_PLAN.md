@@ -1,5 +1,10 @@
 # Web-TRX — Projektplan
 
+> **Stand seit der Zusammenführung:** Web-TRX liegt als Ordner `web-trx/`
+> im pluto-tx-Repository und importiert pluto-tx direkt aus diesem Checkout.
+> Das Submodule `vendor/pluto-tx` gibt es nicht mehr; Stellen unten, die es
+> beschreiben (Abschnitt 3 und 9), dokumentieren den Weg dorthin.
+
 Einheitliche Weboberfläche für `pluto-tx`/`pluto-advanced-rx` (Sende- und
 Empfangs-App für ADALM-PLUTO, HackRF One und RTL-SDR). Ziel: ein Funkamateur
 bedient die am Server angeschlossenen SDRs vollständig über den Browser —
@@ -67,11 +72,10 @@ Subprozess zu kapseln. Grund: Nur der direkte Import gibt Zugriff auf
 -Quellen (Netzwerk-Audio) — beides sitzt unterhalb dessen, was `pluto-cli`
 als Kommandozeilen-Oberfläche exponiert.
 
-Konkret: `pluto-tx` wird als **Git-Submodule** (fest gepinnter Commit) in
-`Web-TRX/vendor/pluto-tx` eingebunden — strikt lesend, nie verändert von
-hier aus (deckt sich mit der bereits vereinbarten Read-only-Regel für das
-Repo). Ein Versions-Bump ist ein bewusster, einzelner Schritt (Submodule-
-Pointer aktualisieren), kein laufendes Editieren. `pluto-cli` selbst bleibt
+Konkret: Web-TRX liegt als `web-trx/` im pluto-tx-Repository und
+importiert `pluto_tx`/`pluto_advanced_rx` aus der Repo-Wurzel
+(`backend/web_trx/pluto_path.py`). Bis zur Zusammenführung war pluto-tx
+ein fest gepinntes Git-Submodule unter `vendor/pluto-tx`. `pluto-cli` selbst bleibt
 zusätzlich nutzbar für einfache One-Shot-Admin-Aufgaben (z. B. Scan-Skripte),
 ist aber nicht der Hauptpfad der Laufzeit-Kommunikation.
 
@@ -95,7 +99,7 @@ Browser (SPA)                         Server
                                        │  │    RX-Session je Gerät)           │
                                        │  ├─ Auth (Shared-Token/Passwort)     │
                                        │  ├─ TX-Aktivitätslog (SQLite/JSONL)  │
-                                       │  └─ vendor/pluto-tx (Submodule,      │
+                                       │  └─ pluto-tx (Repo-Wurzel,           │
                                        │      importiert wie pluto_cli)       │
                                        │        ├─ PlutoTxFlowgraph           │
                                        │        ├─ AdvancedRxFlowgraph        │
@@ -241,10 +245,8 @@ Web-TRX/
 │   └── tests/
 ├── frontend/
 │   └── src/                   # Svelte-App: Waterfall-Widget, Panels, Audio-Worklets
-├── vendor/
-│   └── pluto-tx/               # Git-Submodule, read-only, gepinnter Commit
 ├── scripts/
-│   └── start.sh, stop.sh      # manueller Betrieb (systemd/Reverse-Proxy später)
+│   └── start.sh, stop.sh, status.sh  # manueller Betrieb, auch aus den Apps (systemd/Reverse-Proxy später)
 └── docs/
     └── PROJECT_PLAN.md         # dieses Dokument
 ```
@@ -270,9 +272,8 @@ Web-TRX/
 - **`FftProbe`-Polling-Rate vs. Netzwerkbandbreite**: Zeilenrate/-größe
   müssen an die tatsächliche Client-Bandbreite (LAN vs. VPN/Internet)
   anpassbar sein, nicht fest verdrahtet.
-- **Submodule-Pinning-Workflow**: wie/wann wird der `pluto-tx`-Submodule-
-  Commit aktualisiert, wenn dort ein Bugfix landet? Sollte ein bewusster,
-  dokumentierter Schritt sein, kein automatisches Tracking von `main`.
+- ~~**Submodule-Pinning-Workflow**~~: erledigt durch die Zusammenführung
+  in das pluto-tx-Repository (kein Submodule mehr).
 
 ## 9. Aktueller Stand (gegen SimBackend, ohne Hardware verifiziert)
 
@@ -360,7 +361,7 @@ Radio-Server gegen Pluto+ verifiziert):
   pluto-cli-Flags): FM-TX mit Hub 2,5/5 kHz, Pre-Emphasis und CTCSS aus der
   Standardtonliste, FM-RX mit De-Emphasis (pluto-tx `c45531d`). Ungültige
   Werte werden zum `error`-Event, Defaults werden ergänzt; die Wertetabellen
-  prüft ein Test gegen die gepinnte `vendor/pluto-tx`-Konfiguration. Das
+  prüft ein Test gegen die pluto-tx-Konfiguration im selben Repository. Das
   Frontend baut seine Auswahllisten aus dem `hello`-Event. Im
   `GnuRadioBackend` landen sie auf `set_fm_deviation()`/
   `set_fm_preemphasis()`/`set_subtone()` bzw. `fm_deemphasis` des
@@ -393,7 +394,7 @@ Radio-Server gegen Pluto+ verifiziert):
       `docs/DEBUGGING.md`). Dafür gibt es jetzt „Korr. ppm“ für RX und TX.
   - **Waterfall Writer (digitext):** Text-Einmalsendung; im Wasserfall
     lesbar mit RX-Bandbreite 0,96 MS/s, FFT 1024, Zoom ×32.
-  - Modus-Schemas in `modes.py` (gegen `vendor/pluto-tx` getestet). Die
+  - Modus-Schemas in `modes.py` (gegen die pluto-tx-Dateien getestet). Die
     verfügbaren Modi meldet das Backend (`features.rx_modes/tx_modes`,
     RADE nur mit librade). RX-Bandbreite (Sample-Rate je Gerät) ist wählbar,
     Zoom bis ×128.

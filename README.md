@@ -9,7 +9,7 @@ AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
 Sicherheitsschicht (siehe [Sicherheit](#sicherheit)).
 
-Drei Programme, ein Repo:
+Vier Programme, ein Repo:
 
 - **`pluto-tx`** — Sende-App (GUI)
 - **`pluto-advanced-rx`** — Empfänger-App mit interaktivem, SDR++-artigem
@@ -17,6 +17,9 @@ Drei Programme, ein Repo:
 - **`pluto-cli`** — headless Kommandozeilen-Zugriff auf die wichtigsten
   Funktionen beider Apps, für Skripte/Automatisierung ([volle
   Referenz](pluto_cli/README.md))
+- **`web-trx`** — Browser-Oberfläche für Senden und Empfangen übers Netz
+  oder VPN, mit Wasserfall, Audio und Digimodes ([Anleitung](web-trx/README.md)).
+  Start und Stopp auch aus beiden Apps heraus.
 
 **Sendebetrieb nur mit gültiger Amateurfunklizenz.** Verantwortung für
 Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
@@ -30,6 +33,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 | **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
+| **Fernbetrieb** | `web-trx` — Browser-Oberfläche (FastAPI + Svelte) auf derselben Codebasis, ein Betreiber, Login, HTTPS |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
 
 <p align="center">
@@ -134,6 +138,18 @@ der Rest läuft normal. Baut [`freedv/rade_c`](https://github.com/freedv/rade_c)
 (gepinnter Commit) nach `rade_c/` im Projektverzeichnis und regeneriert
 alle drei Starter mit passendem `LD_LIBRARY_PATH`/`PATH`.
 
+### Optional: Web-TRX (Browser-Oberfläche)
+
+```
+./install-web-trx.sh
+```
+
+Legt für `web-trx/` ein Python-venv (mit `--system-site-packages`, damit
+GNU Radio und libiio sichtbar sind) an, baut das Frontend (braucht Node.js
+≥ 18, das Skript installiert es nicht selbst) und legt den Starter
+`~/.local/bin/web-trx` an. `install.sh` und die übrigen Starter bleiben
+unberührt. Details, Konfiguration und Betrieb: [`web-trx/README.md`](web-trx/README.md).
+
 ## Erste Schritte
 
 ```
@@ -162,6 +178,16 @@ gesetzt:
 ```
 export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 ```
+
+**Web-TRX starten und stoppen**: `web-trx start|stop|status|open|log`,
+oder in `pluto-tx` bzw. `pluto-advanced-rx` in der Zeile „Web-TRX“ auf
+**Start**, **Stop** oder **Open** klicken. Der Server läuft weiter, wenn
+die App geschlossen wird. Web-TRX und eine App dürfen nie gleichzeitig
+dasselbe SDR öffnen: Hat die App beim Start von Web-TRX ein Gerät offen,
+fragt sie, ob sie es vorher trennen soll; hat Web-TRX einen Gerätetyp
+offen, warnt die App vor „Connect“ damit und verbindet sich beim Start
+nicht automatisch. `PLUTO_WEBTRX_CONTROL=off` blendet die Zeile aus
+(nur Hinweistext).
 
 ## Beispielhafte Anwendungsfälle
 
@@ -425,7 +451,7 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
 ## Struktur
 
 ```
-install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh
+install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-web-trx.sh
 pluto_tx/                 # Sende-App
 ├── config.py                # geräteunabhängige Konstanten
 ├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard)
@@ -438,6 +464,7 @@ pluto_tx/                 # Sende-App
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
 ├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib
 ├── gui.py / app.py
+├── webtrx_control.py / webtrx_widget.py  # Web-TRX starten/stoppen/abfragen (Qt-frei) + die Zeile in beiden Apps
 └── da2jh-test.wav              # Standard-Testaufnahme
 pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
@@ -446,6 +473,9 @@ pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 └── ...
 tests/                     # Unit-/Loopback-Tests: python3 -m unittest discover tests
 pluto_cli/                 # headless CLI, importiert die beiden Apps oben, siehe pluto_cli/README.md
+web-trx/                   # Browser-Oberfläche: backend/ (FastAPI), frontend/ (Svelte), scripts/, docs/ -- siehe web-trx/README.md
+                           #   eigene Tests: cd web-trx/backend && .venv/bin/python -m pytest (nie pytest aus der Repo-Wurzel)
+.github/workflows/         # CI für web-trx (Backend-Tests, Frontend-Build) und die Web-TRX-Steuerung der Apps
 docs/screenshots/          # Screenshots für dieses README
 backlog/                   # geparkte/archivierte Arbeit (Entwicklungshistorie, nicht aktiv genutzte Module)
 ```

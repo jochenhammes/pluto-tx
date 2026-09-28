@@ -14,14 +14,17 @@ enthält die Schritte.
 `docs/DEBUGGING.md` (bekannte Stolpersteine), dann diesen Plan komplett. Für
 die pluto-tx-Seite: `pluto_cli/runtime.py` (`_run_ft8_series`),
 `pluto_cli/tx.py` (`run_ft8`), `pluto_cli/rx.py` (`on_ft8_decodes`),
-`pluto_tx/ft8.py`, `pluto_advanced_rx/ft8_rx.py` in der pluto-tx-Installation
-(`WEB_TRX_PLUTO_TX_PATH`, Standard `~/Dokumente/plutosdr`).
+`pluto_tx/ft8.py`, `pluto_advanced_rx/ft8_rx.py` in der Repo-Wurzel (Web-TRX
+liegt seit der Zusammenführung als `web-trx/` im pluto-tx-Repository).
 
 **Feste Regeln:**
-- **pluto-tx ist read-only.** Weder die Installation unter
-  `WEB_TRX_PLUTO_TX_PATH` noch `vendor/pluto-tx` werden verändert. Fehlt dort
-  etwas, wird das dem Betreiber gemeldet, nicht umgangen.
-- **Gearbeitet wird direkt auf `main`** im Web-TRX-Repo. Kleine Commits je
+- **Das ganze Repository ist frei bearbeitbar** (seit der Zusammenführung
+  gilt die frühere Regel „pluto-tx read-only“ nicht mehr). Änderungen an
+  `pluto_tx/`, `pluto_advanced_rx/` oder `pluto_cli/` dürfen die Apps nicht
+  brechen: vor jedem Commit laufen dafür zusätzlich die pluto-tx-Tests
+  (`QT_QPA_PLATFORM=offscreen PLUTO_WEBTRX_CONTROL=off python3 -m unittest
+  discover tests` in der Repo-Wurzel).
+- **Gearbeitet wird direkt auf `main`** im pluto-tx-Repo. Kleine Commits je
   abgeschlossenem Schritt, Tests vorher grün, Push am Ende jeder Phase.
 - **FT8 selbst wird nicht nachgebaut** (keine eigene Synthese, kein eigener
   Decoder, keine eigene Slot-Planung außer als Test-Double im SimBackend).
@@ -179,10 +182,10 @@ eines Modus.
   `select_mode` per `tb.ft8_problem()`.
 - Wertetabellen (`FT8_TONE_RANGE_HZ`, `FT8_DEFAULT_TONE_HZ`,
   `MESSAGE_KINDS`, `FREE_TEXT_MAX`) werden wie bei FM/RTTY gespiegelt und
-  per Test gegen die gepinnte pluto-tx-Version geprüft.
+  per Test gegen die pluto-tx-Dateien im selben Repository geprüft.
   - `MESSAGE_KINDS` und `FREE_TEXT_MAX` stehen in `pluto_tx/ft8.py`. Das
     Modul hat relative Imports, der Test muss es also als Paket importieren
-    (`vendor/pluto-tx` auf `sys.path`) statt per Dateipfad.
+    (Repo-Wurzel auf `sys.path`) statt per Dateipfad.
 
 ### 4.3 Backend: TX
 

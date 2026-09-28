@@ -1,10 +1,16 @@
 # Web-TRX
 
-Einheitliche Weboberfläche für [`pluto-tx`/`pluto-advanced-rx`](https://github.com/jochenhammes/pluto-tx)
+Einheitliche Weboberfläche für `pluto-tx`/`pluto-advanced-rx`
 (Sende-/Empfangs-Software für ADALM-PLUTO, HackRF One und RTL-SDR). Ein
 lizenzierter Funkamateur bedient die am Server angeschlossenen SDRs
 vollständig über den Browser — Senden und Empfangen, inklusive Wasserfall/
 Spektrum, Audio und Digimodes.
+
+Web-TRX ist Teil des pluto-tx-Repositorys (dieser Ordner `web-trx/`) und
+steht gleichwertig neben `pluto-tx`, `pluto-advanced-rx` und `pluto-cli`.
+Das Backend importiert den Python-Code direkt aus diesem Checkout. Starten
+und Stoppen geht per `web-trx start|stop`, mit den Skripten unter
+`scripts/` oder mit der Zeile „Web-TRX“ in der TX- und der RX-App.
 
 **Stand:**
 - **Empfang:** FM, SSB (USB/LSB) und M17 mit Audio im Browser. POCSAG wird dekodiert.
@@ -17,90 +23,83 @@ Projektplan (Architektur, Betriebsarten, Meilensteine, aktueller Stand):
 [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
 Debug-/Teststrategie und bekannte Stolpersteine: [`docs/DEBUGGING.md`](docs/DEBUGGING.md).
 
-## Installation (pluto-tx ist bereits installiert)
+## Installation
 
-Diese Anleitung geht davon aus, dass auf dem Rechner mit den SDRs
-`pluto-tx` schon per `install.sh` eingerichtet ist (GNU Radio, libiio,
-gr-osmosdr/SoapySDR aus den Systempaketen). Optional sind auch gr-m17
-(`install-m17.sh`, landet in `~/.local`) und RADE (`install-rade.sh`)
-gebaut. Kurz: `pluto-tx` bzw. `pluto-advanced-rx` starten und funktionieren.
-Web-TRX installiert **nichts** an pluto-tx nach und verändert es nicht; es
-importiert dessen Python-Code direkt aus der vorhandenen Installation.
+Voraussetzung ist ein eingerichtetes pluto-tx (`./install.sh` im
+Repo-Wurzelverzeichnis; optional `install-m17.sh`, `install-rade.sh`,
+`install-ft8.sh`). Kurz: `pluto-tx` bzw. `pluto-advanced-rx` starten und
+funktionieren. Web-TRX nutzt dieselben Bibliotheken (GNU Radio, libiio,
+SoapySDR, gr-m17 in `~/.local`, `rade_c/`, `ft8_lib/`) und verändert an
+ihnen nichts.
 
-### 1. Voraussetzungen prüfen
+### 1. Voraussetzungen
 
 ```bash
 python3 -c "import gnuradio, iio; print('GNU Radio + libiio ok')"
-python3 -m venv --help >/dev/null && echo "venv ok"
 node --version     # >= 18 (für den Frontend-Build)
-npm --version
-openssl version    # für das selbstsignierte HTTPS-Zertifikat
 ```
 
-Fehlt etwas davon, auf Debian/Ubuntu nachinstallieren:
+`install-web-trx.sh` prüft alles Weitere selbst (python3-venv, openssl)
+und installiert fehlende Systempakete per `apt-get`. Node.js installiert
+es bewusst **nicht**: Ist keines oder ein zu altes (< 18) vorhanden, eine
+aktuelle LTS-Version z. B. über [nvm](https://github.com/nvm-sh/nvm)
+installieren.
+
+### 2. Installieren
+
+Im pluto-tx-Verzeichnis (nicht als root, nicht mit sudo):
 
 ```bash
-sudo apt install python3-venv nodejs npm openssl
+./install-web-trx.sh
 ```
 
-Liefert die Distribution ein Node.js älter als 18, eine aktuelle LTS-Version
-z. B. über [nvm](https://github.com/nvm-sh/nvm) installieren.
+Das Skript
+- legt `web-trx/backend/.venv` **mit** `--system-site-packages` an (GNU
+  Radio und libiio kommen aus den Systempaketen und lassen sich nicht per
+  pip installieren),
+- installiert das Backend (`pip install -e "web-trx/backend[dev]"`),
+- baut das Frontend nach `web-trx/frontend/dist/` (`npm ci`, `npm run build`),
+- prüft per Import, dass GNU Radio, numpy, libiio und das Backend im venv
+  zusammenpassen,
+- legt den Starter `~/.local/bin/web-trx` an.
 
-### 2. Repository klonen
+Beliebig oft wiederholbar (z. B. nach einem `git pull`). `web-trx.env`
+legt es nicht an.
 
-```bash
-cd ~/Dokumente
-git clone --recurse-submodules https://github.com/jochenhammes/Web-TRX.git
-cd Web-TRX
-```
+### 3. Konfiguration (`web-trx/web-trx.env`, optional)
 
-(`vendor/pluto-tx` ist ein gepinntes Submodule, das nur als Fallback dient,
-wenn keine eigene pluto-tx-Installation angegeben ist, siehe Schritt 4.)
-
-### 3. Python-Umgebung für das Backend
-
-GNU Radio und libiio lassen sich nicht per pip installieren, sie kommen aus
-den Systempaketen. Das venv muss sie daher sehen, also unbedingt **mit**
-`--system-site-packages` anlegen:
+Eine Datei `web-trx/web-trx.env` (wird nicht eingecheckt) kann Einstellungen
+setzen, siehe [Konfiguration](#konfiguration):
 
 ```bash
-python3 -m venv --system-site-packages backend/.venv
-backend/.venv/bin/pip install -e "backend[dev]"
-```
-
-### 4. Konfiguration (`web-trx.env`)
-
-Im Repo-Root eine Datei `web-trx.env` anlegen (wird nicht eingecheckt):
-
-```bash
-cat > web-trx.env <<'EOF'
-# Pfad zur vorhandenen pluto-tx-Installation (das Verzeichnis, das
-# pluto_tx/ und pluto_advanced_rx/ enthält und in dem install.sh lief)
-WEB_TRX_PLUTO_TX_PATH=/home/<user>/Dokumente/plutosdr
+cat > web-trx/web-trx.env <<'EOF'
 # eigenes Login-Passwort (fehlt es, erzeugt start.sh beim ersten Start
 # eines und trägt es hier ein)
 WEB_TRX_PASSWORD=bitte-ein-eigenes-passwort
 EOF
-chmod 600 web-trx.env
+chmod 600 web-trx/web-trx.env
 ```
 
-Der Default für `WEB_TRX_PLUTO_TX_PATH` ist `~/Dokumente/plutosdr`. Liegt
-pluto-tx genau dort, kann die Zeile entfallen. Alle Einstellungen stehen
-unter [Konfiguration](#konfiguration).
+`WEB_TRX_PLUTO_TX_PATH` ist nicht mehr nötig: Standard ist dieses
+Repository selbst.
 
-### 5. Erster Start
+### 4. Starten
 
 ```bash
-scripts/start.sh
+web-trx start        # oder: web-trx/scripts/start.sh
 ```
 
-Beim ersten Start passiert automatisch:
-- `npm install` und der Frontend-Build nach `frontend/dist/`.
-- Ein selbstsigniertes HTTPS-Zertifikat unter `run/tls/`, gültig für localhost, den Hostnamen und alle IPv4-Adressen des Rechners.
+oder in `pluto-tx` / `pluto-advanced-rx` in der Zeile „Web-TRX“ auf
+**Start** klicken.
+
+### 5. Was beim ersten Start passiert
+
+- Ein selbstsigniertes HTTPS-Zertifikat unter `web-trx/run/tls/`, gültig für localhost, den Hostnamen und alle IPv4-Adressen des Rechners.
 - Der Server startet im Hintergrund auf Port 8321 und gibt die Adresse(n) aus, z. B. `https://192.168.178.132:8321`.
+- Fehlt das Frontend (`frontend/dist/`), baut `start.sh` es vorher.
 
 Ohne `WEB_TRX_PASSWORD` erzeugt `start.sh` einmalig ein Passwort, gibt es
-aus und speichert es in `web-trx.env`. Es bleibt dann über Neustarts gleich.
+aus und speichert es in `web-trx/web-trx.env`. Es bleibt dann über Neustarts gleich.
 
 ### 6. Im Browser öffnen
 
@@ -137,8 +136,9 @@ Empfangsfrequenz für TX.
 ### 7. Prüfen, ob alles erkannt wird
 
 ```bash
-curl -sk https://localhost:8321/health      # {"status":"ok","backend":"GnuRadioBackend"}
-tail -f run/web-trx.log                     # Server-Log
+web-trx status                               # läuft (PID …), Backend GnuRadioBackend
+curl -sk https://localhost:8321/health       # {"status":"ok","backend":"GnuRadioBackend","devices":{…}}
+web-trx log                                  # Server-Log (web-trx/run/web-trx.log)
 ```
 
 Optional ein Hardware-Test, der **nur empfängt** (braucht einen erreichbaren
@@ -146,43 +146,68 @@ PlutoSDR und muss bei gestopptem Server laufen, weil beide das Gerät
 belegen würden):
 
 ```bash
-scripts/stop.sh
-WEB_TRX_PLUTO_TX_PATH=~/Dokumente/plutosdr WEB_TRX_HW_TESTS=1 \
-  backend/.venv/bin/python -m pytest backend/tests/test_radio_backend.py
-scripts/start.sh
+web-trx stop
+cd web-trx/backend && WEB_TRX_HW_TESTS=1 .venv/bin/python -m pytest tests/test_radio_backend.py; cd -
+web-trx start
 ```
 
 ### 8. Aktualisieren
 
 ```bash
-scripts/stop.sh
-git pull --recurse-submodules
-backend/.venv/bin/pip install -e "backend[dev]"   # falls sich Abhängigkeiten geändert haben
-scripts/start.sh --build                          # Frontend neu bauen
+web-trx stop
+git pull                  # im pluto-tx-Verzeichnis
+./install-web-trx.sh      # Abhängigkeiten + Frontend neu bauen
+web-trx start
 ```
 
 ### Fehlersuche
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
-| `start.sh`: „Backend-venv fehlt“ | Schritt 3 ausführen. |
-| „Start fehlgeschlagen“, Log leer oder Import-Fehler zu `gnuradio` | venv ohne `--system-site-packages` angelegt: `rm -rf backend/.venv` und Schritt 3 wiederholen. |
-| `no pluto-tx checkout at …` | `WEB_TRX_PLUTO_TX_PATH` in `web-trx.env` zeigt nicht auf das pluto-tx-Verzeichnis. |
-| M17 nicht wählbar („gr-m17 is not importable“) | gr-m17 nicht gebaut (`install-m17.sh` von pluto-tx). Den Server immer über `scripts/start.sh` starten, das setzt `LD_LIBRARY_PATH` und die Python-Pfade für `~/.local`. |
+| `start.sh`: „Backend-venv fehlt“ | `./install-web-trx.sh` im pluto-tx-Verzeichnis ausführen. |
+| `install-web-trx.sh`: venv ohne `--system-site-packages` | Altes venv beiseitelegen (`mv web-trx/backend/.venv ~/web-trx-venv.alt`), Skript erneut ausführen. |
+| `no pluto-tx checkout at …` | `WEB_TRX_PLUTO_TX_PATH` in `web-trx.env` zeigt auf ein falsches Verzeichnis. Zeile entfernen, Standard ist dieses Repo. |
+| M17 nicht wählbar („gr-m17 is not importable“) | gr-m17 nicht gebaut (`./install-m17.sh`). Den Server immer über `web-trx start` bzw. `scripts/start.sh` starten, das setzt `LD_LIBRARY_PATH` und die Python-Pfade für `~/.local`. |
 | Mikrofon-Fehler beim PTT | Seite über `http://` statt `https://` geöffnet, oder Mikrofon im Browser blockiert. |
 | „could not connect to PlutoSDR“ | Pluto nicht erreichbar oder `plutoplus.local` löst falsch auf. Die IP direkt als Verbindung eintragen, z. B. `ip:192.168.2.1`. |
-| Gerät belegt | Läuft parallel die pluto-tx-GUI oder `pluto-cli` auf demselben Gerät? Die jeweils andere Anwendung beenden. |
-| Wasserfall bleibt leer | Empfänger über „Verbinden“ starten. Das Log (`run/web-trx.log`) zeigt Fehler beim Aufbau des Flowgraphs. |
+| Gerät belegt | Läuft parallel die pluto-tx-GUI oder `pluto-cli` auf demselben Gerät? Die jeweils andere Anwendung beenden. Die TX-/RX-App warnen selbst, wenn Web-TRX das Gerät offen hat. |
+| Wasserfall bleibt leer | Empfänger über „Verbinden“ starten. Das Log (`web-trx log`) zeigt Fehler beim Aufbau des Flowgraphs. |
+| App zeigt „Web-TRX: not installed“ | `./install-web-trx.sh` ausführen; der Tooltip nennt, was fehlt. |
 
 ## Betrieb
 
 Bewusst manuell, (noch) kein systemd-Dienst:
 
 ```bash
-scripts/start.sh           # startet im Hintergrund, baut das Frontend falls nötig
+web-trx start              # = scripts/start.sh: startet im Hintergrund, baut das Frontend falls nötig
+web-trx stop               # = scripts/stop.sh: sauberes Ende inkl. Sender-Safe-State (unkey, Pluto: max. Dämpfung, LO aus)
+web-trx restart            # stop + start (startet nicht neu, wenn der Stopp erzwungen werden musste)
+web-trx status             # = scripts/status.sh [--json]
+web-trx open               # Seite im Browser öffnen
+web-trx log                # Log verfolgen
 scripts/start.sh --build   # Frontend neu bauen (nach Änderungen daran)
-scripts/stop.sh            # sauberes Ende inkl. Sender-Safe-State (unkey, Pluto: max. Dämpfung, LO aus)
 ```
+
+Exit-Codes: `start.sh` 0 gestartet, 3 lief schon, 4 Prozess läuft, aber
+noch unbestätigt, 1 Fehler. `stop.sh` 0 gestoppt, 2 musste per SIGKILL
+beendet werden (Safe-State des Senders prüfen). `status.sh` 0 läuft,
+3 gestoppt, 4 startet/reagiert nicht, 5 nicht installiert, 6 läuft, aber
+nicht aus diesem Checkout gestartet. Start und Stopp sind über
+`run/start.lock` gegeneinander verriegelt; eine PID-Datei zählt nur, wenn
+der Prozess wirklich der Web-TRX-Server ist.
+
+**Aus den Apps:** `pluto-tx` und `pluto-advanced-rx` zeigen in einer Zeile
+„Web-TRX“ den Zustand und haben die Knöpfe **Start**, **Stop** und
+**Open**. Der Server läuft weiter, wenn die App geschlossen wird. Web-TRX
+und eine App dürfen nie gleichzeitig dasselbe SDR öffnen:
+- Hat die App beim Klick auf **Start** ein Gerät offen, fragt sie, ob sie
+  es vorher trennen soll, und nennt die Geräte, die Web-TRX beim Start
+  wieder öffnet.
+- Hat Web-TRX einen Gerätetyp offen, warnt die App vor „Connect“ mit
+  demselben Typ und verbindet sich beim App-Start nicht automatisch.
+- `/health` meldet dafür lokalen Anfragen (127.0.0.1) zusätzlich, welche
+  Geräte der Server offen hat.
+- `PLUTO_WEBTRX_CONTROL=off` schaltet die Zeile in den Apps ab.
 
 Ein Prozess liefert API, WebSocket und das gebaute Frontend auf Port 8321
 aus.
@@ -210,7 +235,7 @@ Per Umgebungsvariable oder als `KEY=value`-Zeile in `web-trx.env`:
 
 | Variable | Default | Bedeutung |
 |---|---|---|
-| `WEB_TRX_PLUTO_TX_PATH` | `~/Dokumente/plutosdr` | pluto-tx-Installation, deren Code importiert wird |
+| `WEB_TRX_PLUTO_TX_PATH` | dieses Repository (Elternordner von `web-trx/`) | pluto-tx-Code, der importiert wird — nur zum Testen gegen einen anderen Checkout nötig |
 | `WEB_TRX_PASSWORD` | beim ersten Start erzeugt und in `web-trx.env` gespeichert | Login-Passwort (ein Betreiber, ein geteiltes Passwort) |
 | `WEB_TRX_STATION_CALL` / `WEB_TRX_STATION_LOCATOR` | leer | Startwert der Stationsdaten, solange noch keine gespeichert sind |
 | `WEB_TRX_NO_OPERATOR_S` | `10` | Sekunden ohne Browser, bis Empfänger und Sender getrennt werden (Aussendungen enden sofort) |
@@ -265,7 +290,8 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 - Sicherheit: NOTAUS, automatisches Abtasten wenn das Mikrofon-Audio
   abreißt, Sende-Zeitbegrenzung, persistentes TX-Log.
 - Login mit geteiltem Passwort, HTTPS, Bedien-Einstellungen bleiben über
-  Neustarts erhalten, manueller Betrieb über `scripts/start.sh`/`stop.sh`.
+  Neustarts erhalten, manueller Betrieb über `web-trx` bzw.
+  `scripts/start.sh`/`stop.sh` und aus der TX-/RX-App.
 - Modus-Parameter zentral geprüft in `backend/web_trx/modes.py`.
 
 **Offen**
@@ -280,23 +306,34 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 ```
 backend/    FastAPI-Server (Python) -- SessionManager, SimBackend, GnuRadioBackend, Auth, TX-Log, Modus-Parameter
 frontend/   Svelte/TypeScript-SPA -- Login, Wasserfall, RX/TX-Panels, TX-Verlauf, Event-Log
-scripts/    start.sh / stop.sh (manueller Betrieb)
-vendor/     Git-Submodule: pluto-tx (read-only, gepinnter Commit, Fallback)
-docs/       Projektplan, Debugging-Strategie
+scripts/    start.sh / stop.sh / status.sh (manueller Betrieb, auch von den Apps aufgerufen)
+docs/       Projektplan, Debugging-Strategie, FT8-Plan
 run/        Laufzeitdaten (nicht eingecheckt)
 ```
 
+Außerhalb dieses Ordners gehören dazu: `../install-web-trx.sh`,
+`../pluto_tx/webtrx_control.py` (Start/Stopp/Status für Apps und
+Kommandozeile), `../pluto_tx/webtrx_widget.py` (die Zeile in den Apps)
+und `../.github/workflows/web-trx.yml` (CI).
+
 ## Entwicklung (ohne Hardware)
 
+Tests und Linter für Web-TRX laufen **aus `web-trx/backend`** mit pytest.
+Die pluto-tx-Tests laufen dagegen aus der Repo-Wurzel mit
+`python3 -m unittest discover tests`. Beide Ordner heißen `tests`, deshalb
+nie pytest aus der Repo-Wurzel starten.
+
 ```bash
-python3 -m venv backend/.venv && backend/.venv/bin/pip install -e "backend[dev]"
-backend/.venv/bin/python -m pytest backend    # läuft komplett ohne GNU Radio/Hardware
-cd backend && .venv/bin/uvicorn web_trx.server:create_app --factory --reload --port 8321   # SimBackend
+cd web-trx/backend
+python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e ".[dev]"   # macht sonst install-web-trx.sh
+.venv/bin/python -m pytest            # Tabellen-Tests prüfen gegen ../../pluto_tx/config.py
+.venv/bin/ruff check web_trx tests
+.venv/bin/uvicorn web_trx.server:create_app --factory --reload --port 8321   # SimBackend
 ```
 
 ```bash
-cd frontend
-npm install
+cd web-trx/frontend
+npm ci
 npm run dev      # Vite mit Proxy auf das Backend (127.0.0.1:8321), siehe vite.config.ts
 npm run check    # Typecheck
 npm run build
@@ -305,23 +342,14 @@ npm run build
 `WEB_TRX_BACKEND` wählt die `SessionBackend`-Implementierung: `sim`
 (Default bei direktem uvicorn-Start, keine Hardware nötig) oder `gnuradio`.
 
-## Submodule
+## Herkunft
 
-`vendor/pluto-tx` ist ein Git-Submodule auf einem fest gepinnten Commit —
-**read-only**, nie von hier aus verändert. Ein Versions-Bump ist ein
-bewusster Einzelschritt:
-
-```bash
-git -C vendor/pluto-tx fetch
-git -C vendor/pluto-tx checkout <neuer-commit>
-git add vendor/pluto-tx
-git commit -m "vendor/pluto-tx: bump to <neuer-commit>"
-```
-
-Beim Klonen: `git clone --recurse-submodules ...` bzw. nachträglich
-`git submodule update --init`. Nach jedem `git pull` zusätzlich
-`git submodule update`, sonst bleibt `vendor/pluto-tx` auf dem alten Stand.
+Web-TRX entstand als eigenes Repository
+[jochenhammes/Web-TRX](https://github.com/jochenhammes/Web-TRX) (dort mit
+voller Einzelhistorie archiviert) und band pluto-tx als Submodule ein. Seit
+der Zusammenführung liegt es hier; der Import-Commit nennt den
+übernommenen Stand.
 
 ## Lizenz
 
-[GPLv3](LICENSE) — wie `pluto-tx`, dessen Code das Backend importiert.
+[GPLv3](../LICENSE) — wie das ganze pluto-tx-Repository.
