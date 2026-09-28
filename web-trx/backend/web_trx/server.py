@@ -8,10 +8,12 @@ single shared-password login below (see auth.py).
 """
 from __future__ import annotations
 
+import ipaddress
+import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Cookie, FastAPI, HTTPException, Response, WebSocket
+from fastapi import Cookie, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -25,7 +27,7 @@ def backend_for_name(name: str) -> SessionBackend:
     if name == "sim":
         return SimBackend()
     if name == "gnuradio":
-        # Deferred import: only touches vendor/pluto-tx (and therefore
+        # Deferred import: only touches the pluto-tx packages (and therefore
         # GNU Radio/libiio) when actually selected -- keeps `sim` usable in
         # environments without those installed (this dev container, CI).
         from .radio_backend import GnuRadioBackend
@@ -36,6 +38,46 @@ def backend_for_name(name: str) -> SessionBackend:
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class _HealthAccessFilter(logging.Filter):
+    """Keeps GET /health out of uvicorn's access log: the TX/RX apps poll it
+    every few seconds (pluto_tx/webtrx_control.py)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            return str(args[2]).split("?", 1)[0] != "/health"
+        return True
+
+
+def _install_health_access_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HealthAccessFilter) for f in access_logger.filters):
+        access_logger.addFilter(_HealthAccessFilter())
+
+
+def _is_loopback(host: str | None) -> bool:
+    try:
+        return host is not None and ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def device_summary(backend: SessionBackend) -> dict:
+    """{"rx": {"connected", "device_type"}, "tx": {...}} for /health. A
+    direction the server is still re-opening after a restart counts as
+    connected already."""
+    snapshot = backend.snapshot()
+    restoring = getattr(backend, "restoring", lambda: set())()
+    out = {}
+    for direction in ("rx", "tx"):
+        d = snapshot.get(direction) or {}
+        out[direction] = {
+            "connected": d.get("connection") is not None or direction in restoring,
+            "device_type": d.get("device_type"),
+        }
+    return out
 
 
 def create_app(
@@ -62,14 +104,21 @@ def create_app(
         await manager.backend.shutdown()
         tx_log.close()
 
+    _install_health_access_filter()
     app = FastAPI(title="Web-TRX", lifespan=lifespan)
     app.state.manager = manager
     app.state.auth = auth
     app.state.tx_log = tx_log
 
     @app.get("/health")
-    async def health() -> dict:
-        return {"status": "ok", "backend": manager.backend_name}
+    async def health(request: Request) -> dict:
+        out = {"status": "ok", "backend": manager.backend_name}
+        # Which SDRs the server holds: only for the local TX/RX apps, which must
+        # never open a device Web-TRX has open (pluto_tx/webtrx_control.py) --
+        # not something to tell the network without a login.
+        if _is_loopback(request.client.host if request.client else None):
+            out["devices"] = device_summary(manager.backend)
+        return out
 
     @app.post("/login")
     async def login(body: LoginRequest, response: Response) -> dict:

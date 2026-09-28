@@ -255,6 +255,7 @@ class GnuRadioBackend(SessionBackend):
         # scripts/start.sh points it at run/settings.json.
         self._settings_path = os.environ.get("WEB_TRX_SETTINGS_PATH")
         self._restore: dict[str, str] = {}  # direction -> connection to re-open at start ("" = auto)
+        self._restoring: set[str] = set()     # directions _restore_connections() is still working on
         self.station = station.from_environment()  # start value; a saved one wins (_load_settings)
         self._load_settings()
 
@@ -558,6 +559,7 @@ class GnuRadioBackend(SessionBackend):
         open before, in their saved mode, so a reconnecting browser finds
         everything as it was. Builds flowgraphs only -- never keys."""
         restore, self._restore = self._restore, {}
+        self._restoring = set(restore)
         for direction in ("rx", "tx"):
             connection = restore.get(direction)
             if connection is None:
@@ -574,6 +576,14 @@ class GnuRadioBackend(SessionBackend):
                 logger.warning("could not restore %s connection %s: %s", direction, connection, e)
                 await self._emit_event("error", {"message": f"{direction}: Wiederverbinden fehlgeschlagen: {e}",
                                                  "direction": direction})
+            finally:
+                self._restoring.discard(direction)
+
+    def restoring(self) -> set[str]:
+        """Directions whose saved connection is about to be re-opened (server
+        start) -- reported by /health so the local Qt apps treat that device as
+        taken already, not only once the restore has finished."""
+        return set(self._restore) | self._restoring
 
     # -- RX --
 

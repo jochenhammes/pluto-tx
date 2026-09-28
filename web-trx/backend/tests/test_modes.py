@@ -5,7 +5,8 @@ import pytest
 
 from web_trx import modes
 
-PLUTO_TX_CONFIG = Path(__file__).resolve().parents[2] / "vendor" / "pluto-tx" / "pluto_tx" / "config.py"
+# web-trx/backend/tests/test_modes.py -> parents[3] is the pluto-tx repository root
+PLUTO_TX_CONFIG = Path(__file__).resolve().parents[3] / "pluto_tx" / "config.py"
 
 
 def test_fm_tx_defaults():
@@ -61,8 +62,8 @@ def test_other_modes_pass_through_unchanged():
     assert modes.normalize_params("tx", "pocsag", params) == params
 
 
-@pytest.mark.skipif(not PLUTO_TX_CONFIG.exists(), reason="vendor/pluto-tx submodule not checked out")
-def test_tables_match_pinned_pluto_tx():
+@pytest.mark.skipif(not PLUTO_TX_CONFIG.exists(), reason="not inside a pluto-tx checkout")
+def test_tables_match_pluto_tx():
     """Loaded by file path so the test needs no sys.path changes;
     pluto_tx/config.py is pure Python, no GNU Radio needed."""
     spec = importlib.util.spec_from_file_location("pluto_tx_config", PLUTO_TX_CONFIG)
@@ -108,8 +109,8 @@ def test_rade_tx_eoo_flag():
         modes.normalize_params("tx", "rade", {"callsign": "x"})
 
 
-@pytest.mark.skipif(not PLUTO_TX_CONFIG.exists(), reason="vendor/pluto-tx submodule not checked out")
-def test_rtty_and_digitext_tables_match_pinned_pluto_tx():
+@pytest.mark.skipif(not PLUTO_TX_CONFIG.exists(), reason="not inside a pluto-tx checkout")
+def test_rtty_and_digitext_tables_match_pluto_tx():
     spec = importlib.util.spec_from_file_location("pluto_tx_config", PLUTO_TX_CONFIG)
     cfg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cfg)
@@ -138,8 +139,8 @@ PLUTO_RX_CONFIG = PLUTO_TX_CONFIG.parents[1] / "pluto_advanced_rx" / "config.py"
 PLUTO_CLI_RX = PLUTO_TX_CONFIG.parents[1] / "pluto_cli" / "rx.py"
 
 
-@pytest.mark.skipif(not PLUTO_RX_CONFIG.exists(), reason="vendor/pluto-tx submodule not checked out")
-def test_ft8_rx_tables_match_pinned_pluto_tx():
+@pytest.mark.skipif(not PLUTO_RX_CONFIG.exists(), reason="not inside a pluto-tx checkout")
+def test_ft8_rx_tables_match_pluto_tx():
     """pluto_advanced_rx/config.py imports other pluto-tx modules, so the
     values are read as text rather than imported."""
     import ast

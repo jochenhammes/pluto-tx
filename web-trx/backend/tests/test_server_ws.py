@@ -14,7 +14,7 @@ from web_trx.sim_backend import SimBackend
 TEST_PASSWORD = "test-password"
 
 
-def make_client() -> TestClient:
+def make_client(client_addr: tuple[str, int] | None = None) -> TestClient:
     """Returns an un-entered TestClient -- every test uses `with
     make_client() as client:` so the ASGI lifespan (startup/shutdown, see
     server.py) actually runs on the same event loop that serves the
@@ -24,7 +24,7 @@ def make_client() -> TestClient:
     random one") and an in-memory TX log keep tests deterministic and
     file-free."""
     app = create_app(SimBackend(), auth=AuthManager(password=TEST_PASSWORD), tx_log_path=":memory:")
-    return TestClient(app)
+    return TestClient(app, client=client_addr) if client_addr else TestClient(app)
 
 
 def login(client: TestClient) -> None:
@@ -41,6 +41,60 @@ def test_health():
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok", "backend": "SimBackend"}
+
+
+def test_health_reports_devices_to_loopback_only():
+    """The local TX/RX apps (pluto_tx/webtrx_control.py) read which SDRs the
+    server holds; a remote client without a login does not get to see it."""
+    with make_client(("127.0.0.1", 40000)) as client:
+        body = client.get("/health").json()
+        assert body["devices"] == {"rx": {"connected": False, "device_type": None},
+                                   "tx": {"connected": False, "device_type": None}}
+    with make_client(("::1", 40000)) as client:
+        assert "devices" in client.get("/health").json()
+    with make_client(("192.168.1.20", 40000)) as client:
+        assert "devices" not in client.get("/health").json()
+
+
+def test_health_devices_follow_connect_and_disconnect():
+    with make_client(("127.0.0.1", 40000)) as client:
+        login(client)
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()  # hello
+            ws.send_json({"request": "connect", "direction": "tx", "device_type": "sim"})
+            assert ws.receive_json()["event"] == "connected"
+            devices = client.get("/health").json()["devices"]
+            assert devices["tx"] == {"connected": True, "device_type": "sim"}
+            assert devices["rx"]["connected"] is False
+            ws.send_json({"request": "disconnect", "direction": "tx"})
+            assert ws.receive_json()["event"] == "disconnected"
+            assert client.get("/health").json()["devices"]["tx"]["connected"] is False
+
+
+def test_health_counts_a_pending_restore_as_connected():
+    from web_trx.server import device_summary
+
+    backend = SimBackend()
+    backend.restoring = lambda: {"tx"}
+    backend.tx.device_type = "pluto"
+    assert device_summary(backend)["tx"] == {"connected": True, "device_type": "pluto"}
+    assert device_summary(backend)["rx"]["connected"] is False
+
+
+def test_health_requests_stay_out_of_the_access_log():
+    import logging
+
+    create_app(SimBackend(), auth=AuthManager(password=TEST_PASSWORD), tx_log_path=":memory:")
+    create_app(SimBackend(), auth=AuthManager(password=TEST_PASSWORD), tx_log_path=":memory:")
+    access = logging.getLogger("uvicorn.access")
+    assert len([f for f in access.filters if type(f).__name__ == "_HealthAccessFilter"]) == 1
+
+    def record(path):
+        return logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                                 ("127.0.0.1:1", "GET", path, "1.1", 200), None)
+
+    assert not access.filters[0].filter(record("/health"))
+    assert access.filters[0].filter(record("/tx-log?limit=5"))
 
 
 def test_login_wrong_password_is_rejected():
