@@ -456,7 +456,10 @@ Der Wasserfall in `pluto-advanced-rx` ist ein eigenes
 [pyqtgraph](https://www.pyqtgraph.org/)-Widget statt GNU Radios
 `qtgui.waterfall_sink_c`: Live-Spektrum gekoppelt mit dem Wasserfall,
 Klick-zum-Tunen, Tuning-Marker, Demod-Bandbreiten-Anzeige, Zoom/Pan,
-einstellbare Floor/Ceiling-Slider. RX-Bandbreiten-Presets bis 10 MHz
+einstellbare Floor/Ceiling-Slider, die sich nach dem Verbinden automatisch
+am Rauschteppich einpegeln (Rauschen −15 dB … +45 dB, „Auto“-Knopf zum Neu-Einpegeln;
+Pluto, HackRF und RTL-SDR liegen je nach Verstärkung 20 dB und mehr auseinander),
+Averaging standardmäßig 3. RX-Bandbreiten-Presets bis 10 MHz
 (1/2,5/5/8/10 MHz).
 
 ## Bekannte Einschränkungen

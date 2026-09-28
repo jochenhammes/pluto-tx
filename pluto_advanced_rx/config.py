@@ -154,7 +154,18 @@ WATERFALL_POLL_INTERVAL_MS = 33  # ~30 Hz GUI-side poll of fft_probe's latest ro
 FFT_COMPUTE_RATE_HZ = 30  # fft_probe's own compute throttle, independent of poll rate/sample rate
 WATERFALL_WINDOW = window.WIN_BLACKMAN_hARRIS  # matches GNU Radio's own qtgui.waterfall_sink_c default window
 WATERFALL_COLORMAP = "viridis"
-WATERFALL_DB_RANGE = (-80.0, 0.0)  # fixed color/Y-axis levels (no per-frame autoscale)
+# Start-up color/Y-axis levels (no per-frame autoscale), replaced ~1 s after every connect by the
+# auto-level below. Measured with a Pluto+ at its default AGC: noise floor ~-16 dB, strong signals
+# up to ~+9 dB -- the old (-80, 0) put the noise at 80 % of the height and clipped the signals.
+WATERFALL_DB_RANGE = (-35.0, 25.0)
+# Auto-level (after connect, and via the "Auto" button): floor/ceiling = noise floor - BELOW / + ABOVE,
+# i.e. the noise sits at a quarter of the height with 45 dB of headroom for signals. The noise floor is
+# the median of the per-row medians over AUTOLEVEL_ROWS spectra, taken after AUTOLEVEL_SETTLE_S (AGC).
+WATERFALL_AUTOLEVEL_BELOW_DB = 15.0
+WATERFALL_AUTOLEVEL_ABOVE_DB = 45.0
+WATERFALL_AUTOLEVEL_SETTLE_S = 1.0
+WATERFALL_AUTOLEVEL_ROWS = 20
+FFT_AVG_DEFAULT = 3  # spectra averaged (in power) per displayed row
 
 # --- RADE V1 "Auto Fine-Tune" (rade_autotune.py + gui.py's _autotune_*
 # state machine) -- see the RADE auto-tune plan for the full rationale.

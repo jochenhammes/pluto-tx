@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from pluto_tx import audio_devices
@@ -1038,10 +1039,10 @@ class MainWindow(QtWidgets.QMainWindow):
         zoom_avg_row.addWidget(QtWidgets.QLabel("Averaging:"))
         self.avg_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.avg_slider.setRange(1, FftProbe.MAX_AVG)
-        self.avg_slider.setValue(1)
+        self.avg_slider.setValue(config.FFT_AVG_DEFAULT)
         self.avg_slider.valueChanged.connect(self._on_avg_changed)
         zoom_avg_row.addWidget(self.avg_slider)
-        self.avg_label = QtWidgets.QLabel("1 (off)")
+        self.avg_label = QtWidgets.QLabel(str(config.FFT_AVG_DEFAULT) if config.FFT_AVG_DEFAULT > 1 else "1 (off)")
         self.avg_label.setMinimumWidth(60)
         zoom_avg_row.addWidget(self.avg_label)
         waterfall_layout.addLayout(zoom_avg_row)
@@ -1100,6 +1101,17 @@ class MainWindow(QtWidgets.QMainWindow):
         db_sliders_col.addWidget(self.db_floor_slider, 1, alignment=QtCore.Qt.AlignHCenter)
         self.db_floor_label = QtWidgets.QLabel(f"{int(db_lo)} dB")
         db_sliders_col.addWidget(self.db_floor_label, alignment=QtCore.Qt.AlignHCenter)
+        # Auto-level: re-measure the noise floor and set floor/ceiling around it (also done once
+        # automatically after every connect, see _poll_fft()).
+        self.db_auto_button = QtWidgets.QPushButton("Auto")
+        self.db_auto_button.setToolTip(
+            f"Set Floor/Ceiling from the current noise floor ({-config.WATERFALL_AUTOLEVEL_BELOW_DB:+.0f} / "
+            f"{config.WATERFALL_AUTOLEVEL_ABOVE_DB:+.0f} dB). Done automatically after connecting.")
+        self.db_auto_button.setMaximumWidth(60)
+        self.db_auto_button.clicked.connect(self._start_autolevel)
+        db_sliders_col.addWidget(self.db_auto_button, alignment=QtCore.Qt.AlignHCenter)
+        self._autolevel_rows = None      # list while an auto-level measurement is running
+        self._autolevel_after = 0.0
 
         content_row = QtWidgets.QHBoxLayout()
         content_row.addWidget(self.waterfall, 1)
@@ -1592,6 +1604,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # backend -- see its comment for the full reasoning.
                 row = row[len(row) // 2:]
             self.waterfall.push_fft_row(row)
+            self._autolevel_feed(row)
         if (self.demod_combo.currentData() == AdvancedRxFlowgraph.MODE_RADE and RADE_AVAILABLE
                 and self._autotune_token is None):  # suppressed while an autotune run owns the status label
             dec = self.tb.rade_decoder
@@ -2378,6 +2391,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_baseband_width(float(value))
         self._sync_waterfall()
 
+    def _start_autolevel(self):
+        """Collect a few spectra (after the AGC settled) and set Floor/Ceiling around their noise floor."""
+        self._autolevel_rows = []
+        self._autolevel_after = time.monotonic() + config.WATERFALL_AUTOLEVEL_SETTLE_S
+
+    def _autolevel_feed(self, row):
+        if self._autolevel_rows is None or time.monotonic() < self._autolevel_after:
+            return
+        self._autolevel_rows.append(float(np.median(row)))       # per-row median: signals don't count
+        if len(self._autolevel_rows) < config.WATERFALL_AUTOLEVEL_ROWS:
+            return
+        noise = float(np.median(self._autolevel_rows))
+        self._autolevel_rows = None
+        lo_min, hi_max = self.db_floor_slider.minimum(), self.db_ceiling_slider.maximum()
+        lo = int(round(max(lo_min, noise - config.WATERFALL_AUTOLEVEL_BELOW_DB)))
+        hi = int(round(min(hi_max, noise + config.WATERFALL_AUTOLEVEL_ABOVE_DB)))
+        # floor first when going up, ceiling first when going down, so lo < hi holds at every step
+        order = ((self.db_floor_slider, lo), (self.db_ceiling_slider, hi))
+        if lo < self.db_floor_slider.value():
+            order = order[::-1]
+        for slider, value in order:
+            slider.setValue(value)
+
     def _on_db_range_changed(self, _value=None):
         lo = self.db_floor_slider.value()
         hi = self.db_ceiling_slider.value()
@@ -3095,6 +3131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tb = new_tb
         self._sync_waterfall()
         new_tb.start()
+        self._start_autolevel()
         self._set_connected_controls_enabled(True)
         self.connect_button.setText("Disconnect")
         self.uri_combo.setEnabled(False)
