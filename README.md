@@ -251,7 +251,9 @@ Slots am Slotende mit WSJT-X' `jt9` (oder ft8_lib als Rückfall), Tabelle mit
 UTC, SNR, DT, Frequenz und Nachricht; „Only CQ“-Filter, Hervorhebung des
 eigenen Rufzeichens, Doppelklick kopiert das Rufzeichen des Absenders. Mit der
 Soundkarte wird das Audio eines USB-Empfängers dekodiert. Die Systemuhr muss
-per NTP synchron sein (±1 s), beide Apps warnen sonst. Verifiziert:
+per NTP synchron sein (±1 s), beide Apps warnen sonst. **RX im Realbetrieb erfolgreich
+getestet: echter FT8-Empfang auf 20 m (2026-09-28).** TX mit echten Gegenstationen steht noch
+aus. Außerdem verifiziert:
 TX-Aussendungen über Luft auf kurze Distanz (Pluto+ mit −40 dB → RTL-SDR) von `jt9`
 und ft8_lib dekodiert, Tonabstand exakt 6,25 Hz, Zeitlage DT +0,1 s (die App
 sendet Stille, bis die Uhr den Slotstart erreicht, unabhängig davon, wie lange das
