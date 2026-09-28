@@ -246,10 +246,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 device_type=lambda: self.device_type_combo.currentData(),
                 show_message=lambda text: self.status_label.setText(text),
             )
-            device_group_layout.addWidget(self.webtrx_row)
+            webtrx_widget = self.webtrx_row
         except Exception as e:
             self.webtrx_row = None
-            device_group_layout.addWidget(QtWidgets.QLabel(f"Web-TRX: not available ({e})"))
+            webtrx_widget = QtWidgets.QLabel(f"Web-TRX: not available ({e})")
+        # shown in its own "Web-TRX" group at the bottom of the left column, see below the mode group
         left_column.addWidget(device_group)
         self._update_device_connection_labels()
 
@@ -1016,6 +1017,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         left_column.addWidget(mode_group, 1)  # device_group stays at natural height; the mode group (its tab pages,
         # e.g. the digimode tables) uses all the free height of the column -- see the column-layout comment above
+
+        # --- Web-TRX group: the browser UI's server (Start/Stop/Open), at the bottom edge of the column.
+        webtrx_group = QtWidgets.QGroupBox("Web-TRX")
+        QtWidgets.QVBoxLayout(webtrx_group).addWidget(webtrx_widget)
+        left_column.addWidget(webtrx_group)
 
         # --- Waterfall / spectrum group -------------------------------------
         waterfall_group = QtWidgets.QGroupBox("Waterfall / Spectrum")

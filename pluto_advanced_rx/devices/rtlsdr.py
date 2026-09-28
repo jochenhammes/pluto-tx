@@ -27,6 +27,7 @@ curated subset of the upper range; the 225-300kHz range is omitted
 """
 from gnuradio import soapy
 
+from .. import config
 from .. import rtl_tcp
 from .base import GainStage, RxDevice
 
@@ -95,7 +96,12 @@ class RtlSdrDevice(RxDevice):
             self._source.set_gain_mode(False)
             self._source.set_gain(DEFAULT_TUNER_GAIN_DB)
             return self._source
-        self._source = soapy.source(self._device_arg(), "fc32", 1, "", "", [""], [""])
+        # Smaller USB transfers than librtlsdr's default (262144 bytes = ~55 ms at 2.4 MS/s): the
+        # samples then arrive every ~14 ms instead of in 55 ms bursts, which made every consumer that
+        # samples the stream in time (FftProbe's ~30 rows/s -> the waterfall) run in jerky pairs.
+        # Measured: full rate still delivered (2.41 MS/s) at 65536.
+        self._source = soapy.source(self._device_arg(), "fc32", 1, "",
+                                    f"bufflen={config.RTL_SOAPY_BUFFLEN_BYTES}", [""], [""])
         self._source.set_sample_rate(0, self.sample_rate_hz)
         if self.bandwidth_hz:
             self._source.set_bandwidth(0, self.bandwidth_hz)

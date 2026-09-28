@@ -240,6 +240,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Web-TRX row: state of the browser UI's server + Start/Stop/Open
         # (pluto_tx/webtrx_widget.py). Built defensively: whatever goes wrong
         # here, the app itself still starts -- the row then only says why.
+        # Built here (the device handlers below refer to it), shown in its own
+        # section at the bottom of the column (see the end of this layout).
         try:
             from .webtrx_widget import WebTrxRow
             self.webtrx_row = WebTrxRow(
@@ -248,10 +250,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 device_type=lambda: self.device_type_combo.currentData(),
                 show_message=lambda text: self.status_label.setText(text),
             )
-            section1.addWidget(self.webtrx_row)
+            webtrx_widget = self.webtrx_row
         except Exception as e:
             self.webtrx_row = None
-            section1.addWidget(QtWidgets.QLabel(f"Web-TRX: not available ({e})"))
+            webtrx_widget = QtWidgets.QLabel(f"Web-TRX: not available ({e})")
 
         self._update_device_connection_labels()
 
@@ -1457,6 +1459,11 @@ class MainWindow(QtWidgets.QMainWindow):
         section1.addWidget(self.hw_status_label)
 
         layout.addStretch(1)  # extra window height stays below the controls instead of spreading them out
+
+        # --- Web-TRX section, pinned to the bottom edge of the column.
+        layout.addWidget(self._hline())
+        layout.addWidget(self._section_title("Web-TRX"))
+        layout.addWidget(webtrx_widget)
 
         # --- Live TX waterfall, right column (own sub-layout so it can be swapped out on
         # a device reconnect, which rebuilds the flowgraph) -----------------

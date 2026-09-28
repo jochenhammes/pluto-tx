@@ -176,8 +176,18 @@ fi
 echo
 echo "Self-test ..."
 (
-    # same library paths as web-trx/scripts/start.sh
-    export LD_LIBRARY_PATH="$SCRIPT_DIR/rade_c/build/src:$HOME/.local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    # same library paths as web-trx/scripts/start.sh: the multiarch directory under ~/.local
+    # (x86_64-linux-gnu on a PC, aarch64-linux-gnu / arm-linux-gnueabihf on a Raspberry Pi)
+    local_libs=""
+    ma="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || true)"
+    if [ -n "$ma" ] && [ -d "$HOME/.local/lib/$ma" ]; then local_libs="$HOME/.local/lib/$ma"; fi
+    for d in "$HOME"/.local/lib/*-linux-gnu*; do
+        if [ -d "$d" ]; then
+            case ":$local_libs:" in *":$d:"*) ;; *) local_libs="${local_libs:+$local_libs:}$d" ;; esac
+        fi
+    done
+    if [ -d "$HOME/.local/lib" ]; then local_libs="${local_libs:+$local_libs:}$HOME/.local/lib"; fi
+    export LD_LIBRARY_PATH="$SCRIPT_DIR/rade_c/build/src${local_libs:+:$local_libs}:${LD_LIBRARY_PATH:-}"
     PYTHONPATH="$(python3 -m site --user-site):${PYTHONPATH:-}"
     export PYTHONPATH
     unset WEB_TRX_PLUTO_TX_PATH

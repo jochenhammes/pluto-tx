@@ -77,6 +77,24 @@ RX_DEMOD_MODES = {
     "ft8": AdvancedRxFlowgraph.MODE_SSB,
 }
 RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8"}
+
+
+def rx_bands() -> dict[str, list[float]]:
+    """Receive band per RX mode as [low, high] offsets (Hz) from the tuned frequency, for the
+    waterfall marker -- computed like pluto-advanced-rx's own demod-band shading
+    (pluto_advanced_rx/gui.py _sync_waterfall()). Web-TRX never changes the filter widths, so
+    the configured defaults are the real widths. FT8 has its own marker (the audio band)."""
+    fm_half = rx_config.FM_DEMOD_WIDTH_DEFAULT_HZ / 2
+    ssb_lo = rx_config.SSB_AUDIO_BAND_HZ[0]
+    ssb_hi = ssb_lo + rx_config.SSB_DEMOD_WIDTH_DEFAULT_HZ
+    m17_half = rx_config.M17_DEVIATION_HZ + rx_config.M17_SYMBOL_RATE
+    return {
+        "fm": [-fm_half, fm_half], "pocsag": [-fm_half, fm_half],
+        "ssb": [ssb_lo, ssb_hi], "rtty": [ssb_lo, ssb_hi],
+        "lsb": [-ssb_hi, -ssb_lo],
+        "rade": [rx_config.RADE_OFDM_LOW_HZ, rx_config.RADE_OFDM_HIGH_HZ],
+        "m17": [-m17_half, m17_half],
+    }
 SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8")  # squelch probe after the SSB filter
 FT8_STATUS_S = 15.0  # ft8_status at least once per slot, and on every change
 RTTY_FLUSH_S = 0.2
@@ -265,6 +283,7 @@ class GnuRadioBackend(SessionBackend):
         return {"fft_zoom_max": FFT_ZOOM_MAX, "fft_avg_max": FFT_AVG_MAX,
                 "fft_sizes": rx_config.FFT_SIZE_PRESETS,
                 "rx_modes": [m for m in RX_DEMOD_MODES if _rx_mode_available(m)],
+                "rx_bands": rx_bands(),
                 "rx_sample_rates": {t: list(rx_devices.DEVICE_REGISTRY[t].sample_rate_hz_choices)
                                     for t in RX_DEVICE_TYPES},
                 "rx_gain": {t: _rx_gain_info(rx_devices.DEVICE_REGISTRY[t]) for t in RX_DEVICE_TYPES},
@@ -378,10 +397,16 @@ class GnuRadioBackend(SessionBackend):
                 await asyncio.to_thread(_apply_tx_setting, tb, name, value)
             await self._emit_event("tx_settings", {"settings": self._tx_settings()})
             return
+        if direction == "rx":
+            # Wait for a rebuild in progress (mode change, connect) to finish: it may already have
+            # read the settings, so "applied when the flowgraph is built" would lose this change.
+            async with self._rx_lock:
+                tb = st.tb
+                if tb is not None:
+                    await asyncio.to_thread(_apply_rx_gain, tb, name, value)
+            return
         if tb is None:
             return  # applied when the flowgraph is built
-        if direction == "rx":
-            await asyncio.to_thread(_apply_rx_gain, tb, name, value)
         else:
             await asyncio.to_thread(_apply_tx_gain, tb, name, value)
             await self._emit_event("tx_power", _power_info(tb))
@@ -676,13 +701,19 @@ class GnuRadioBackend(SessionBackend):
             if tb is None:
                 continue
             try:
-                row, generation = tb.fft_probe.get_latest_row(generation)
-                if row is None:
-                    continue
-                await self._on_spectrum(SpectrumFrame(
-                    row=row, center_hz=tb.nominal_freq_hz,
-                    span_hz=tb.sample_rate / tb.fft_probe.zoom, generation=generation,
-                ))
+                # Every row made since the last poll, not only the newest: the probe makes ~30 rows/s,
+                # a 25 Hz poll that keeps only the latest dropped every few and made the waterfall
+                # advance in uneven steps. The browser paces the drawing itself.
+                probe = tb.fft_probe
+                rows, latest = probe.get_rows_since(generation)
+                if latest < generation:  # a rebuilt flowgraph starts counting again
+                    rows, latest = probe.get_rows_since(-1)
+                generation = latest
+                span_hz = tb.sample_rate / probe.zoom
+                for row in rows:
+                    await self._on_spectrum(SpectrumFrame(
+                        row=row, center_hz=tb.nominal_freq_hz, span_hz=span_hz, generation=generation,
+                    ))
             except Exception:  # keep the loop alive across rebuilds
                 logger.exception("spectrum poll failed")
 

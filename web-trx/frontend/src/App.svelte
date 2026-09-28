@@ -61,6 +61,7 @@
     rx_sample_rates?: Record<string, number[]>;
     rx_gain?: Record<string, RxGainInfo>;
     rx_direct_sampling?: string[];
+    rx_bands?: Record<string, [number, number]>;
     ft8?: { tx: boolean; rx_backends: string[]; clock_synced: boolean };
   } = {};
   $: serverZoom = !!features.fft_zoom_max;
@@ -505,7 +506,7 @@
     }
     if (e.event !== "tx_audio" || e.final) log(`${e.event} ${JSON.stringify(e)}`);
   };
-  client.onSpectrum = (s: SpectrumRow) => waterfall?.pushRow(s.row, s.centerHz, s.spanHz);
+  client.onSpectrum = (s: SpectrumRow) => waterfall?.enqueueRow(s.row, s.centerHz, s.spanHz);
   client.onAudio = (a: AudioChunk) => {
     if (audioOn) audioPlayer.push(a.pcm16, a.sampleRateHz);
   };
@@ -762,7 +763,7 @@
       {/if}
     </div>
 
-    <div class="row">
+    <div class="row rx-freq-row">
       <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" />
       {#if features.rx_direct_sampling?.includes(rxDeviceType)}
         <div class="field narrow">
@@ -790,10 +791,16 @@
         <input id="rxPpm" class="ppm" type="number" step="0.1" bind:value={rxPpm}
           on:change={() => setRxDisplay("freq_correction_ppm", Number(rxPpm))} />
       </div>
-      <select id="rxModeSel" bind:value={rxMode} on:change={selectRxMode} disabled={!rxConnected}>
-        {#each rxModes as [v, l]}<option value={v}>{l}</option>{/each}
-      </select>
-      <button on:click={toggleAudio}>{audioOn ? "\u{1F50A} RX-Audio an" : "\u{1F507} RX-Audio aus"}</button>
+      <div class="field narrow">
+        <label for="rxModeSel">Modus</label>
+        <select id="rxModeSel" bind:value={rxMode} on:change={selectRxMode} disabled={!rxConnected}>
+          {#each rxModes as [v, l]}<option value={v}>{l}</option>{/each}
+        </select>
+      </div>
+      <div class="field narrow">
+        <label for="rxAudioBtn">Audio</label>
+        <button id="rxAudioBtn" on:click={toggleAudio}>{audioOn ? "\u{1F50A} RX-Audio an" : "\u{1F507} RX-Audio aus"}</button>
+      </div>
       <div class="field narrow volume">
         <label for="rxVolume">Lautstärke {volumePct} %</label>
         <input id="rxVolume" type="range" min="0" max="200" step="5" bind:value={volumePct} />
@@ -802,10 +809,13 @@
         <span class="dim" title="Jitter-Puffer der RX-Wiedergabe">Puffer {rxAudioStats.bufferedMs} ms · Aussetzer {rxAudioStats.underruns}</span>
       {/if}
       {#if rxMode === "fm"}
-        <label class="check">
-          <input type="checkbox" bind:checked={rxDeemphasis} on:change={selectRxMode} disabled={!rxConnected} />
-          De-Emphasis 750 &micro;s
-        </label>
+        <div class="field narrow">
+          <span class="field-spacer" aria-hidden="true">&nbsp;</span>
+          <label class="check">
+            <input type="checkbox" bind:checked={rxDeemphasis} on:change={selectRxMode} disabled={!rxConnected} />
+            De-Emphasis 750 &micro;s
+          </label>
+        </div>
       {/if}
     </div>
     {#if rxGainInfo}
@@ -895,6 +905,10 @@
     <Waterfall bind:this={waterfall} height={wfAreaHeight} {floorDb} {ceilingDb} zoom={serverZoom ? 1 : zoom} autoLevel={autoLevel && !keyed}
       markers={[
         ...(rxMode === "ft8" ? [{ hz: rxFreqHz + 200, widthHz: 2800, color: "rgba(62, 166, 255, 0.18)", label: "FT8" }] : []),
+        // receive bandwidth of the current mode (features.rx_bands: [low, high] offsets from the RX frequency)
+        ...(rxConnected && features.rx_bands?.[rxMode] ? [{
+          hz: rxFreqHz + features.rx_bands[rxMode][0], widthHz: features.rx_bands[rxMode][1] - features.rx_bands[rxMode][0],
+          color: "rgba(137, 147, 168, 0.12)", edgeColor: "rgba(170, 180, 200, 0.7)", label: "" }] : []),
         { hz: rxFreqHz, color: "#8993a8", label: "RX" },
         ...(txConnected ? [{ hz: txFreqHz, color: keyed ? "#ff4d4d" : "#f5c211", label: "TX" }] : []),
       ]}
@@ -1077,7 +1091,7 @@
     {#if txPower}
       <div class="field">
         <label for="txPower">{txPower.label}: {txPower.value.toFixed(2)} {txPower.unit}
-          <span class="dim">(bis {txPower.ceiling} {txPower.unit}; nach Server-Neustart höchstens {txPower.default_ceiling ?? txPower.ceiling} {txPower.unit})</span></label>
+          <span class="dim">(bis {txPower.ceiling} {txPower.unit})</span></label>
         <input id="txPower" type="range" min={txPower.min} max={txPower.ceiling} step="0.25"
           value={txPower.value} on:change={(e) => setTxPower(Number(e.currentTarget.value))} />
         {#each txPower.secondary ?? [] as st (st.name)}
@@ -1331,6 +1345,39 @@
   }
   .rx-gain {
     align-items: flex-end;
+  }
+  /* RX frequency row: every box on one line -- bottoms aligned, one control height, and each
+     control under a label line, so the large frequency display spans label + control exactly. */
+  .rx-freq-row {
+    align-items: flex-end;
+    --ctl-h: 34px;
+  }
+  .rx-freq-row .field select,
+  .rx-freq-row .field button,
+  .rx-freq-row .field input[type="number"],
+  .rx-freq-row .field .check {
+    height: var(--ctl-h);
+    box-sizing: border-box;
+  }
+  .rx-freq-row .field .check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .rx-freq-row .field input[type="range"] {
+    margin: calc((var(--ctl-h) - 4px) / 2) 0;  /* the 4px track, centred in the control height */
+  }
+  .rx-freq-row .field label.check {
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: 0.85rem;
+    color: var(--text);
+  }
+  .rx-freq-row .field-spacer {
+    font-size: 0.7rem;
+  }
+  .rx-freq-row > .dim {
+    line-height: var(--ctl-h);
   }
   .ft8-row {
     align-items: flex-end;

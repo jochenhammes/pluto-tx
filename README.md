@@ -40,6 +40,9 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
   <img src="docs/screenshots/pluto-tx-audio.png" alt="pluto-tx: FM-Sendung läuft, TX-Basisband-Wasserfall, Sicherheits-Readout" width="49%">
   <img src="docs/screenshots/pluto-advanced-rx-waterfall.png" alt="pluto-advanced-rx: interaktiver Wasserfall mit echtem Empfang" width="49%">
 </p>
+<p align="center">
+  <img src="docs/screenshots/web-trx.png" alt="Web-TRX im Browser: Empfang mit RTL-SDR, Wasserfall mit Empfangsbandbreite und Frequenzskala, Sendeteil" width="98%">
+</p>
 
 ## Installation
 

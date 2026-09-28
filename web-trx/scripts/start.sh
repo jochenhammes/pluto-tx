@@ -77,10 +77,23 @@ export WEB_TRX_SESSIONS_PATH="${WEB_TRX_SESSIONS_PATH:-$RUN_DIR/sessions.json}"
 HOST="${WEB_TRX_HOST:-0.0.0.0}"
 PORT="${WEB_TRX_PORT:-8321}"
 
-# Same library/module paths as pluto-tx's own launcher: gr-m17 lives under
-# ~/.local (shared library + Python module in the user site-packages, which a
-# venv does not see by default) and RADE next to the pluto-tx checkout.
-export LD_LIBRARY_PATH="$WEB_TRX_PLUTO_TX_PATH/rade_c/build/src:$HOME/.local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+# Same library/module paths as pluto-tx's own launcher: gr-m17/gr-lora_sdr live
+# under ~/.local (shared library + Python module in the user site-packages,
+# which a venv does not see by default) and RADE next to the pluto-tx checkout.
+# The library directory is the multiarch one (x86_64-linux-gnu on a PC,
+# aarch64-linux-gnu / arm-linux-gnueabihf on a Raspberry Pi), not a fixed name.
+local_lib_dirs() {
+  local ma d dirs=""
+  ma="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || true)"
+  [[ -n "$ma" && -d "$HOME/.local/lib/$ma" ]] && dirs="$HOME/.local/lib/$ma"
+  for d in "$HOME"/.local/lib/*-linux-gnu*; do
+    [[ -d "$d" && ":$dirs:" != *":$d:"* ]] && dirs="${dirs:+$dirs:}$d"
+  done
+  [[ -d "$HOME/.local/lib" ]] && dirs="${dirs:+$dirs:}$HOME/.local/lib"
+  echo "$dirs"
+}
+LOCAL_LIBS="$(local_lib_dirs)"
+export LD_LIBRARY_PATH="$WEB_TRX_PLUTO_TX_PATH/rade_c/build/src${LOCAL_LIBS:+:$LOCAL_LIBS}:${LD_LIBRARY_PATH:-}"
 export PATH="$WEB_TRX_PLUTO_TX_PATH/rade_c/build/src:$PATH"
 PYTHONPATH="$(python3 -m site --user-site):${PYTHONPATH:-}"
 export PYTHONPATH

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   // Follows the container's width (bind:clientWidth below); resizing the
   // canvas clears it, the waterfall just refills from the next rows.
@@ -26,7 +26,9 @@
   // inside the displayed span.
   // widthHz: draw a translucent band [hz, hz + widthHz] instead of a line
   // (e.g. the FT8 audio band above the USB dial frequency).
-  export let markers: Array<{ hz: number; color: string; label: string; widthHz?: number }> = [];
+  // edgeColor: also draw the band's two edges as thin lines, in the spectrum and (not scrolling)
+  // over the waterfall -- the receive bandwidth, like pluto-advanced-rx's demod-band shading.
+  export let markers: Array<{ hz: number; color: string; label: string; widthHz?: number; edgeColor?: string }> = [];
   export let onAutoLevel: ((floorDb: number, ceilingDb: number) => void) | undefined = undefined;
   const AUTO_BELOW_NOISE_DB = 5;
   const AUTO_RANGE_DB = 45;
@@ -34,6 +36,9 @@
   let rowsSinceAuto = 0;
 
   const spectrumHeight = 110;
+  // Bottom strip of the spectrum canvas holds the frequency scale; the trace uses the rest.
+  const AXIS_H = 16;
+  const plotHeight = spectrumHeight - AXIS_H;
   $: waterfallHeight = Math.max(60, Math.floor(height) - spectrumHeight - 6);
 
   let waterfallCanvas: HTMLCanvasElement;
@@ -43,12 +48,110 @@
   let lastCenterHz = 0;
   let lastSpanHz = 0;
 
+  // Frequency -> x pixel of the current (zoomed) view; shared by markers, ticks and the band overlay.
+  function hzToX(hz: number, centerHz: number, spanHz: number): number {
+    const shown = spanHz / zoom;
+    return ((hz - (centerHz - shown / 2)) / shown) * width;
+  }
+
+  // Band edges over the waterfall (HTML overlay, so they don't scroll with the image).
+  // (width and zoom passed explicitly so Svelte re-runs this when they change, too)
+  $: bandOverlays = bandEdges(markers, lastCenterHz, lastSpanHz, width, zoom);
+  function bandEdges(ms: typeof markers, centerHz: number, spanHz: number, w: number, _z: number) {
+    if (!spanHz) return [];
+    return ms
+      .filter((m) => m.widthHz && m.edgeColor)
+      .map((m) => ({
+        left: Math.max(0, hzToX(m.hz, centerHz, spanHz)),
+        right: Math.min(w, hzToX(m.hz + (m.widthHz ?? 0), centerHz, spanHz)),
+        color: m.edgeColor!,
+      }))
+      .filter((b) => b.right > 0 && b.left < w);
+  }
+
+  // "Nice" tick step (1/2/5 * 10^n Hz) for about eight labels, at least MIN_TICK_PX apart.
+  const MIN_TICK_PX = 70;
+  function tickStep(spanHz: number): number {
+    const raw = spanHz / 8;
+    let mag = 10 ** Math.floor(Math.log10(raw));
+    for (;;) {
+      for (const f of [1, 2, 5]) {
+        const step = f * mag;
+        if (step >= raw * 0.75 && (step / spanHz) * width >= MIN_TICK_PX) return step;
+      }
+      mag *= 10;
+    }
+  }
+
+  function tickLabel(hz: number, step: number): string {
+    const decimals = Math.max(0, Math.ceil(-Math.log10(step / 1e6) - 1e-9));
+    return (hz / 1e6).toFixed(decimals).replace(".", ",");
+  }
+
+  function drawTicks(): void {
+    const shown = lastSpanHz / zoom;
+    if (!shown) return;
+    const step = tickStep(shown);
+    const lo = lastCenterHz - shown / 2;
+    sCtx.fillStyle = "#070b12";
+    sCtx.fillRect(0, plotHeight, width, AXIS_H);
+    sCtx.font = "10px sans-serif";
+    sCtx.textAlign = "center";
+    sCtx.fillStyle = "rgba(200, 210, 230, 0.5)";
+    sCtx.strokeStyle = "rgba(200, 210, 230, 0.35)";
+    sCtx.lineWidth = 1;
+    for (let hz = Math.ceil(lo / step) * step; hz <= lo + shown; hz += step) {
+      const x = Math.round(hzToX(hz, lastCenterHz, lastSpanHz)) + 0.5;
+      sCtx.beginPath();
+      sCtx.moveTo(x, plotHeight);
+      sCtx.lineTo(x, plotHeight + 4);
+      sCtx.stroke();
+      if (x > 20 && x < width - 20) sCtx.fillText(tickLabel(hz, step), x, spectrumHeight - 3);
+    }
+    sCtx.textAlign = "start";
+  }
+
   onMount(() => {
     wCtx = waterfallCanvas.getContext("2d")!;
     sCtx = spectrumCanvas.getContext("2d")!;
     wCtx.fillStyle = "#04070c";
     wCtx.fillRect(0, 0, width, waterfallHeight);
+    rafId = requestAnimationFrame(drawLoop);
   });
+  onDestroy(() => cancelAnimationFrame(rafId));
+
+  // Rows arrive unevenly (device USB bursts, network jitter): queue them and draw at the measured
+  // average row rate instead of the moment they arrive, so the waterfall scrolls smoothly. The
+  // queue stays short -- when it grows, rows are drawn faster until it has caught up.
+  type QueuedRow = { row: Float32Array; centerHz?: number; spanHz?: number };
+  const queue: QueuedRow[] = [];
+  const MAX_QUEUE = 8;
+  let rafId = 0;
+  let lastArrivalMs = 0;
+  let rowIntervalMs = 40;
+  let nextDrawMs = 0;
+
+  export function enqueueRow(row: Float32Array, centerHz?: number, spanHz?: number): void {
+    const now = performance.now();
+    if (lastArrivalMs) {
+      const dt = Math.min(250, Math.max(5, now - lastArrivalMs));
+      rowIntervalMs += 0.05 * (dt - rowIntervalMs);
+    }
+    lastArrivalMs = now;
+    if (queue.length === 0 && now > nextDrawMs + rowIntervalMs) nextDrawMs = now;  // was idle: start fresh
+    queue.push({ row, centerHz, spanHz });
+    if (queue.length > MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE);
+  }
+
+  function drawLoop(now: number): void {
+    if (queue.length && now >= nextDrawMs) {
+      const q = queue.shift()!;
+      pushRow(q.row, q.centerHz, q.spanHz);
+      const catchUp = queue.length > 2 ? 0.7 : 1;
+      nextDrawMs = Math.max(nextDrawMs + rowIntervalMs * catchUp, now - rowIntervalMs);
+    }
+    rafId = requestAnimationFrame(drawLoop);
+  }
 
   // SDR++-like palette: dark blue noise floor through cyan/green to a
   // yellow/red hot peak.
@@ -145,24 +248,38 @@
     sCtx.beginPath();
     for (let x = 0; x < width; x++) {
       const t = Math.min(1, Math.max(0, (px[x] - floorDb) / (ceilingDb - floorDb)));
-      const y = spectrumHeight - t * spectrumHeight;
+      const y = plotHeight - t * plotHeight;
       if (x === 0) sCtx.moveTo(x, y);
       else sCtx.lineTo(x, y);
     }
     sCtx.stroke();
 
+    drawTicks();
     const displayedSpanHz = lastSpanHz / zoom;
-    const loHz = lastCenterHz - displayedSpanHz / 2;
     sCtx.font = "11px sans-serif";
     for (const m of markers) {
       if (!displayedSpanHz) break;
-      const x = Math.round(((m.hz - loHz) / displayedSpanHz) * width) + 0.5;
+      const x = Math.round(hzToX(m.hz, lastCenterHz, lastSpanHz)) + 0.5;
       if (m.widthHz) {
-        const x2 = Math.round(((m.hz + m.widthHz - loHz) / displayedSpanHz) * width);
+        const x2 = Math.round(hzToX(m.hz + m.widthHz, lastCenterHz, lastSpanHz)) + 0.5;
         if (x2 < 0 || x > width) continue;
         sCtx.fillStyle = m.color;
-        sCtx.fillRect(Math.max(0, x), 0, Math.max(1, Math.min(width, x2) - Math.max(0, x)), spectrumHeight);
-        sCtx.fillText(m.label, Math.max(0, x) + 4, spectrumHeight - 4);
+        sCtx.fillRect(Math.max(0, x), 0, Math.max(1, Math.min(width, x2) - Math.max(0, x)), plotHeight);
+        if (m.edgeColor) {
+          sCtx.strokeStyle = m.edgeColor;
+          sCtx.lineWidth = 1;
+          sCtx.beginPath();
+          for (const ex of [x, x2]) {
+            if (ex < 0 || ex > width) continue;
+            sCtx.moveTo(ex, 0);
+            sCtx.lineTo(ex, plotHeight);
+          }
+          sCtx.stroke();
+        }
+        if (m.label) {
+          sCtx.fillStyle = m.edgeColor ?? m.color;
+          sCtx.fillText(m.label, Math.max(0, x) + 4, 24);
+        }
         continue;
       }
       if (x < 0 || x > width) continue;
@@ -171,7 +288,7 @@
       sCtx.setLineDash([4, 3]);
       sCtx.beginPath();
       sCtx.moveTo(x, 0);
-      sCtx.lineTo(x, spectrumHeight);
+      sCtx.lineTo(x, plotHeight);
       sCtx.stroke();
       sCtx.setLineDash([]);
       sCtx.fillText(m.label, Math.min(x + 4, width - 24), 12);
@@ -196,13 +313,18 @@
     class="clickable"
     on:click={(e) => handleClick(e, spectrumCanvas)}
   ></canvas>
-  <canvas
-    bind:this={waterfallCanvas}
-    width={width}
-    height={waterfallHeight}
-    class="clickable"
-    on:click={(e) => handleClick(e, waterfallCanvas)}
-  ></canvas>
+  <div class="wf-holder">
+    <canvas
+      bind:this={waterfallCanvas}
+      width={width}
+      height={waterfallHeight}
+      class="clickable"
+      on:click={(e) => handleClick(e, waterfallCanvas)}
+    ></canvas>
+    {#each bandOverlays as b}
+      <div class="band" style="left: {b.left}px; width: {Math.max(1, b.right - b.left)}px; --edge: {b.color};"></div>
+    {/each}
+  </div>
 </div>
 
 <style>
@@ -222,5 +344,17 @@
   }
   canvas.clickable {
     cursor: crosshair;
+  }
+  .wf-holder {
+    position: relative;
+  }
+  .band {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    pointer-events: none;
+    border-left: 1px solid var(--edge);
+    border-right: 1px solid var(--edge);
+    opacity: 0.55;
   }
 </style>

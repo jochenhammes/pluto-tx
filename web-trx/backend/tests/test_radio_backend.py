@@ -333,3 +333,39 @@ async def test_tx_power_is_kept_per_device_so_a_hackrf_gain_never_reaches_the_pl
     with pytest.raises(SessionError):
         b2.tx.device_type = None
         await b2.set_gain("tx", "power", -30.0)  # no device: nothing to attach the value to
+
+
+def test_rx_bands_match_the_rx_apps_demod_band_shading():
+    b, *_ = make_backend()
+    bands = b.features()["rx_bands"]
+    assert bands["fm"] == [-6250.0, 6250.0]            # 12.5 kHz NBFM channel
+    assert bands["ssb"] == [300.0, 3300.0]             # USB above the carrier
+    assert bands["lsb"] == [-3300.0, -300.0]           # mirrored below it
+    assert bands["m17"] == [-5600.0, 5600.0]           # deviation + symbol rate
+    assert bands["rade"] == [750.0, 2200.0]
+    assert "ft8" not in bands                          # FT8 keeps its own audio-band marker
+    assert set(bands) <= set(radio_backend.RX_DEMOD_MODES)
+
+
+async def test_rx_display_setting_during_a_rebuild_reaches_the_new_flowgraph():
+    """A zoom change sent while a mode change rebuilds the receiver (which holds _rx_lock and has
+    already read the settings) must end up on the rebuilt flowgraph, not be dropped."""
+    b, *_ = make_backend()
+
+    class Tb:
+        zoom = None
+
+        def set_fft_zoom(self, z):
+            self.zoom = z
+
+    new_tb = Tb()
+    async with b._rx_lock:                     # a rebuild in progress: old flowgraph already gone
+        b.rx.tb = None
+        task = asyncio.create_task(b.set_gain("rx", "fft_zoom", 4))
+        await asyncio.sleep(0.05)
+        assert not task.done()                 # waits for the rebuild instead of returning
+        b.rx.tb = new_tb                       # rebuild finished
+    await task
+    assert new_tb.zoom == 4
+    assert b.rx.gains["fft_zoom"] == 4
+    b.rx.tb = None

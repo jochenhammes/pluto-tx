@@ -63,6 +63,7 @@ class FftProbe(gr.sync_block):
     # even at this combination -- not just an unverified guess.
     MAX_ZOOM = 128
     MAX_AVG = 100
+    RECENT_ROWS = 16
 
     def __init__(self, fft_size, sample_rate, window_type, compute_rate_hz):
         gr.sync_block.__init__(self, name="FftProbe", in_sig=[np.complex64], out_sig=None)
@@ -71,6 +72,9 @@ class FftProbe(gr.sync_block):
         self._lock = threading.Lock()
         self._latest_row = None
         self._generation = 0
+        # The last few rows with their generation, so a consumer polling slower than rows are made
+        # (Web-TRX sends every row to the browser) doesn't have to drop any, see get_rows_since().
+        self._recent_rows = collections.deque(maxlen=self.RECENT_ROWS)
         self._zoom = 1
         self._avg_history = collections.deque(maxlen=1)
         self._configure(fft_size, sample_rate)
@@ -103,6 +107,7 @@ class FftProbe(gr.sync_block):
         self._crop_lo = (eff_size - fft_size) // 2
         self._crop_hi = self._crop_lo + fft_size
         self._avg_history.clear()
+        self._recent_rows.clear()  # older rows may have another size/span
 
     def work(self, input_items, output_items):
         in0 = input_items[0]
@@ -142,7 +147,15 @@ class FftProbe(gr.sync_block):
                 mag_db = (10.0 * np.log10(avg_power + 1e-12)).astype(np.float32)
                 self._latest_row = mag_db
                 self._generation += 1
+                self._recent_rows.append((self._generation, mag_db))
         return n
+
+    def get_rows_since(self, since_generation=-1):
+        """Returns (rows, generation): every row still held (up to RECENT_ROWS) that is newer than
+        since_generation, oldest first, and the current generation. Rows are fresh copies."""
+        with self._lock:
+            rows = [row.copy() for gen, row in self._recent_rows if gen > since_generation]
+            return rows, self._generation
 
     def get_latest_row(self, since_generation=-1):
         """Returns (row, generation) if a new row exists since
