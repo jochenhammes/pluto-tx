@@ -324,8 +324,15 @@ class AdvancedRxFlowgraph(gr.top_block):
         ssb_taps = self._ssb_taps(ssb_demod_width_hz, demod_mode == self.MODE_LSB)
         self.ssb_filter = filter.fir_filter_ccc(1, ssb_taps)
         self.ssb_to_real = blocks.complex_to_real()
+        # Audio AGC, as in any SSB receiver: without it the demodulated audio carries the raw IF
+        # level -- ~-73 dBFS on an RTL-SDR, inaudible even at full volume. Fast attack, slow decay
+        # (config.SSB_AGC_*), gain capped so a dead band doesn't turn into full-scale hiss instantly.
+        # Anything measuring the channel level (Web-TRX's squelch probe) taps ssb_filter, before it.
+        self.ssb_agc = analog.agc3_cc(config.SSB_AGC_ATTACK_RATE, config.SSB_AGC_DECAY_RATE,
+                                      config.SSB_AGC_REFERENCE, 1.0, 1, config.SSB_AGC_MAX_GAIN)
         self.connect(self.if_filter, self.ssb_filter)
-        self.connect(self.ssb_filter, self.ssb_to_real)
+        self.connect(self.ssb_filter, self.ssb_agc)
+        self.connect(self.ssb_agc, self.ssb_to_real)
 
         # --- Baseband branch: wide, unprocessed demodulated audio for
         # digimode software (fldigi etc.) consuming this app's Audio

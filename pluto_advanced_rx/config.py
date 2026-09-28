@@ -95,6 +95,12 @@ FM_CHANNEL_TRANS_HZ = 1_000.0
 
 SSB_DEMOD_WIDTH_DEFAULT_HZ = 3_000.0
 SSB_DEMOD_WIDTH_RANGE_HZ = (1_000.0, 5_000.0)
+# SSB/LSB audio AGC (agc3_cc on the sideband-filtered IF at DEMOD_IF_RATE, 50 kHz): attack ~2 ms,
+# decay ~0.5 s (per-sample IIR rates), ~-14 dBFS RMS audio at the default volume, at most +90 dB of gain.
+SSB_AGC_ATTACK_RATE = 1e-2
+SSB_AGC_DECAY_RATE = 4e-5
+SSB_AGC_REFERENCE = 0.5
+SSB_AGC_MAX_GAIN = 10 ** (90 / 20)
 
 # Baseband mode's own IF channel-filter width -- wider range than FM's
 # (up to the real ceiling: AUDIO_RATE/2 = 24kHz, tighter than

@@ -192,14 +192,17 @@ class RxLsbTests(unittest.TestCase):
             for mode in (rxf.AdvancedRxFlowgraph.MODE_SSB, rxf.AdvancedRxFlowgraph.MODE_LSB):
                 rx, _ = self.run_rx(iq, mode, rate)
                 from gnuradio import blocks
-                sink = blocks.vector_sink_f()
-                rx.connect(rx.demod_selector, sink)
+                # the sideband filter's own output: the audio after it runs through the SSB AGC, which
+                # (correctly) lifts even the rejected side's tiny residue of this noise-free tone to
+                # full level -- the AGC is covered by tests/test_rx_ssb_agc.py
+                sink = blocks.vector_sink_c()
+                rx.connect(rx.ssb_filter, sink)
                 rx.start()
                 time.sleep(2.5)
                 rx.stop()
                 rx.wait()
-                audio = np.array(sink.data(), dtype=np.float32)
-                results[(signal_side, mode)] = float(np.sqrt(np.mean(audio[len(audio) // 2:] ** 2))) if len(audio) else 0.0
+                out = np.array(sink.data(), dtype=np.complex64)
+                results[(signal_side, mode)] = float(np.sqrt(np.mean(np.abs(out[len(out) // 2:]) ** 2))) if len(out) else 0.0
         usb, lsb = rxf.AdvancedRxFlowgraph.MODE_SSB, rxf.AdvancedRxFlowgraph.MODE_LSB
         self.assertGreater(results[(1, usb)], 30 * results[(-1, usb)] + 1e-6)
         self.assertGreater(results[(-1, lsb)], 30 * results[(1, lsb)] + 1e-6)
