@@ -1,0 +1,38 @@
+[project]
+name = "web-trx"
+version = "0.0.0"
+description = "Web frontend/backend for pluto-tx / pluto-advanced-rx"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "numpy>=1.26",
+    "websockets>=13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.7",
+]
+# The 'gnuradio' backend additionally needs GNU Radio + libiio, installed
+# by vendor/pluto-tx/install.sh on the actual radio server -- not
+# pip-installable, so not listed here. See docs/PROJECT_PLAN.md section 2.
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["web_trx*"]
