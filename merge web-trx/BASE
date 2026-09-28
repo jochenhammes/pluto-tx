@@ -1,5 +1,0 @@
-# Stand, gegen den die Entwürfe (patches/, files/) geschrieben und getestet wurden.
-# 00_preflight.sh vergleicht damit; weichen die Repos ab, wendet 30_build_merge.sh
-# die Patches notfalls per 3-Wege-Merge an.
-PLUTO_TX_BASE=7fc8c6f1ded9079e0de9830d0f5c9093d861e814
-WEB_TRX_BASE=9e877e66d74c55ce443b2600006d23b8ab9cbc0a

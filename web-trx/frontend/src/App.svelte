@@ -184,7 +184,7 @@
   let rxDeemphasis = true;
 
   // Choice lists come from the backend's 'hello' (web_trx/modes.py), which
-  // in turn is test-checked against vendor/pluto-tx's config -- no third
+  // in turn is test-checked against pluto-tx's config -- no third
   // hardcoded copy of the CTCSS table or deviation choices here.
   interface FmOptions {
     deviation_choices_hz: number[];
@@ -656,7 +656,7 @@
   // Audio TX modes (FM/SSB/LSB/M17): press-and-hold PTT, mic streamed for
   // the duration. POCSAG: a single click, the backend keys, sends the
   // message and auto-unkeys itself (see SimBackend.ptt()) -- no mic
-  // involved, matching vendor/pluto-tx's own text-digimode PTT model.
+  // involved, matching pluto-tx's own text-digimode PTT model.
   async function startAudioTx(): Promise<void> {
     if (!isAudioMode(txMode) || pttHeld || !txConnected) return;
     pttHeld = true;

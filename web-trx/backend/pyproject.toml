@@ -19,7 +19,7 @@ dev = [
     "ruff>=0.7",
 ]
 # The 'gnuradio' backend additionally needs GNU Radio + libiio, installed
-# by vendor/pluto-tx/install.sh on the actual radio server -- not
+# by install.sh (repository root) on the actual radio server -- not
 # pip-installable, so not listed here. See docs/PROJECT_PLAN.md section 2.
 
 [tool.pytest.ini_options]

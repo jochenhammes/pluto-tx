@@ -2,7 +2,7 @@
 
 Text frames: JSON. Client -> server: {"request": "<name>", ...params}.
 Server -> client: {"event": "<name>", ...fields} -- a superset of pluto-cli's
-own --json event schema (see vendor/pluto-tx/pluto_cli/README.md section 6),
+own --json event schema (see pluto_cli/README.md section 6),
 extended with session/control events (hello, scanned, connected, mode,
 tuned, error) that pluto-cli has no equivalent for (it is a one-shot process,
 Web-TRX is a long-lived session).
@@ -32,7 +32,7 @@ _AUDIO_HEADER = struct.Struct("<BI")  # type, sample_rate_hz
 
 def encode_spectrum_row(row: np.ndarray, center_hz: float, span_hz: float, generation: int) -> bytes:
     """`row`: float32 dB magnitudes, ordered low-to-high frequency (already
-    fftshift-ed/cropped by the source, see sim_backend.py / vendor
+    fftshift-ed/cropped by the source, see sim_backend.py / pluto-tx
     FftProbe). `generation` lets a client detect dropped/duplicate rows
     without relying on frame arrival order."""
     header = _SPECTRUM_HEADER.pack(

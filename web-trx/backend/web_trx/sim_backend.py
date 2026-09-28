@@ -29,7 +29,7 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
                  "rtty": 2125.0}
 
 # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
-# alongside ssb the same way vendor/pluto-tx exposes both as separate
+# alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
 TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext")
 RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8")
@@ -144,7 +144,7 @@ class SimBackend(SessionBackend):
                     # can be developed without hardware.
                     await self._emit_event("rtty_text", {"text": text + "\n"})
             if self.tx.mode in ONE_SHOT_TX_MODES:
-                # One-shot in the real flowgraph too (see vendor/pluto-tx
+                # One-shot in the real flowgraph too (see pluto-tx
                 # pluto_cli/README.md section 4) -- a fixed short hold stands
                 # in for computing real airtime here.
                 self._pocsag_unkey_task = asyncio.create_task(self._auto_unkey_after(1.5))
@@ -212,7 +212,7 @@ class SimBackend(SessionBackend):
     # control request triggers them) -- both exercise their binary WS
     # channel continuously once RX is connected, independent of
     # control-plane activity, exactly like a real FftProbe/audio sink would
-    # (see vendor/pluto-tx pluto_advanced_rx/fft_probe.py). --
+    # (see pluto-tx pluto_advanced_rx/fft_probe.py). --
 
     def start_background_tasks(self) -> None:
         if self._spectrum_task is None:

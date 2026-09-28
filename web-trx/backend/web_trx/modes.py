@@ -1,14 +1,14 @@
 """Per-mode parameter schemas -- the web counterpart of pluto-cli's per-mode
-flags (vendor/pluto-tx/pluto_cli/README.md section 4). SessionManager runs
+flags (pluto_cli/README.md section 4). SessionManager runs
 every select_mode request through normalize_params() once, at the protocol
 boundary, so each SessionBackend receives the same checked dict with all
 defaults filled in: SimBackend just stores it, GnuRadioBackend will map it
 onto pluto-tx's live setters (set_fm_deviation(), set_fm_preemphasis(),
 set_subtone("ctcss", ...), set_fm_deemphasis() -- none needs a rebuild).
 
-The value tables mirror vendor/pluto-tx's pluto_tx/config.py;
-tests/test_modes.py checks them against the pinned submodule, so a bump
-that changes them fails loudly instead of drifting silently. Raises
+The value tables mirror pluto-tx's pluto_tx/config.py;
+tests/test_modes.py checks them against pluto-tx in this repository, so a
+change there fails loudly instead of drifting silently. Raises
 ValueError (SessionManager turns it into an 'error' event).
 """
 from __future__ import annotations

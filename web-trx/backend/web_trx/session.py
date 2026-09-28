@@ -4,7 +4,7 @@ Exactly one operator, exactly one physical device per direction (tx/rx) at
 a time -- see docs/PROJECT_PLAN.md section 3. Two SessionBackend
 implementations are planned: SimBackend (sim_backend.py, pure Python/numpy,
 no GNU Radio/libiio needed -- what this dev container can actually run) and
-a later GnuRadioBackend (radio_backend.py, only runs where vendor/pluto-tx's
+a later GnuRadioBackend (radio_backend.py, only runs where pluto-tx's
 GNU Radio/libiio dependencies are installed) that wires up
 PlutoTxFlowgraph/AdvancedRxFlowgraph/FftProbe/PlutoSafety following the
 exact pattern pluto_cli/runtime.py already proves works. SessionManager
@@ -42,7 +42,7 @@ class SessionError(Exception):
     """A refused request (bad mode/frequency/device, wrong state, ...) --
     becomes an 'error' event to the requesting client, never a raw
     traceback. Mirrors pluto-cli's own 'error' event (see
-    vendor/pluto-tx/pluto_cli/README.md section 6)."""
+    pluto_cli/README.md section 6)."""
 
 
 @dataclasses.dataclass
@@ -127,7 +127,7 @@ class SessionBackend(abc.ABC):
     @abc.abstractmethod
     async def estop(self) -> None:
         """Immediate, idempotent, must never raise -- mirrors PlutoSafety's
-        force_safe_state() (vendor/pluto-tx/pluto_tx/safety.py)."""
+        force_safe_state() (pluto_tx/safety.py)."""
 
     @abc.abstractmethod
     async def submit_tx_audio(self, frame: AudioFrame) -> None:
