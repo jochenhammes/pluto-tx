@@ -93,9 +93,9 @@ local_lib_dirs() {
   echo "$dirs"
 }
 LOCAL_LIBS="$(local_lib_dirs)"
-export LD_LIBRARY_PATH="$WEB_TRX_PLUTO_TX_PATH/rade_c/build/src${LOCAL_LIBS:+:$LOCAL_LIBS}:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$WEB_TRX_PLUTO_TX_PATH/rade_c/build/src${LOCAL_LIBS:+:$LOCAL_LIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$WEB_TRX_PLUTO_TX_PATH/rade_c/build/src:$PATH"
-PYTHONPATH="$(python3 -m site --user-site):${PYTHONPATH:-}"
+PYTHONPATH="$(python3 -m site --user-site)${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 
 VENV="$ROOT/backend/.venv"

@@ -187,8 +187,8 @@ echo "Self-test ..."
         fi
     done
     if [ -d "$HOME/.local/lib" ]; then local_libs="${local_libs:+$local_libs:}$HOME/.local/lib"; fi
-    export LD_LIBRARY_PATH="$SCRIPT_DIR/rade_c/build/src${local_libs:+:$local_libs}:${LD_LIBRARY_PATH:-}"
-    PYTHONPATH="$(python3 -m site --user-site):${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="$SCRIPT_DIR/rade_c/build/src${local_libs:+:$local_libs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    PYTHONPATH="$(python3 -m site --user-site)${PYTHONPATH:+:$PYTHONPATH}"
     export PYTHONPATH
     unset WEB_TRX_PLUTO_TX_PATH
     cd "$WEB_TRX_DIR/backend"
