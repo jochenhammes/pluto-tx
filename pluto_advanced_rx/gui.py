@@ -234,6 +234,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button = QtWidgets.QPushButton("Disconnect")
         self.connect_button.clicked.connect(self._on_connect_clicked)
         device_row.addWidget(self.connect_button)
+
+        # --- Web-TRX row: state of the browser UI's server + Start/Stop/Open
+        # (pluto_tx/webtrx_widget.py). Built defensively: whatever goes wrong
+        # here, the app itself still starts -- the row then only says why.
+        try:
+            from pluto_tx.webtrx_widget import WebTrxRow
+            self.webtrx_row = WebTrxRow(
+                has_device=lambda: self.tb is not None,
+                release_device=lambda: self._disconnect() if self.tb is not None else None,
+                device_type=lambda: self.device_type_combo.currentData(),
+                show_message=lambda text: self.status_label.setText(text),
+            )
+            device_group_layout.addWidget(self.webtrx_row)
+        except Exception as e:
+            self.webtrx_row = None
+            device_group_layout.addWidget(QtWidgets.QLabel(f"Web-TRX: not available ({e})"))
         left_column.addWidget(device_group)
         self._update_device_connection_labels()
 
@@ -1149,7 +1165,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_button.setText("Connect")
         self.uri_combo.setEnabled(True)
         self.device_type_combo.setEnabled(True)
+        self._webtrx_startup = True  # see the Web-TRX check at the top of _connect()
         self._connect(uri)
+        self._webtrx_startup = False
 
     @staticmethod
     def _format_hz(hz):
@@ -3000,6 +3018,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText("Audio output switched.")
 
     def _on_connect_clicked(self):
+        # Web-TRX guard: ask before opening a device type the Web-TRX server
+        # is known to hold (pluto_tx/webtrx_widget.py confirm_connect()).
+        if self.tb is None and getattr(self, "webtrx_row", None) is not None \
+                and not self.webtrx_row.confirm_connect(self.device_type_combo.currentData()):
+            return
         if self.tb is not None:
             self._disconnect()
         else:
@@ -3068,6 +3091,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # manual Start/Stop button above.
 
     def _connect(self, uri_text):
+        # Automatic connect at app start while the Web-TRX server holds this
+        # device type: stay disconnected instead (pluto_tx/webtrx_widget.py
+        # startup_blocks(); _webtrx_startup is only set around that one call).
+        if getattr(self, "_webtrx_startup", False) and getattr(self, "webtrx_row", None) is not None \
+                and self.webtrx_row.startup_blocks(self.device_type_combo.currentData()):
+            self.status_label.setText(self.webtrx_row.startup_message(self.device_type_combo.currentData()))
+            return
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         # Pluto's connection is a libiio URI (bare hostname/IP gets 'ip:'
         # prefixed); HackRF/RTL-SDR's is a bare serial (or blank for "the

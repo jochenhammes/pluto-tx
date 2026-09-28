@@ -237,6 +237,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.aioc_serial_row.addWidget(self.aioc_serial_combo, 1)
         section1.addLayout(self.aioc_serial_row)
 
+        # --- Web-TRX row: state of the browser UI's server + Start/Stop/Open
+        # (pluto_tx/webtrx_widget.py). Built defensively: whatever goes wrong
+        # here, the app itself still starts -- the row then only says why.
+        try:
+            from .webtrx_widget import WebTrxRow
+            self.webtrx_row = WebTrxRow(
+                has_device=lambda: self.tb is not None,
+                release_device=lambda: self._disconnect() if self.tb is not None else None,
+                device_type=lambda: self.device_type_combo.currentData(),
+                show_message=lambda text: self.status_label.setText(text),
+            )
+            section1.addWidget(self.webtrx_row)
+        except Exception as e:
+            self.webtrx_row = None
+            section1.addWidget(QtWidgets.QLabel(f"Web-TRX: not available ({e})"))
+
         self._update_device_connection_labels()
 
         # --- Frequency + fine tune ---------------------------------
@@ -1506,7 +1522,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # selection, "File-Transfer" <-> File Broadcast (see
         # _on_mode_tab_changed()).
         self.mode_tab_widget.currentChanged.connect(self._on_mode_tab_changed)
+        self._webtrx_startup = True  # see the Web-TRX check at the top of _rebuild()
         self._rebuild(uri, self._wav_path)
+        self._webtrx_startup = False
 
     # --- helpers ------------------------------------------------------
     @staticmethod
@@ -3218,6 +3236,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ptt_button.setText("PTT (click to send)")
 
     def _on_connect_clicked(self):
+        # Web-TRX guard: ask before opening a device type the Web-TRX server
+        # is known to hold (pluto_tx/webtrx_widget.py confirm_connect()).
+        if self.tb is None and getattr(self, "webtrx_row", None) is not None \
+                and not self.webtrx_row.confirm_connect(self.device_type_combo.currentData()):
+            return
         if self.tb is not None:
             self._disconnect()
         else:
@@ -3325,6 +3348,18 @@ class MainWindow(QtWidgets.QMainWindow):
         next connect with 'Unable to create buffer' (the same class of bug
         run_gui() avoids by never holding a second reference to self.tb of
         its own)."""
+        # Automatic connect at app start while the Web-TRX server holds this
+        # device type: stay disconnected instead (pluto_tx/webtrx_widget.py
+        # startup_blocks(); _webtrx_startup is only set around that one call).
+        if getattr(self, "_webtrx_startup", False) and getattr(self, "webtrx_row", None) is not None \
+                and self.webtrx_row.startup_blocks(self.device_type_combo.currentData()):
+            self.status_label.setText(self.webtrx_row.startup_message(self.device_type_combo.currentData()))
+            self._set_connected_controls_enabled(False)
+            self.connect_button.setText("Connect")
+            self.uri_combo.setEnabled(True)
+            self.aioc_serial_combo.setEnabled(True)
+            self.device_type_combo.setEnabled(True)
+            return
         self._repeat_cancel()
         if self.tb is not None:
             self.tb.shutdown_safe()
