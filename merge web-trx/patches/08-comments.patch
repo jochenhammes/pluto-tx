@@ -1,0 +1,142 @@
+diff --git a/web-trx/backend/pyproject.toml b/web-trx/backend/pyproject.toml
+index 871f715..5ba1865 100644
+--- a/web-trx/backend/pyproject.toml
++++ b/web-trx/backend/pyproject.toml
+@@ -19,7 +19,7 @@ dev = [
+     "ruff>=0.7",
+ ]
+ # The 'gnuradio' backend additionally needs GNU Radio + libiio, installed
+-# by vendor/pluto-tx/install.sh on the actual radio server -- not
++# by install.sh (repository root) on the actual radio server -- not
+ # pip-installable, so not listed here. See docs/PROJECT_PLAN.md section 2.
+ 
+ [tool.pytest.ini_options]
+diff --git a/web-trx/backend/web_trx/modes.py b/web-trx/backend/web_trx/modes.py
+index 25e7cfc..447baee 100644
+--- a/web-trx/backend/web_trx/modes.py
++++ b/web-trx/backend/web_trx/modes.py
+@@ -1,14 +1,14 @@
+ """Per-mode parameter schemas -- the web counterpart of pluto-cli's per-mode
+-flags (vendor/pluto-tx/pluto_cli/README.md section 4). SessionManager runs
++flags (pluto_cli/README.md section 4). SessionManager runs
+ every select_mode request through normalize_params() once, at the protocol
+ boundary, so each SessionBackend receives the same checked dict with all
+ defaults filled in: SimBackend just stores it, GnuRadioBackend will map it
+ onto pluto-tx's live setters (set_fm_deviation(), set_fm_preemphasis(),
+ set_subtone("ctcss", ...), set_fm_deemphasis() -- none needs a rebuild).
+ 
+-The value tables mirror vendor/pluto-tx's pluto_tx/config.py;
+-tests/test_modes.py checks them against the pinned submodule, so a bump
+-that changes them fails loudly instead of drifting silently. Raises
++The value tables mirror pluto-tx's pluto_tx/config.py;
++tests/test_modes.py checks them against pluto-tx in this repository, so a
++change there fails loudly instead of drifting silently. Raises
+ ValueError (SessionManager turns it into an 'error' event).
+ """
+ from __future__ import annotations
+diff --git a/web-trx/backend/web_trx/protocol.py b/web-trx/backend/web_trx/protocol.py
+index fd649c8..6c110d1 100644
+--- a/web-trx/backend/web_trx/protocol.py
++++ b/web-trx/backend/web_trx/protocol.py
+@@ -2,7 +2,7 @@
+ 
+ Text frames: JSON. Client -> server: {"request": "<name>", ...params}.
+ Server -> client: {"event": "<name>", ...fields} -- a superset of pluto-cli's
+-own --json event schema (see vendor/pluto-tx/pluto_cli/README.md section 6),
++own --json event schema (see pluto_cli/README.md section 6),
+ extended with session/control events (hello, scanned, connected, mode,
+ tuned, error) that pluto-cli has no equivalent for (it is a one-shot process,
+ Web-TRX is a long-lived session).
+@@ -32,7 +32,7 @@ _AUDIO_HEADER = struct.Struct("<BI")  # type, sample_rate_hz
+ 
+ def encode_spectrum_row(row: np.ndarray, center_hz: float, span_hz: float, generation: int) -> bytes:
+     """`row`: float32 dB magnitudes, ordered low-to-high frequency (already
+-    fftshift-ed/cropped by the source, see sim_backend.py / vendor
++    fftshift-ed/cropped by the source, see sim_backend.py / pluto-tx
+     FftProbe). `generation` lets a client detect dropped/duplicate rows
+     without relying on frame arrival order."""
+     header = _SPECTRUM_HEADER.pack(
+diff --git a/web-trx/backend/web_trx/session.py b/web-trx/backend/web_trx/session.py
+index 649f1d7..51ba72f 100644
+--- a/web-trx/backend/web_trx/session.py
++++ b/web-trx/backend/web_trx/session.py
+@@ -4,7 +4,7 @@ Exactly one operator, exactly one physical device per direction (tx/rx) at
+ a time -- see docs/PROJECT_PLAN.md section 3. Two SessionBackend
+ implementations are planned: SimBackend (sim_backend.py, pure Python/numpy,
+ no GNU Radio/libiio needed -- what this dev container can actually run) and
+-a later GnuRadioBackend (radio_backend.py, only runs where vendor/pluto-tx's
++a later GnuRadioBackend (radio_backend.py, only runs where pluto-tx's
+ GNU Radio/libiio dependencies are installed) that wires up
+ PlutoTxFlowgraph/AdvancedRxFlowgraph/FftProbe/PlutoSafety following the
+ exact pattern pluto_cli/runtime.py already proves works. SessionManager
+@@ -42,7 +42,7 @@ class SessionError(Exception):
+     """A refused request (bad mode/frequency/device, wrong state, ...) --
+     becomes an 'error' event to the requesting client, never a raw
+     traceback. Mirrors pluto-cli's own 'error' event (see
+-    vendor/pluto-tx/pluto_cli/README.md section 6)."""
++    pluto_cli/README.md section 6)."""
+ 
+ 
+ @dataclasses.dataclass
+@@ -127,7 +127,7 @@ class SessionBackend(abc.ABC):
+     @abc.abstractmethod
+     async def estop(self) -> None:
+         """Immediate, idempotent, must never raise -- mirrors PlutoSafety's
+-        force_safe_state() (vendor/pluto-tx/pluto_tx/safety.py)."""
++        force_safe_state() (pluto_tx/safety.py)."""
+ 
+     @abc.abstractmethod
+     async def submit_tx_audio(self, frame: AudioFrame) -> None:
+diff --git a/web-trx/backend/web_trx/sim_backend.py b/web-trx/backend/web_trx/sim_backend.py
+index da1371d..8ec6aa3 100644
+--- a/web-trx/backend/web_trx/sim_backend.py
++++ b/web-trx/backend/web_trx/sim_backend.py
+@@ -29,7 +29,7 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade":
+                  "rtty": 2125.0}
+ 
+ # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
+-# alongside ssb the same way vendor/pluto-tx exposes both as separate
++# alongside ssb the same way pluto-tx exposes both as separate
+ # sideband-fixed modes rather than one mode with a sideband flag).
+ TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext")
+ RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8")
+@@ -144,7 +144,7 @@ class SimBackend(SessionBackend):
+                     # can be developed without hardware.
+                     await self._emit_event("rtty_text", {"text": text + "\n"})
+             if self.tx.mode in ONE_SHOT_TX_MODES:
+-                # One-shot in the real flowgraph too (see vendor/pluto-tx
++                # One-shot in the real flowgraph too (see pluto-tx
+                 # pluto_cli/README.md section 4) -- a fixed short hold stands
+                 # in for computing real airtime here.
+                 self._pocsag_unkey_task = asyncio.create_task(self._auto_unkey_after(1.5))
+@@ -212,7 +212,7 @@ class SimBackend(SessionBackend):
+     # control request triggers them) -- both exercise their binary WS
+     # channel continuously once RX is connected, independent of
+     # control-plane activity, exactly like a real FftProbe/audio sink would
+-    # (see vendor/pluto-tx pluto_advanced_rx/fft_probe.py). --
++    # (see pluto-tx pluto_advanced_rx/fft_probe.py). --
+ 
+     def start_background_tasks(self) -> None:
+         if self._spectrum_task is None:
+diff --git a/web-trx/frontend/src/App.svelte b/web-trx/frontend/src/App.svelte
+index 74a4aec..9333f69 100644
+--- a/web-trx/frontend/src/App.svelte
++++ b/web-trx/frontend/src/App.svelte
+@@ -184,7 +184,7 @@
+   let rxDeemphasis = true;
+ 
+   // Choice lists come from the backend's 'hello' (web_trx/modes.py), which
+-  // in turn is test-checked against vendor/pluto-tx's config -- no third
++  // in turn is test-checked against pluto-tx's config -- no third
+   // hardcoded copy of the CTCSS table or deviation choices here.
+   interface FmOptions {
+     deviation_choices_hz: number[];
+@@ -656,7 +656,7 @@
+   // Audio TX modes (FM/SSB/LSB/M17): press-and-hold PTT, mic streamed for
+   // the duration. POCSAG: a single click, the backend keys, sends the
+   // message and auto-unkeys itself (see SimBackend.ptt()) -- no mic
+-  // involved, matching vendor/pluto-tx's own text-digimode PTT model.
++  // involved, matching pluto-tx's own text-digimode PTT model.
+   async function startAudioTx(): Promise<void> {
+     if (!isAudioMode(txMode) || pttHeld || !txConnected) return;
+     pttHeld = true;

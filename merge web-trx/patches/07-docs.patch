@@ -1,0 +1,583 @@
+diff --git a/README.md b/README.md
+index 87fc276..66c4b62 100644
+--- a/README.md
++++ b/README.md
+@@ -9,7 +9,7 @@ AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
+ legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
+ Sicherheitsschicht (siehe [Sicherheit](#sicherheit)).
+ 
+-Drei Programme, ein Repo:
++Vier Programme, ein Repo:
+ 
+ - **`pluto-tx`** — Sende-App (GUI)
+ - **`pluto-advanced-rx`** — Empfänger-App mit interaktivem, SDR++-artigem
+@@ -17,6 +17,9 @@ Drei Programme, ein Repo:
+ - **`pluto-cli`** — headless Kommandozeilen-Zugriff auf die wichtigsten
+   Funktionen beider Apps, für Skripte/Automatisierung ([volle
+   Referenz](pluto_cli/README.md))
++- **`web-trx`** — Browser-Oberfläche für Senden und Empfangen übers Netz
++  oder VPN, mit Wasserfall, Audio und Digimodes ([Anleitung](web-trx/README.md)).
++  Start und Stopp auch aus beiden Apps heraus.
+ 
+ **Sendebetrieb nur mit gültiger Amateurfunklizenz.** Verantwortung für
+ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
+@@ -30,6 +33,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
+ | **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
+ | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX) |
+ | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
++| **Fernbetrieb** | `web-trx` — Browser-Oberfläche (FastAPI + Svelte) auf derselben Codebasis, ein Betreiber, Login, HTTPS |
+ | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
+ 
+ <p align="center">
+@@ -134,6 +138,18 @@ der Rest läuft normal. Baut [`freedv/rade_c`](https://github.com/freedv/rade_c)
+ (gepinnter Commit) nach `rade_c/` im Projektverzeichnis und regeneriert
+ alle drei Starter mit passendem `LD_LIBRARY_PATH`/`PATH`.
+ 
++### Optional: Web-TRX (Browser-Oberfläche)
++
++```
++./install-web-trx.sh
++```
++
++Legt für `web-trx/` ein Python-venv (mit `--system-site-packages`, damit
++GNU Radio und libiio sichtbar sind) an, baut das Frontend (braucht Node.js
++≥ 18, das Skript installiert es nicht selbst) und legt den Starter
++`~/.local/bin/web-trx` an. `install.sh` und die übrigen Starter bleiben
++unberührt. Details, Konfiguration und Betrieb: [`web-trx/README.md`](web-trx/README.md).
++
+ ## Erste Schritte
+ 
+ ```
+@@ -163,6 +179,16 @@ gesetzt:
+ export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+ ```
+ 
++**Web-TRX starten und stoppen**: `web-trx start|stop|status|open|log`,
++oder in `pluto-tx` bzw. `pluto-advanced-rx` in der Zeile „Web-TRX“ auf
++**Start**, **Stop** oder **Open** klicken. Der Server läuft weiter, wenn
++die App geschlossen wird. Web-TRX und eine App dürfen nie gleichzeitig
++dasselbe SDR öffnen: Hat die App beim Start von Web-TRX ein Gerät offen,
++fragt sie, ob sie es vorher trennen soll; hat Web-TRX einen Gerätetyp
++offen, warnt die App vor „Connect“ damit und verbindet sich beim Start
++nicht automatisch. `PLUTO_WEBTRX_CONTROL=off` blendet die Zeile aus
++(nur Hinweistext).
++
+ ## Beispielhafte Anwendungsfälle
+ 
+ **FM/SSB-Sprechfunk.** Klassischer Sprechfunk über Pluto oder HackRF —
+@@ -425,7 +451,7 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
+ ## Struktur
+ 
+ ```
+-install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh
++install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-web-trx.sh
+ pluto_tx/                 # Sende-App
+ ├── config.py                # geräteunabhängige Konstanten
+ ├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard)
+@@ -438,6 +464,7 @@ pluto_tx/                 # Sende-App
+ ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
+ ├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib
+ ├── gui.py / app.py
++├── webtrx_control.py / webtrx_widget.py  # Web-TRX starten/stoppen/abfragen (Qt-frei) + die Zeile in beiden Apps
+ └── da2jh-test.wav              # Standard-Testaufnahme
+ pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
+ ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
+@@ -446,6 +473,9 @@ pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
+ └── ...
+ tests/                     # Unit-/Loopback-Tests: python3 -m unittest discover tests
+ pluto_cli/                 # headless CLI, importiert die beiden Apps oben, siehe pluto_cli/README.md
++web-trx/                   # Browser-Oberfläche: backend/ (FastAPI), frontend/ (Svelte), scripts/, docs/ -- siehe web-trx/README.md
++                           #   eigene Tests: cd web-trx/backend && .venv/bin/python -m pytest (nie pytest aus der Repo-Wurzel)
++.github/workflows/         # CI für web-trx (Backend-Tests, Frontend-Build) und die Web-TRX-Steuerung der Apps
+ docs/screenshots/          # Screenshots für dieses README
+ backlog/                   # geparkte/archivierte Arbeit (Entwicklungshistorie, nicht aktiv genutzte Module)
+ ```
+diff --git a/web-trx/README.md b/web-trx/README.md
+index 575cf90..48e2f18 100644
+--- a/web-trx/README.md
++++ b/web-trx/README.md
+@@ -1,11 +1,17 @@
+ # Web-TRX
+ 
+-Einheitliche Weboberfläche für [`pluto-tx`/`pluto-advanced-rx`](https://github.com/jochenhammes/pluto-tx)
++Einheitliche Weboberfläche für `pluto-tx`/`pluto-advanced-rx`
+ (Sende-/Empfangs-Software für ADALM-PLUTO, HackRF One und RTL-SDR). Ein
+ lizenzierter Funkamateur bedient die am Server angeschlossenen SDRs
+ vollständig über den Browser — Senden und Empfangen, inklusive Wasserfall/
+ Spektrum, Audio und Digimodes.
+ 
++Web-TRX ist Teil des pluto-tx-Repositorys (dieser Ordner `web-trx/`) und
++steht gleichwertig neben `pluto-tx`, `pluto-advanced-rx` und `pluto-cli`.
++Das Backend importiert den Python-Code direkt aus diesem Checkout. Starten
++und Stoppen geht per `web-trx start|stop`, mit den Skripten unter
++`scripts/` oder mit der Zeile „Web-TRX“ in der TX- und der RX-App.
++
+ **Stand:**
+ - **Empfang:** FM, SSB (USB/LSB) und M17 mit Audio im Browser. POCSAG wird dekodiert.
+ - **Wasserfall:** echtes Zoom-FFT, Mittelung, automatischer Pegel.
+@@ -17,90 +23,83 @@ Projektplan (Architektur, Betriebsarten, Meilensteine, aktueller Stand):
+ [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
+ Debug-/Teststrategie und bekannte Stolpersteine: [`docs/DEBUGGING.md`](docs/DEBUGGING.md).
+ 
+-## Installation (pluto-tx ist bereits installiert)
++## Installation
+ 
+-Diese Anleitung geht davon aus, dass auf dem Rechner mit den SDRs
+-`pluto-tx` schon per `install.sh` eingerichtet ist (GNU Radio, libiio,
+-gr-osmosdr/SoapySDR aus den Systempaketen). Optional sind auch gr-m17
+-(`install-m17.sh`, landet in `~/.local`) und RADE (`install-rade.sh`)
+-gebaut. Kurz: `pluto-tx` bzw. `pluto-advanced-rx` starten und funktionieren.
+-Web-TRX installiert **nichts** an pluto-tx nach und verändert es nicht; es
+-importiert dessen Python-Code direkt aus der vorhandenen Installation.
++Voraussetzung ist ein eingerichtetes pluto-tx (`./install.sh` im
++Repo-Wurzelverzeichnis; optional `install-m17.sh`, `install-rade.sh`,
++`install-ft8.sh`). Kurz: `pluto-tx` bzw. `pluto-advanced-rx` starten und
++funktionieren. Web-TRX nutzt dieselben Bibliotheken (GNU Radio, libiio,
++SoapySDR, gr-m17 in `~/.local`, `rade_c/`, `ft8_lib/`) und verändert an
++ihnen nichts.
+ 
+-### 1. Voraussetzungen prüfen
++### 1. Voraussetzungen
+ 
+ ```bash
+ python3 -c "import gnuradio, iio; print('GNU Radio + libiio ok')"
+-python3 -m venv --help >/dev/null && echo "venv ok"
+ node --version     # >= 18 (für den Frontend-Build)
+-npm --version
+-openssl version    # für das selbstsignierte HTTPS-Zertifikat
+ ```
+ 
+-Fehlt etwas davon, auf Debian/Ubuntu nachinstallieren:
++`install-web-trx.sh` prüft alles Weitere selbst (python3-venv, openssl)
++und installiert fehlende Systempakete per `apt-get`. Node.js installiert
++es bewusst **nicht**: Ist keines oder ein zu altes (< 18) vorhanden, eine
++aktuelle LTS-Version z. B. über [nvm](https://github.com/nvm-sh/nvm)
++installieren.
+ 
+-```bash
+-sudo apt install python3-venv nodejs npm openssl
+-```
++### 2. Installieren
+ 
+-Liefert die Distribution ein Node.js älter als 18, eine aktuelle LTS-Version
+-z. B. über [nvm](https://github.com/nvm-sh/nvm) installieren.
+-
+-### 2. Repository klonen
++Im pluto-tx-Verzeichnis (nicht als root, nicht mit sudo):
+ 
+ ```bash
+-cd ~/Dokumente
+-git clone --recurse-submodules https://github.com/jochenhammes/Web-TRX.git
+-cd Web-TRX
++./install-web-trx.sh
+ ```
+ 
+-(`vendor/pluto-tx` ist ein gepinntes Submodule, das nur als Fallback dient,
+-wenn keine eigene pluto-tx-Installation angegeben ist, siehe Schritt 4.)
++Das Skript
++- legt `web-trx/backend/.venv` **mit** `--system-site-packages` an (GNU
++  Radio und libiio kommen aus den Systempaketen und lassen sich nicht per
++  pip installieren),
++- installiert das Backend (`pip install -e "web-trx/backend[dev]"`),
++- baut das Frontend nach `web-trx/frontend/dist/` (`npm ci`, `npm run build`),
++- prüft per Import, dass GNU Radio, numpy, libiio und das Backend im venv
++  zusammenpassen,
++- legt den Starter `~/.local/bin/web-trx` an.
+ 
+-### 3. Python-Umgebung für das Backend
++Beliebig oft wiederholbar (z. B. nach einem `git pull`). `web-trx.env`
++legt es nicht an.
+ 
+-GNU Radio und libiio lassen sich nicht per pip installieren, sie kommen aus
+-den Systempaketen. Das venv muss sie daher sehen, also unbedingt **mit**
+-`--system-site-packages` anlegen:
++### 3. Konfiguration (`web-trx/web-trx.env`, optional)
+ 
+-```bash
+-python3 -m venv --system-site-packages backend/.venv
+-backend/.venv/bin/pip install -e "backend[dev]"
+-```
+-
+-### 4. Konfiguration (`web-trx.env`)
+-
+-Im Repo-Root eine Datei `web-trx.env` anlegen (wird nicht eingecheckt):
++Eine Datei `web-trx/web-trx.env` (wird nicht eingecheckt) kann Einstellungen
++setzen, siehe [Konfiguration](#konfiguration):
+ 
+ ```bash
+-cat > web-trx.env <<'EOF'
+-# Pfad zur vorhandenen pluto-tx-Installation (das Verzeichnis, das
+-# pluto_tx/ und pluto_advanced_rx/ enthält und in dem install.sh lief)
+-WEB_TRX_PLUTO_TX_PATH=/home/<user>/Dokumente/plutosdr
++cat > web-trx/web-trx.env <<'EOF'
+ # eigenes Login-Passwort (fehlt es, erzeugt start.sh beim ersten Start
+ # eines und trägt es hier ein)
+ WEB_TRX_PASSWORD=bitte-ein-eigenes-passwort
+ EOF
+-chmod 600 web-trx.env
++chmod 600 web-trx/web-trx.env
+ ```
+ 
+-Der Default für `WEB_TRX_PLUTO_TX_PATH` ist `~/Dokumente/plutosdr`. Liegt
+-pluto-tx genau dort, kann die Zeile entfallen. Alle Einstellungen stehen
+-unter [Konfiguration](#konfiguration).
++`WEB_TRX_PLUTO_TX_PATH` ist nicht mehr nötig: Standard ist dieses
++Repository selbst.
+ 
+-### 5. Erster Start
++### 4. Starten
+ 
+ ```bash
+-scripts/start.sh
++web-trx start        # oder: web-trx/scripts/start.sh
+ ```
+ 
+-Beim ersten Start passiert automatisch:
+-- `npm install` und der Frontend-Build nach `frontend/dist/`.
+-- Ein selbstsigniertes HTTPS-Zertifikat unter `run/tls/`, gültig für localhost, den Hostnamen und alle IPv4-Adressen des Rechners.
++oder in `pluto-tx` / `pluto-advanced-rx` in der Zeile „Web-TRX“ auf
++**Start** klicken.
++
++### 5. Was beim ersten Start passiert
++
++- Ein selbstsigniertes HTTPS-Zertifikat unter `web-trx/run/tls/`, gültig für localhost, den Hostnamen und alle IPv4-Adressen des Rechners.
+ - Der Server startet im Hintergrund auf Port 8321 und gibt die Adresse(n) aus, z. B. `https://192.168.178.132:8321`.
++- Fehlt das Frontend (`frontend/dist/`), baut `start.sh` es vorher.
+ 
+ Ohne `WEB_TRX_PASSWORD` erzeugt `start.sh` einmalig ein Passwort, gibt es
+-aus und speichert es in `web-trx.env`. Es bleibt dann über Neustarts gleich.
++aus und speichert es in `web-trx/web-trx.env`. Es bleibt dann über Neustarts gleich.
+ 
+ ### 6. Im Browser öffnen
+ 
+@@ -137,8 +136,9 @@ Empfangsfrequenz für TX.
+ ### 7. Prüfen, ob alles erkannt wird
+ 
+ ```bash
+-curl -sk https://localhost:8321/health      # {"status":"ok","backend":"GnuRadioBackend"}
+-tail -f run/web-trx.log                     # Server-Log
++web-trx status                               # läuft (PID …), Backend GnuRadioBackend
++curl -sk https://localhost:8321/health       # {"status":"ok","backend":"GnuRadioBackend","devices":{…}}
++web-trx log                                  # Server-Log (web-trx/run/web-trx.log)
+ ```
+ 
+ Optional ein Hardware-Test, der **nur empfängt** (braucht einen erreichbaren
+@@ -146,44 +146,69 @@ PlutoSDR und muss bei gestopptem Server laufen, weil beide das Gerät
+ belegen würden):
+ 
+ ```bash
+-scripts/stop.sh
+-WEB_TRX_PLUTO_TX_PATH=~/Dokumente/plutosdr WEB_TRX_HW_TESTS=1 \
+-  backend/.venv/bin/python -m pytest backend/tests/test_radio_backend.py
+-scripts/start.sh
++web-trx stop
++cd web-trx/backend && WEB_TRX_HW_TESTS=1 .venv/bin/python -m pytest tests/test_radio_backend.py; cd -
++web-trx start
+ ```
+ 
+ ### 8. Aktualisieren
+ 
+ ```bash
+-scripts/stop.sh
+-git pull --recurse-submodules
+-backend/.venv/bin/pip install -e "backend[dev]"   # falls sich Abhängigkeiten geändert haben
+-scripts/start.sh --build                          # Frontend neu bauen
++web-trx stop
++git pull                  # im pluto-tx-Verzeichnis
++./install-web-trx.sh      # Abhängigkeiten + Frontend neu bauen
++web-trx start
+ ```
+ 
+ ### Fehlersuche
+ 
+ | Symptom | Ursache / Abhilfe |
+ |---|---|
+-| `start.sh`: „Backend-venv fehlt“ | Schritt 3 ausführen. |
+-| „Start fehlgeschlagen“, Log leer oder Import-Fehler zu `gnuradio` | venv ohne `--system-site-packages` angelegt: `rm -rf backend/.venv` und Schritt 3 wiederholen. |
+-| `no pluto-tx checkout at …` | `WEB_TRX_PLUTO_TX_PATH` in `web-trx.env` zeigt nicht auf das pluto-tx-Verzeichnis. |
+-| M17 nicht wählbar („gr-m17 is not importable“) | gr-m17 nicht gebaut (`install-m17.sh` von pluto-tx). Den Server immer über `scripts/start.sh` starten, das setzt `LD_LIBRARY_PATH` und die Python-Pfade für `~/.local`. |
++| `start.sh`: „Backend-venv fehlt“ | `./install-web-trx.sh` im pluto-tx-Verzeichnis ausführen. |
++| `install-web-trx.sh`: venv ohne `--system-site-packages` | Altes venv beiseitelegen (`mv web-trx/backend/.venv ~/web-trx-venv.alt`), Skript erneut ausführen. |
++| `no pluto-tx checkout at …` | `WEB_TRX_PLUTO_TX_PATH` in `web-trx.env` zeigt auf ein falsches Verzeichnis. Zeile entfernen, Standard ist dieses Repo. |
++| M17 nicht wählbar („gr-m17 is not importable“) | gr-m17 nicht gebaut (`./install-m17.sh`). Den Server immer über `web-trx start` bzw. `scripts/start.sh` starten, das setzt `LD_LIBRARY_PATH` und die Python-Pfade für `~/.local`. |
+ | Mikrofon-Fehler beim PTT | Seite über `http://` statt `https://` geöffnet, oder Mikrofon im Browser blockiert. |
+ | „could not connect to PlutoSDR“ | Pluto nicht erreichbar oder `plutoplus.local` löst falsch auf. Die IP direkt als Verbindung eintragen, z. B. `ip:192.168.2.1`. |
+-| Gerät belegt | Läuft parallel die pluto-tx-GUI oder `pluto-cli` auf demselben Gerät? Die jeweils andere Anwendung beenden. |
+-| Wasserfall bleibt leer | Empfänger über „Verbinden“ starten. Das Log (`run/web-trx.log`) zeigt Fehler beim Aufbau des Flowgraphs. |
++| Gerät belegt | Läuft parallel die pluto-tx-GUI oder `pluto-cli` auf demselben Gerät? Die jeweils andere Anwendung beenden. Die TX-/RX-App warnen selbst, wenn Web-TRX das Gerät offen hat. |
++| Wasserfall bleibt leer | Empfänger über „Verbinden“ starten. Das Log (`web-trx log`) zeigt Fehler beim Aufbau des Flowgraphs. |
++| App zeigt „Web-TRX: not installed“ | `./install-web-trx.sh` ausführen; der Tooltip nennt, was fehlt. |
+ 
+ ## Betrieb
+ 
+ Bewusst manuell, (noch) kein systemd-Dienst:
+ 
+ ```bash
+-scripts/start.sh           # startet im Hintergrund, baut das Frontend falls nötig
++web-trx start              # = scripts/start.sh: startet im Hintergrund, baut das Frontend falls nötig
++web-trx stop               # = scripts/stop.sh: sauberes Ende inkl. Sender-Safe-State (unkey, Pluto: max. Dämpfung, LO aus)
++web-trx restart            # stop + start (startet nicht neu, wenn der Stopp erzwungen werden musste)
++web-trx status             # = scripts/status.sh [--json]
++web-trx open               # Seite im Browser öffnen
++web-trx log                # Log verfolgen
+ scripts/start.sh --build   # Frontend neu bauen (nach Änderungen daran)
+-scripts/stop.sh            # sauberes Ende inkl. Sender-Safe-State (unkey, Pluto: max. Dämpfung, LO aus)
+ ```
+ 
++Exit-Codes: `start.sh` 0 gestartet, 3 lief schon, 4 Prozess läuft, aber
++noch unbestätigt, 1 Fehler. `stop.sh` 0 gestoppt, 2 musste per SIGKILL
++beendet werden (Safe-State des Senders prüfen). `status.sh` 0 läuft,
++3 gestoppt, 4 startet/reagiert nicht, 5 nicht installiert, 6 läuft, aber
++nicht aus diesem Checkout gestartet. Start und Stopp sind über
++`run/start.lock` gegeneinander verriegelt; eine PID-Datei zählt nur, wenn
++der Prozess wirklich der Web-TRX-Server ist.
++
++**Aus den Apps:** `pluto-tx` und `pluto-advanced-rx` zeigen in einer Zeile
++„Web-TRX“ den Zustand und haben die Knöpfe **Start**, **Stop** und
++**Open**. Der Server läuft weiter, wenn die App geschlossen wird. Web-TRX
++und eine App dürfen nie gleichzeitig dasselbe SDR öffnen:
++- Hat die App beim Klick auf **Start** ein Gerät offen, fragt sie, ob sie
++  es vorher trennen soll, und nennt die Geräte, die Web-TRX beim Start
++  wieder öffnet.
++- Hat Web-TRX einen Gerätetyp offen, warnt die App vor „Connect“ mit
++  demselben Typ und verbindet sich beim App-Start nicht automatisch.
++- `/health` meldet dafür lokalen Anfragen (127.0.0.1) zusätzlich, welche
++  Geräte der Server offen hat.
++- `PLUTO_WEBTRX_CONTROL=off` schaltet die Zeile in den Apps ab.
++
+ Ein Prozess liefert API, WebSocket und das gebaute Frontend auf Port 8321
+ aus.
+ 
+@@ -210,7 +235,7 @@ Per Umgebungsvariable oder als `KEY=value`-Zeile in `web-trx.env`:
+ 
+ | Variable | Default | Bedeutung |
+ |---|---|---|
+-| `WEB_TRX_PLUTO_TX_PATH` | `~/Dokumente/plutosdr` | pluto-tx-Installation, deren Code importiert wird |
++| `WEB_TRX_PLUTO_TX_PATH` | dieses Repository (Elternordner von `web-trx/`) | pluto-tx-Code, der importiert wird — nur zum Testen gegen einen anderen Checkout nötig |
+ | `WEB_TRX_PASSWORD` | beim ersten Start erzeugt und in `web-trx.env` gespeichert | Login-Passwort (ein Betreiber, ein geteiltes Passwort) |
+ | `WEB_TRX_STATION_CALL` / `WEB_TRX_STATION_LOCATOR` | leer | Startwert der Stationsdaten, solange noch keine gespeichert sind |
+ | `WEB_TRX_NO_OPERATOR_S` | `10` | Sekunden ohne Browser, bis Empfänger und Sender getrennt werden (Aussendungen enden sofort) |
+@@ -265,7 +290,8 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
+ - Sicherheit: NOTAUS, automatisches Abtasten wenn das Mikrofon-Audio
+   abreißt, Sende-Zeitbegrenzung, persistentes TX-Log.
+ - Login mit geteiltem Passwort, HTTPS, Bedien-Einstellungen bleiben über
+-  Neustarts erhalten, manueller Betrieb über `scripts/start.sh`/`stop.sh`.
++  Neustarts erhalten, manueller Betrieb über `web-trx` bzw.
++  `scripts/start.sh`/`stop.sh` und aus der TX-/RX-App.
+ - Modus-Parameter zentral geprüft in `backend/web_trx/modes.py`.
+ 
+ **Offen**
+@@ -280,23 +306,34 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
+ ```
+ backend/    FastAPI-Server (Python) -- SessionManager, SimBackend, GnuRadioBackend, Auth, TX-Log, Modus-Parameter
+ frontend/   Svelte/TypeScript-SPA -- Login, Wasserfall, RX/TX-Panels, TX-Verlauf, Event-Log
+-scripts/    start.sh / stop.sh (manueller Betrieb)
+-vendor/     Git-Submodule: pluto-tx (read-only, gepinnter Commit, Fallback)
+-docs/       Projektplan, Debugging-Strategie
++scripts/    start.sh / stop.sh / status.sh (manueller Betrieb, auch von den Apps aufgerufen)
++docs/       Projektplan, Debugging-Strategie, FT8-Plan
+ run/        Laufzeitdaten (nicht eingecheckt)
+ ```
+ 
++Außerhalb dieses Ordners gehören dazu: `../install-web-trx.sh`,
++`../pluto_tx/webtrx_control.py` (Start/Stopp/Status für Apps und
++Kommandozeile), `../pluto_tx/webtrx_widget.py` (die Zeile in den Apps)
++und `../.github/workflows/web-trx.yml` (CI).
++
+ ## Entwicklung (ohne Hardware)
+ 
++Tests und Linter für Web-TRX laufen **aus `web-trx/backend`** mit pytest.
++Die pluto-tx-Tests laufen dagegen aus der Repo-Wurzel mit
++`python3 -m unittest discover tests`. Beide Ordner heißen `tests`, deshalb
++nie pytest aus der Repo-Wurzel starten.
++
+ ```bash
+-python3 -m venv backend/.venv && backend/.venv/bin/pip install -e "backend[dev]"
+-backend/.venv/bin/python -m pytest backend    # läuft komplett ohne GNU Radio/Hardware
+-cd backend && .venv/bin/uvicorn web_trx.server:create_app --factory --reload --port 8321   # SimBackend
++cd web-trx/backend
++python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e ".[dev]"   # macht sonst install-web-trx.sh
++.venv/bin/python -m pytest            # Tabellen-Tests prüfen gegen ../../pluto_tx/config.py
++.venv/bin/ruff check web_trx tests
++.venv/bin/uvicorn web_trx.server:create_app --factory --reload --port 8321   # SimBackend
+ ```
+ 
+ ```bash
+-cd frontend
+-npm install
++cd web-trx/frontend
++npm ci
+ npm run dev      # Vite mit Proxy auf das Backend (127.0.0.1:8321), siehe vite.config.ts
+ npm run check    # Typecheck
+ npm run build
+@@ -305,23 +342,14 @@ npm run build
+ `WEB_TRX_BACKEND` wählt die `SessionBackend`-Implementierung: `sim`
+ (Default bei direktem uvicorn-Start, keine Hardware nötig) oder `gnuradio`.
+ 
+-## Submodule
+-
+-`vendor/pluto-tx` ist ein Git-Submodule auf einem fest gepinnten Commit —
+-**read-only**, nie von hier aus verändert. Ein Versions-Bump ist ein
+-bewusster Einzelschritt:
+-
+-```bash
+-git -C vendor/pluto-tx fetch
+-git -C vendor/pluto-tx checkout <neuer-commit>
+-git add vendor/pluto-tx
+-git commit -m "vendor/pluto-tx: bump to <neuer-commit>"
+-```
++## Herkunft
+ 
+-Beim Klonen: `git clone --recurse-submodules ...` bzw. nachträglich
+-`git submodule update --init`. Nach jedem `git pull` zusätzlich
+-`git submodule update`, sonst bleibt `vendor/pluto-tx` auf dem alten Stand.
++Web-TRX entstand als eigenes Repository
++[jochenhammes/Web-TRX](https://github.com/jochenhammes/Web-TRX) (dort mit
++voller Einzelhistorie archiviert) und band pluto-tx als Submodule ein. Seit
++der Zusammenführung liegt es hier; der Import-Commit nennt den
++übernommenen Stand.
+ 
+ ## Lizenz
+ 
+-[GPLv3](LICENSE) — wie `pluto-tx`, dessen Code das Backend importiert.
++[GPLv3](../LICENSE) — wie das ganze pluto-tx-Repository.
+diff --git a/web-trx/docs/DEBUGGING.md b/web-trx/docs/DEBUGGING.md
+index e0048e6..be71e63 100644
+--- a/web-trx/docs/DEBUGGING.md
++++ b/web-trx/docs/DEBUGGING.md
+@@ -33,9 +33,9 @@ siehe unten).
+ ## 2. `GnuRadioBackend` — nur auf einem System mit GNU Radio + Hardware
+ 
+ Verdrahtet `PlutoTxFlowgraph`/`AdvancedRxFlowgraph`/`FftProbe`/
+-`PlutoSafety` aus `vendor/pluto-tx`, nach dem Muster von
+-`vendor/pluto-tx/pluto_cli/runtime.py`. Läuft nur dort, wo
+-`vendor/pluto-tx/install.sh` bereits gelaufen ist (echter Radio-Server).
++`PlutoSafety` aus pluto-tx (Repo-Wurzel, eine Ebene über `web-trx/`),
++nach dem Muster von `pluto_cli/runtime.py`. Läuft nur dort, wo
++`install.sh` bereits gelaufen ist (echter Radio-Server).
+ Bewusst so dünn wie möglich gehalten — die eigentliche Komplexität
+ (Protokoll, Zustandsautomat, UI, Audio-Framing) ist bereits gegen
+ `SimBackend` durchgetestet, bevor sie auf echte Hardware trifft.
+diff --git a/web-trx/docs/FT8_PLAN.md b/web-trx/docs/FT8_PLAN.md
+index aecc2b4..e75483b 100644
+--- a/web-trx/docs/FT8_PLAN.md
++++ b/web-trx/docs/FT8_PLAN.md
+@@ -14,14 +14,17 @@ enthält die Schritte.
+ `docs/DEBUGGING.md` (bekannte Stolpersteine), dann diesen Plan komplett. Für
+ die pluto-tx-Seite: `pluto_cli/runtime.py` (`_run_ft8_series`),
+ `pluto_cli/tx.py` (`run_ft8`), `pluto_cli/rx.py` (`on_ft8_decodes`),
+-`pluto_tx/ft8.py`, `pluto_advanced_rx/ft8_rx.py` in der pluto-tx-Installation
+-(`WEB_TRX_PLUTO_TX_PATH`, Standard `~/Dokumente/plutosdr`).
++`pluto_tx/ft8.py`, `pluto_advanced_rx/ft8_rx.py` in der Repo-Wurzel (Web-TRX
++liegt seit der Zusammenführung als `web-trx/` im pluto-tx-Repository).
+ 
+ **Feste Regeln:**
+-- **pluto-tx ist read-only.** Weder die Installation unter
+-  `WEB_TRX_PLUTO_TX_PATH` noch `vendor/pluto-tx` werden verändert. Fehlt dort
+-  etwas, wird das dem Betreiber gemeldet, nicht umgangen.
+-- **Gearbeitet wird direkt auf `main`** im Web-TRX-Repo. Kleine Commits je
++- **Das ganze Repository ist frei bearbeitbar** (seit der Zusammenführung
++  gilt die frühere Regel „pluto-tx read-only“ nicht mehr). Änderungen an
++  `pluto_tx/`, `pluto_advanced_rx/` oder `pluto_cli/` dürfen die Apps nicht
++  brechen: vor jedem Commit laufen dafür zusätzlich die pluto-tx-Tests
++  (`QT_QPA_PLATFORM=offscreen PLUTO_WEBTRX_CONTROL=off python3 -m unittest
++  discover tests` in der Repo-Wurzel).
++- **Gearbeitet wird direkt auf `main`** im pluto-tx-Repo. Kleine Commits je
+   abgeschlossenem Schritt, Tests vorher grün, Push am Ende jeder Phase.
+ - **FT8 selbst wird nicht nachgebaut** (keine eigene Synthese, kein eigener
+   Decoder, keine eigene Slot-Planung außer als Test-Double im SimBackend).
+@@ -179,10 +182,10 @@ eines Modus.
+   `select_mode` per `tb.ft8_problem()`.
+ - Wertetabellen (`FT8_TONE_RANGE_HZ`, `FT8_DEFAULT_TONE_HZ`,
+   `MESSAGE_KINDS`, `FREE_TEXT_MAX`) werden wie bei FM/RTTY gespiegelt und
+-  per Test gegen die gepinnte pluto-tx-Version geprüft.
++  per Test gegen die pluto-tx-Dateien im selben Repository geprüft.
+   - `MESSAGE_KINDS` und `FREE_TEXT_MAX` stehen in `pluto_tx/ft8.py`. Das
+     Modul hat relative Imports, der Test muss es also als Paket importieren
+-    (`vendor/pluto-tx` auf `sys.path`) statt per Dateipfad.
++    (Repo-Wurzel auf `sys.path`) statt per Dateipfad.
+ 
+ ### 4.3 Backend: TX
+ 
+diff --git a/web-trx/docs/PROJECT_PLAN.md b/web-trx/docs/PROJECT_PLAN.md
+index 41d7961..afe69d3 100644
+--- a/web-trx/docs/PROJECT_PLAN.md
++++ b/web-trx/docs/PROJECT_PLAN.md
+@@ -1,5 +1,10 @@
+ # Web-TRX — Projektplan
+ 
++> **Stand seit der Zusammenführung:** Web-TRX liegt als Ordner `web-trx/`
++> im pluto-tx-Repository und importiert pluto-tx direkt aus diesem Checkout.
++> Das Submodule `vendor/pluto-tx` gibt es nicht mehr; Stellen unten, die es
++> beschreiben (Abschnitt 3 und 9), dokumentieren den Weg dorthin.
++
+ Einheitliche Weboberfläche für `pluto-tx`/`pluto-advanced-rx` (Sende- und
+ Empfangs-App für ADALM-PLUTO, HackRF One und RTL-SDR). Ziel: ein Funkamateur
+ bedient die am Server angeschlossenen SDRs vollständig über den Browser —
+@@ -67,11 +72,10 @@ Subprozess zu kapseln. Grund: Nur der direkte Import gibt Zugriff auf
+ -Quellen (Netzwerk-Audio) — beides sitzt unterhalb dessen, was `pluto-cli`
+ als Kommandozeilen-Oberfläche exponiert.
+ 
+-Konkret: `pluto-tx` wird als **Git-Submodule** (fest gepinnter Commit) in
+-`Web-TRX/vendor/pluto-tx` eingebunden — strikt lesend, nie verändert von
+-hier aus (deckt sich mit der bereits vereinbarten Read-only-Regel für das
+-Repo). Ein Versions-Bump ist ein bewusster, einzelner Schritt (Submodule-
+-Pointer aktualisieren), kein laufendes Editieren. `pluto-cli` selbst bleibt
++Konkret: Web-TRX liegt als `web-trx/` im pluto-tx-Repository und
++importiert `pluto_tx`/`pluto_advanced_rx` aus der Repo-Wurzel
++(`backend/web_trx/pluto_path.py`). Bis zur Zusammenführung war pluto-tx
++ein fest gepinntes Git-Submodule unter `vendor/pluto-tx`. `pluto-cli` selbst bleibt
+ zusätzlich nutzbar für einfache One-Shot-Admin-Aufgaben (z. B. Scan-Skripte),
+ ist aber nicht der Hauptpfad der Laufzeit-Kommunikation.
+ 
+@@ -95,7 +99,7 @@ Browser (SPA)                         Server
+                                        │  │    RX-Session je Gerät)           │
+                                        │  ├─ Auth (Shared-Token/Passwort)     │
+                                        │  ├─ TX-Aktivitätslog (SQLite/JSONL)  │
+-                                       │  └─ vendor/pluto-tx (Submodule,      │
++                                       │  └─ pluto-tx (Repo-Wurzel,           │
+                                        │      importiert wie pluto_cli)       │
+                                        │        ├─ PlutoTxFlowgraph           │
+                                        │        ├─ AdvancedRxFlowgraph        │
+@@ -241,10 +245,8 @@ Web-TRX/
+ │   └── tests/
+ ├── frontend/
+ │   └── src/                   # Svelte-App: Waterfall-Widget, Panels, Audio-Worklets
+-├── vendor/
+-│   └── pluto-tx/               # Git-Submodule, read-only, gepinnter Commit
+ ├── scripts/
+-│   └── start.sh, stop.sh      # manueller Betrieb (systemd/Reverse-Proxy später)
++│   └── start.sh, stop.sh, status.sh  # manueller Betrieb, auch aus den Apps (systemd/Reverse-Proxy später)
+ └── docs/
+     └── PROJECT_PLAN.md         # dieses Dokument
+ ```
+@@ -270,9 +272,8 @@ Web-TRX/
+ - **`FftProbe`-Polling-Rate vs. Netzwerkbandbreite**: Zeilenrate/-größe
+   müssen an die tatsächliche Client-Bandbreite (LAN vs. VPN/Internet)
+   anpassbar sein, nicht fest verdrahtet.
+-- **Submodule-Pinning-Workflow**: wie/wann wird der `pluto-tx`-Submodule-
+-  Commit aktualisiert, wenn dort ein Bugfix landet? Sollte ein bewusster,
+-  dokumentierter Schritt sein, kein automatisches Tracking von `main`.
++- ~~**Submodule-Pinning-Workflow**~~: erledigt durch die Zusammenführung
++  in das pluto-tx-Repository (kein Submodule mehr).
+ 
+ ## 9. Aktueller Stand (gegen SimBackend, ohne Hardware verifiziert)
+ 
+@@ -360,7 +361,7 @@ Radio-Server gegen Pluto+ verifiziert):
+   pluto-cli-Flags): FM-TX mit Hub 2,5/5 kHz, Pre-Emphasis und CTCSS aus der
+   Standardtonliste, FM-RX mit De-Emphasis (pluto-tx `c45531d`). Ungültige
+   Werte werden zum `error`-Event, Defaults werden ergänzt; die Wertetabellen
+-  prüft ein Test gegen die gepinnte `vendor/pluto-tx`-Konfiguration. Das
++  prüft ein Test gegen die pluto-tx-Konfiguration im selben Repository. Das
+   Frontend baut seine Auswahllisten aus dem `hello`-Event. Im
+   `GnuRadioBackend` landen sie auf `set_fm_deviation()`/
+   `set_fm_preemphasis()`/`set_subtone()` bzw. `fm_deemphasis` des
+@@ -393,7 +394,7 @@ Radio-Server gegen Pluto+ verifiziert):
+       `docs/DEBUGGING.md`). Dafür gibt es jetzt „Korr. ppm“ für RX und TX.
+   - **Waterfall Writer (digitext):** Text-Einmalsendung; im Wasserfall
+     lesbar mit RX-Bandbreite 0,96 MS/s, FFT 1024, Zoom ×32.
+-  - Modus-Schemas in `modes.py` (gegen `vendor/pluto-tx` getestet). Die
++  - Modus-Schemas in `modes.py` (gegen die pluto-tx-Dateien getestet). Die
+     verfügbaren Modi meldet das Backend (`features.rx_modes/tx_modes`,
+     RADE nur mit librade). RX-Bandbreite (Sample-Rate je Gerät) ist wählbar,
+     Zoom bis ×128.
