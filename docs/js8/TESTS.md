@@ -54,6 +54,51 @@ Serien ≤ 20.
   Die ersten Planannahmen (NORMAL −18 dB, SLOW −22 dB) schafft unter diesen
   Bedingungen auch JS8Calls eigener Decoder nicht zu 95 %.
 
+## Senden im Flowgraph (J3, Software, 29.09.2026)
+
+**Entscheidung zum Mehrrahmen-Timing** (Plan, Risiko „Mehrrahmen-Timing“):
+
+Zwischen zwei Rahmen in aufeinanderfolgenden Perioden bleibt nur die Periode
+minus 79 Symbole:
+
+| Speed | Lücke zwischen den Rahmen |
+|---|---|
+| NORMAL | 2,36 s |
+| FAST | 2,1 s |
+| TURBO | 2,05 s |
+| SLOW | 4,72 s |
+
+Ein Quellentausch im laufenden Graphen braucht auf dem Pluto 0,5–2,5 s
+(`FT8_KEY_EARLY_S` = 3 s). „Ein `Ft8TimedSource` je Rahmen“ passt deshalb
+nicht zuverlässig.
+
+Umgesetzt ist:
+- **Eine** `Js8SequenceSource` je Nachricht (`pluto_tx/js8_source.py`).
+  - Sie wird einmal vor dem ersten Rahmen eingewechselt, 3 s Vorlauf.
+  - Sie legt Rahmen i samplegenau an seine Periodengrenze.
+- **Jeder Rahmen wird trotzdem einzeln getastet** (`key_ptt()`/`unkey_ptt()`
+  je Rahmen, Vorlauf 0,5 s). Dafür ist kein Graph-Lock nötig, das Neutasten
+  des Pluto-LO dauert 5 ms.
+- **Zwischen den Rahmen ist der HF-Pfad dunkel:** `tx_gain` 0, Dämpfung
+  maximal, LO aus. Der Test prüft Nullen zwischen den Rahmen.
+- **Abbruchregel:** Ein `unkey_ptt()` vor dem geplanten Rahmenende bricht
+  die ganze Nachricht ab (`js8_cancel()`). Das gilt für NOTAUS der GUI, den
+  Abbruch und `shutdown_safe()`. Danach wird aus dieser Nachricht nie wieder
+  gesendet; ein neues Tasten braucht einen neuen Slotplan.
+- **Bandprüfung** `js8_problem()`: Die ganze belegte Bandbreite (Träger +
+  Offset … + 8 Töne) muss in *einem* Amateurband liegen. 40 m und 20 m
+  wurden ergänzt.
+
+Tests: `tests/test_js8_flowgraph.py` mit Fake-Gerät, jeweils TURBO:
+- Startzeit ±0,06 s,
+- Dauer 3,95 s,
+- drei Rahmen im Abstand von genau 6,000 s, je einzeln getastet und
+  dekodiert,
+- Abbruch nach Rahmen 1,
+- NOTAUS mitten im Rahmen,
+- Soundcard-Gerät,
+- Bandkanten.
+
 ## Empfang (J0, nur Empfang)
 
 - **29.09.2026, 18:44–19:47 UTC:** HackRF, nur Empfang, je 30 min auf
