@@ -60,7 +60,7 @@ class PlanTests(unittest.TestCase):
     def test_consecutive_periods(self):
         plan = js8.plan_frames(1000.2, P.NORMAL, 3)
         self.assertEqual([s for _, s in plan], [1005.5, 1020.5, 1035.5])
-        self.assertTrue(all(k == s - 3.0 for k, s in plan))
+        self.assertEqual([s - k for k, s in plan], [3.0, 0.5, 0.5])        # one swap, then only re-keying
         plan = js8.plan_frames(990.9, P.TURBO, 2, key_early_s=1.0)     # current period still usable
         self.assertEqual([s for _, s in plan], [990.9, 996.1])
 
