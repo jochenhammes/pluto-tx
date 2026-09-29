@@ -5,6 +5,7 @@
   import RxDecoder, {
     type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status, type Ft8Decode,
   } from "./lib/RxDecoder.svelte";
+  import Js8Panel, { type Js8Message, type Js8Period, type Js8Status } from "./lib/Js8Panel.svelte";
   import Login from "./lib/Login.svelte";
   import { WebTrxClient, type ServerEvent, type SpectrumRow, type AudioChunk } from "./lib/ws";
   import { AudioPlayer, MicCapture, type PlayerStats } from "./lib/audio";
@@ -16,7 +17,7 @@
   let txDeviceTypes: [string, string][] = [];
   const MODE_LABELS: Record<string, string> = {
     fm: "FM", ssb: "SSB (USB)", lsb: "SSB (LSB)", m17: "M17", rade: "RADE",
-    pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8",
+    pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8", js8: "JS8 (JS8Call)",
   };
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
@@ -26,7 +27,8 @@
   // One-shot text modes: a single "send" click, the server renders the
   // whole transmission and unkeys on its own. Everything else takes the mic.
   // FT8: the click arms a series of slot-timed transmissions instead.
-  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8"];
+  // JS8: the click arms one message -- its frames go out in consecutive periods.
+  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8"];
   const isAudioMode = (mode: string) => !ONE_SHOT_MODES.includes(mode);
 
   let waterfall: Waterfall;
@@ -64,6 +66,7 @@
     rx_direct_sampling?: string[];
     rx_bands?: Record<string, [number, number]>;
     ft8?: { tx: boolean; rx_backends: string[]; clock_synced: boolean };
+    js8?: { tx: boolean; rx_backends: string[]; submodes: string[]; jsc: boolean; clock_synced: boolean };
   } = {};
   $: serverZoom = !!features.fft_zoom_max;
   $: zoomSteps = ZOOM_STEPS.filter((z) => z <= (features.fft_zoom_max ?? 8));
@@ -77,6 +80,11 @@
   let rxFt8Decoder = "auto";
   let ft8Slots: Ft8Slot[] = [];
   let ft8Status: Ft8Status | null = null;
+  // JS8 receive (backend js8_frames / js8_message / js8_status)
+  let rxJs8 = { submode: "normal", decoder: "auto" };
+  let js8Periods: Js8Period[] = [];
+  let js8Messages: Js8Message[] = [];
+  let js8Status: Js8Status | null = null;
   let clockSynced = true;
   // Slot clock: the server's time decides; serverOffsetS = server - browser.
   let serverOffsetS = 0;
@@ -232,6 +240,33 @@
   let ft8TxText = "";
   let ft8Armed: { start_at: number; slot_utc: string; parity: string; repetition: number; of: number } | null = null;
   $: ft8CountdownS = ft8Armed ? Math.max(0, Math.ceil(ft8Armed.start_at - nowS)) : 0;
+  // JS8 transmit (backend web_trx/modes.py, js8_series.py): the server builds the message exactly as
+  // JS8Call does (preview: js8TxText, js8TxFrames) and sends its frames in consecutive periods.
+  interface Js8Options {
+    submodes: string[]; rx_submodes: string[]; submode_default: string; period_s: Record<string, number>;
+    bandwidth_hz: Record<string, number>; decoders: string[]; band_hz: [number, number]; message_kinds: string[];
+    text_max: number; report_range_db: [number, number]; tone_range_hz: [number, number]; tone_default_hz: number;
+    max_frames: number;
+  }
+  const JS8_KIND_LABELS: Record<string, string> = {
+    cq: "CQ", hb: "Heartbeat", allcall: "@ALLCALL + Text", directed: "Text an Station", snr_query: "SNR?",
+    snr_reply: "SNR-Rapport", ack: "ACK", free: "Freitext",
+  };
+  const JS8_SPEED_LABELS: Record<string, string> = {
+    normal: "Normal (15 s)", fast: "Fast (10 s)", turbo: "Turbo (6 s)", slow: "Slow (30 s)", all: "alle vier",
+  };
+  let js8Options: Js8Options | null = null;
+  let js8Tx = { kind: "cq", to: "", text: "", report_db: -10, submode: "normal", offset_hz: 1500, drift_comp: true };
+  let js8TxText = "";
+  let js8TxFrames = 0;
+  let js8TxProblem = "";
+  let js8Armed: { start_at: number; starts: number[]; frames: number; slot_utc: string; text?: string } | null = null;
+  let js8FramesSent = 0;
+  $: js8NextStart = js8Armed ? (js8Armed.starts?.[Math.min(js8FramesSent, js8Armed.starts.length - 1)] ?? js8Armed.start_at) : 0;
+  $: js8CountdownS = js8Armed ? Math.max(0, Math.ceil(js8NextStart - nowS)) : 0;
+  $: js8Period = js8Options?.period_s[rxJs8.submode === "all" ? "normal" : rxJs8.submode] ?? 15;
+  $: js8PeriodPos = ((nowS % js8Period) + js8Period) % js8Period;
+  let js8TxDurationS = 0;
   // What the receiver decoded (RxDecoder panel)
   let rttyRxText = "";
   let pocsagCalls: PocsagCall[] = [];
@@ -356,7 +391,7 @@
   };
   type DirSnapshot = { device_type: string | null; connection: string | null; mode: string | null;
     freq_hz: number; mode_params: Record<string, unknown>; power?: TxPower | null; settings?: TxSettings;
-    gains?: Record<string, number>; ft8_armed?: boolean };
+    gains?: Record<string, number>; ft8_armed?: boolean; js8_armed?: boolean };
 
   // Take over the server's actual state -- another tab or a script may have
   // changed it, and the server (not this page) is what actually transmits.
@@ -400,6 +435,7 @@
     if (rx.mode === "fm" && typeof rx.mode_params?.deemphasis === "boolean") rxDeemphasis = rx.mode_params.deemphasis;
     if (rx.mode === "rtty") rxRtty = { ...rxRtty, ...(rx.mode_params as typeof rxRtty) };
     if (rx.mode === "ft8" && typeof rx.mode_params?.decoder === "string") rxFt8Decoder = rx.mode_params.decoder;
+    if (rx.mode === "js8") rxJs8 = { ...rxJs8, ...(rx.mode_params as Partial<typeof rxJs8>) };
     if (tx.mode === "rtty") {
       const { text, ...rest } = p as typeof txRtty & { text?: string };
       txRtty = { ...txRtty, ...rest };
@@ -408,6 +444,8 @@
     if (tx.mode === "digitext") digitext = { ...digitext, ...(p as typeof digitext) };
     if (tx.mode === "rade" && typeof p.eoo === "boolean") radeEoo = p.eoo;
     if (tx.mode === "ft8") ft8Tx = { ...ft8Tx, ...(p as Partial<typeof ft8Tx>) };
+    if (tx.mode === "js8") js8Tx = { ...js8Tx, ...(p as Partial<typeof js8Tx>) };
+    js8Armed = tx.js8_armed ? (js8Armed ?? { start_at: 0, starts: [], frames: 0, slot_utc: "…" }) : null;
     // An armed series survives a page reload; its details come with the next ft8_armed.
     ft8Armed = tx.ft8_armed ? (ft8Armed ?? { start_at: 0, slot_utc: "…", parity: "", repetition: 0, of: 0 }) : null;
     txPower = tx.power ?? null;
@@ -428,7 +466,11 @@
         fmPreemphasis = fmOptions.preemphasis_default;
         rxDeemphasis = fmOptions.deemphasis_default;
       }
-      const opts = e.mode_options as { rtty?: RttyOptions; digitext?: DigitextOptions; ft8?: Ft8TxOptions };
+      const opts = e.mode_options as { rtty?: RttyOptions; digitext?: DigitextOptions; ft8?: Ft8TxOptions; js8?: Js8Options };
+      if (js8Options === null && opts.js8?.message_kinds) {
+        js8Options = opts.js8;
+        js8Tx.offset_hz = js8Options.tone_default_hz;
+      }
       rttyOptions = opts.rtty ?? null;
       digitextOptions = opts.digitext ?? null;
       if (ft8Options === null && opts.ft8?.message_kinds) {
@@ -461,8 +503,34 @@
       if (e.direction === "rx") rxMode = String(e.mode);
       if (e.direction === "tx") txMode = String(e.mode);
       if (e.direction === "tx" && e.mode === "ft8") ft8TxText = String(e.text ?? "");
+      if (e.direction === "tx" && e.mode === "js8") {
+        js8TxText = String(e.text ?? "");
+        js8TxFrames = Number(e.frames ?? 0);
+        js8TxDurationS = Number(e.duration_s ?? 0);
+        js8TxProblem = String(e.problem ?? "");
+      }
     }
     if (e.event === "ft8_armed") ft8Armed = e as unknown as typeof ft8Armed;
+    if (e.event === "js8_armed") {
+      js8Armed = e as unknown as typeof js8Armed;
+      js8FramesSent = 0;
+    }
+    if (e.event === "js8_frame") js8FramesSent = Number(e.frame_no);
+    if (e.event === "js8_done") js8Armed = null;
+    if (e.event === "js8_cancelled") {
+      js8Armed = null;
+      if (e.reason === "error") txError = `JS8: ${String(e.message ?? "")}`;
+      else if (e.reason !== "ptt_off") pushNotice(`JS8-Nachricht abgebrochen (${String(e.reason)})`, "info");
+    }
+    if (e.event === "js8_frames") js8Periods = [...js8Periods, e as unknown as Js8Period].slice(-120);
+    if (e.event === "js8_message") {
+      const m = e as unknown as Js8Message;
+      js8Messages = [...js8Messages.filter((x) => x.id !== m.id), m].slice(-300);
+    }
+    if (e.event === "js8_status") {
+      js8Status = e as unknown as Js8Status;
+      if (typeof js8Status.clock_synced === "boolean") clockSynced = js8Status.clock_synced;
+    }
     if (e.event === "ft8_done") ft8Armed = null;
     if (e.event === "ft8_cancelled") {
       ft8Armed = null;
@@ -502,6 +570,7 @@
       if (e.direction === "tx") {
         txConnected = false;
         ft8Armed = null;
+        js8Armed = null;
       }
     }
     if (e.event === "scanned") {
@@ -541,6 +610,7 @@
     if (e.event === "estop") {
       keyed = false;
       ft8Armed = null;
+      js8Armed = null;
       txNeedsRearm = true; // the backend drops the TX flowgraph on E-STOP
       void refreshTxLog();
     }
@@ -597,7 +667,7 @@
   }
   function selectRxMode(): void {
     const params = rxMode === "fm" ? { deemphasis: rxDeemphasis } : rxMode === "rtty" ? rxRtty
-      : rxMode === "ft8" ? { decoder: rxFt8Decoder } : {};
+      : rxMode === "ft8" ? { decoder: rxFt8Decoder } : rxMode === "js8" ? { ...rxJs8 } : {};
     client.request("select_mode", { direction: "rx", mode: rxMode, params });
   }
   function tuneRx(hz: number): void {
@@ -638,6 +708,7 @@
     if (txMode === "rade") return { eoo: radeEoo };
     if (txMode === "ft8") return { ...ft8Tx, report_db: Math.round(Number(ft8Tx.report_db)),
                                    offset_hz: Number(ft8Tx.offset_hz), repeat_count: Math.round(Number(ft8Tx.repeat_count)) };
+    if (txMode === "js8") return { ...js8Tx, report_db: Math.round(Number(js8Tx.report_db)), offset_hz: Number(js8Tx.offset_hz) };
     return {};
   }
   function selectTxMode(): void {
@@ -751,6 +822,23 @@
     }
     commitPendingTxParams();
     client.request("ptt_on");
+  }
+  // JS8: first click arms the message (its frames go out in consecutive periods), a second click
+  // cancels the rest -- in any state, also while a frame is on the air.
+  function js8Ptt(): void {
+    if (js8Armed) {
+      client.request("ptt_off");
+      return;
+    }
+    commitPendingTxParams();
+    client.request("ptt_on");
+  }
+  // Click on a JS8 station/message: its callsign becomes the "To" field (text to that station).
+  function pickJs8(call: string): void {
+    if (js8Armed) return;
+    js8Tx.to = call;
+    if (!["directed", "snr_query", "snr_reply", "ack"].includes(js8Tx.kind)) js8Tx.kind = "directed";
+    if (txMode === "js8" && txConnected) selectTxMode();
   }
   // Click on a received decode: its sender becomes the DX callsign, and the
   // reply goes into the other slot parity. The message kind stays the operator's.
@@ -937,6 +1025,31 @@
         <div class="mic-error">Server-Uhr ist nicht per NTP synchronisiert — FT8 braucht ±1 s Genauigkeit.</div>
       {/if}
     {/if}
+    {#if rxMode === "js8" && js8Options}
+      <div class="row ft8-row">
+        <div class="field narrow">
+          <label for="rxJs8Speed">Speed</label>
+          <select id="rxJs8Speed" bind:value={rxJs8.submode} on:change={selectRxMode}>
+            {#each js8Options.rx_submodes as sm}<option value={sm}>{JS8_SPEED_LABELS[sm] ?? sm}</option>{/each}
+          </select>
+        </div>
+        <div class="field narrow">
+          <label for="rxJs8Dec">Decoder</label>
+          <select id="rxJs8Dec" bind:value={rxJs8.decoder} on:change={selectRxMode}>
+            <option value="auto">automatisch</option>
+            {#each features.js8?.rx_backends ?? [] as d}<option value={d}>{d === "js8" ? "JS8Call" : d === "own" ? "eigener" : d}</option>{/each}
+          </select>
+        </div>
+        <div class="slot-clock" title="Perioden nach Server-Uhr">
+          <div class="slot-label">{utcNow} UTC · Periode {js8Period} s</div>
+          <div class="slot-bar"><div class="slot-fill" style="width: {(js8PeriodPos / js8Period) * 100}%"></div></div>
+        </div>
+        <span class="dim">USB, 7,078 / 14,078 / 144,178 MHz · keine automatischen Antworten</span>
+      </div>
+      {#if !clockSynced}
+        <div class="mic-error">Server-Uhr ist nicht per NTP synchronisiert — JS8 braucht ±1 s Genauigkeit.</div>
+      {/if}
+    {/if}
     {#if rxMode === "rtty" && rttyOptions}
       <div class="row">
         <div class="field">
@@ -965,6 +1078,7 @@
     <Waterfall bind:this={waterfall} height={wfAreaHeight} {floorDb} {ceilingDb} zoom={serverZoom ? 1 : zoom} autoLevel={autoLevel && !keyed}
       markers={[
         ...(rxMode === "ft8" ? [{ hz: rxFreqHz + 200, widthHz: 2800, color: "rgba(62, 166, 255, 0.18)", label: "FT8" }] : []),
+        ...(rxMode === "js8" ? [{ hz: rxFreqHz + 200, widthHz: 2800, color: "rgba(62, 166, 255, 0.18)", label: "JS8" }] : []),
         // receive bandwidth of the current mode (features.rx_bands: [low, high] offsets from the RX frequency)
         ...(rxConnected && features.rx_bands?.[rxMode] ? [{
           hz: rxFreqHz + features.rx_bands[rxMode][0], widthHz: features.rx_bands[rxMode][1] - features.rx_bands[rxMode][0],
@@ -974,6 +1088,10 @@
         // FT8: where our own signal sits (dial + offset, 8 tones = 50 Hz)
         ...(txConnected && txMode === "ft8" ? [{ hz: txFreqHz + Number(ft8Tx.offset_hz), widthHz: 50,
           color: keyed ? "rgba(255, 77, 77, 0.45)" : "rgba(245, 194, 17, 0.3)", label: "FT8 TX" }] : []),
+        // JS8: our own signal (dial + offset, 8 tones: 25-160 Hz depending on the speed)
+        ...(txConnected && txMode === "js8" ? [{ hz: txFreqHz + Number(js8Tx.offset_hz),
+          widthHz: js8Options?.bandwidth_hz[js8Tx.submode] ?? 50,
+          color: keyed ? "rgba(255, 77, 77, 0.45)" : "rgba(245, 194, 17, 0.3)", label: "JS8 TX" }] : []),
       ]}
       onClickFreq={onWaterfallClick}
       onAutoLevel={(f, c) => { floorDb = f; ceilingDb = c; }} />
@@ -1046,7 +1164,7 @@
     </div>
 
     <div class="row">
-      <select id="txModeSel" bind:value={txMode} on:change={selectTxMode} disabled={!txConnected || keyed || !!ft8Armed}>
+      <select id="txModeSel" bind:value={txMode} on:change={selectTxMode} disabled={!txConnected || keyed || !!ft8Armed || !!js8Armed}>
         {#each txModes as [v, l]}<option value={v}>{l}</option>{/each}
       </select>
       {#if txMode === "fm"}
@@ -1205,6 +1323,69 @@
         {ft8TxText || (stationCall ? "— DX-Rufzeichen fehlt —" : "— eigenes Rufzeichen fehlt (Station) —")}
       </div>
       {#if !clockSynced}<div class="mic-error">Server-Uhr nicht per NTP synchronisiert — FT8-Zeitlage unsicher.</div>{/if}
+    {:else if txMode === "js8" && js8Options}
+      <fieldset class="ft8-tx" disabled={!!js8Armed}>
+        <div class="row">
+          <div class="field">
+            <label for="js8Kind">Nachricht</label>
+            <select id="js8Kind" bind:value={js8Tx.kind} on:change={selectTxMode}>
+              {#each js8Options.message_kinds as k}<option value={k}>{JS8_KIND_LABELS[k] ?? k}</option>{/each}
+            </select>
+          </div>
+          {#if ["directed", "snr_query", "snr_reply", "ack"].includes(js8Tx.kind)}
+            <div class="field">
+              <label for="js8To">An</label>
+              <input id="js8To" type="text" class="callsign" bind:value={js8Tx.to} on:change={selectTxMode}
+                placeholder="Klick auf Station" />
+            </div>
+          {/if}
+          {#if js8Tx.kind === "snr_reply"}
+            <div class="field narrow">
+              <label for="js8Snr">Rapport dB</label>
+              <input id="js8Snr" type="number" min={js8Options.report_range_db[0]} max={js8Options.report_range_db[1]}
+                step="1" bind:value={js8Tx.report_db} on:change={selectTxMode} />
+            </div>
+          {/if}
+        </div>
+        {#if ["allcall", "directed", "free"].includes(js8Tx.kind)}
+          <div class="row">
+            <div class="field grow">
+              <label for="js8Text">Text</label>
+              <input id="js8Text" type="text" maxlength={js8Options.text_max} bind:value={js8Tx.text}
+                on:change={selectTxMode} />
+            </div>
+          </div>
+        {/if}
+        <div class="row">
+          <div class="field narrow">
+            <label for="js8Speed">Speed</label>
+            <select id="js8Speed" bind:value={js8Tx.submode} on:change={selectTxMode}>
+              {#each js8Options.submodes as sm}<option value={sm}>{JS8_SPEED_LABELS[sm] ?? sm}</option>{/each}
+            </select>
+          </div>
+          <div class="field narrow">
+            <label for="js8Offset">Offset Hz</label>
+            <input id="js8Offset" type="number" min={js8Options.tone_range_hz[0]}
+              max={js8Options.tone_range_hz[1] - (js8Options.bandwidth_hz[js8Tx.submode] ?? 50)}
+              step="10" bind:value={js8Tx.offset_hz} on:change={selectTxMode} />
+          </div>
+          <label class="check" title="Gleicht die gemessene Oszillatordrift des Pluto während jedes Rahmens aus">
+            <input type="checkbox" bind:checked={js8Tx.drift_comp} on:change={selectTxMode} /> Driftkompensation
+          </label>
+        </div>
+      </fieldset>
+      <div class="ft8-preview" class:empty={!js8TxText}>
+        {#if js8TxText}
+          {js8TxText}
+          <span class="dim">· {js8TxFrames} Rahmen ≈ {Math.round(js8TxDurationS)} s</span>
+        {:else}
+          — {js8TxProblem || "Nachricht unvollständig"} —
+        {/if}
+      </div>
+      {#if !features.js8?.jsc && js8Tx.submode !== "normal" && ["allcall", "directed", "free"].includes(js8Tx.kind)}
+        <div class="dim">Freitext in Fast/Turbo/Slow braucht das JSC-Wörterbuch (install-js8.sh) — sonst Normal wählen.</div>
+      {/if}
+      {#if !clockSynced}<div class="mic-error">Server-Uhr nicht per NTP synchronisiert — JS8-Zeitlage unsicher.</div>{/if}
     {/if}
 
     {#if txPower}
@@ -1311,6 +1492,17 @@
             Scharf schalten
           {/if}
         </button>
+      {:else if txMode === "js8"}
+        <button class="ptt" class:active={keyed} class:armed={!!js8Armed && !keyed}
+          disabled={!txConnected || txNeedsRearm || !wsConnected || (!js8Armed && !js8TxText)} on:click={js8Ptt}>
+          {#if keyed}
+            {"\u{1F534}"} SENDET Rahmen {Math.min(js8FramesSent + 1, js8Armed?.frames ?? 1)}/{js8Armed?.frames ?? "?"} — Abbrechen
+          {:else if js8Armed}
+            Scharf · Rahmen {js8FramesSent + 1}/{js8Armed.frames} in {js8CountdownS} s — Abbrechen
+          {:else}
+            Nachricht senden
+          {/if}
+        </button>
       {:else}
         <button class="ptt" class:active={keyed} disabled={!txConnected || keyed || txNeedsRearm || !wsConnected} on:click={pocsagPtt}>
           {keyed ? "\u{1F534} SENDET" : "Aussenden"}
@@ -1351,10 +1543,15 @@
   </div>
 
   <div class="tab-body" class:hidden={bottomTab !== "rx"}>
-    <RxDecoder mode={rxMode} connected={rxConnected} rttyText={rttyRxText} {pocsagCalls} {m17Caller} {radeStatus}
-      {ft8Slots} {ft8Status} myCall={stationCall}
-      onPickDecode={features.ft8?.tx ? pickFt8Decode : null}
-      onClearRtty={() => (rttyRxText = "")} />
+    {#if rxMode === "js8" && rxConnected}
+      <Js8Panel messages={js8Messages} periods={js8Periods} status={js8Status} myCall={stationCall}
+        onPick={features.js8?.tx ? pickJs8 : null} />
+    {:else}
+      <RxDecoder mode={rxMode} connected={rxConnected} rttyText={rttyRxText} {pocsagCalls} {m17Caller} {radeStatus}
+        {ft8Slots} {ft8Status} myCall={stationCall}
+        onPickDecode={features.ft8?.tx ? pickFt8Decode : null}
+        onClearRtty={() => (rttyRxText = "")} />
+    {/if}
   </div>
 
   <div class="tab-body" class:hidden={bottomTab !== "txlog"}>
