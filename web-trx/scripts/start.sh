@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Starts Web-TRX (GNU Radio backend + built frontend) in the background.
-# Manual operation on purpose -- no systemd unit. Stop with scripts/stop.sh,
+# Manual operation, or via the systemd unit from install-service.sh. Stop with scripts/stop.sh,
 # status with scripts/status.sh. The TX and RX apps call this same script
 # from their "Web-TRX" row (pluto_tx/webtrx_control.py).
 #
