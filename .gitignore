@@ -10,3 +10,5 @@ install-improvements.md
 pluto-tx-file-broadcast-briefing.md
 # Private RF/serial captures of MeshCore traffic -- never upload (large, third-party node data).
 meshcore_capture_*/
+# JS8Call source clone (install-js8.sh) incl. the extracted JSC word lists (jsc.json)
+js8call/
