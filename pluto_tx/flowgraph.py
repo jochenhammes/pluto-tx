@@ -41,6 +41,8 @@ from . import pocsag_codec
 from . import rtty
 from . import ft8
 from .ft8_source import Ft8TimedSource
+from . import js8, js8_phy
+from .js8_source import Js8SequenceSource
 from . import lora_airtime
 
 FT8_AVAILABLE = ft8.ft8_ctypes.FT8_AVAILABLE  # needs libft8wrap.so (install-ft8.sh)
@@ -136,6 +138,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_POCSAG = 12
     MODE_MESHCORE = 13
     MODE_FT8 = 14
+    MODE_JS8 = 15
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -157,7 +160,8 @@ class PlutoTxFlowgraph(gr.top_block):
                  meshcore_preset_index=0, meshcore_kind="advert", meshcore_name="", meshcore_text="",
                  meshcore_route="flood", meshcore_role=1, meshcore_location=None,
                  meshcore_channel_name="Public", meshcore_channel_secret_hex="", meshcore_identity=None,
-                 meshcore_recipient_hex=""):
+                 meshcore_recipient_hex="",
+                 js8_frames=None, js8_submode=js8_phy.NORMAL, js8_tone_hz=config.JS8_DEFAULT_TONE_HZ):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
@@ -708,6 +712,33 @@ class PlutoTxFlowgraph(gr.top_block):
         self.connect(self.ft8_source, self.ft8_to_audio)
         self.connect(self.ft8_to_audio, self.ft8_audio_gain)
 
+        # --- JS8 branch (pluto_tx/js8*.py, docs/js8/SPEC.md). Same IQ-native path as FT8 (plain CPFSK via
+        # ft8.gfsk_iq(bt=None)), but a message is several frames in consecutive periods, only 2-4.7 s
+        # apart: one Js8SequenceSource carries all of them and is swapped in once, before the first frame;
+        # every frame is then keyed and unkeyed on its own (no graph lock needed for that), so the RF path
+        # is dark between frames. See key_ptt()/unkey_ptt() and js8_source.py.
+        self.js8_frames = list(js8_frames or [])
+        self.js8_submode = int(js8_submode)
+        self.js8_tone_hz = float(js8_tone_hz)
+        self.js8_start_at = None        # epoch start of the first frame; set before the first key_ptt()
+        self.js8_hold_s = 0.0           # keyed time of the current frame (from key_ptt() to its end + tail)
+        self.js8_frame_index = 0        # the frame the next key_ptt() sends
+        self.js8_frame_starts = []      # on-air start times of the frames of the running transmission
+        self.js8_swap_s = None
+        self.js8_last_drift_comp_hz_s = 0.0
+        self._js8_frame_end = None      # epoch end of the frame currently keyed
+        self._js8_active = False
+        self.js8_source = blocks.vector_source_c([0j], repeat=False)
+        self.js8_tx_resampler = filter.rational_resampler_ccf(
+            interpolation=ft8_interp, decimation=ft8_decim,
+            taps=firdes.low_pass(ft8_interp, config.AUDIO_RATE * ft8_interp, 12_000, 16_000, window.WIN_HAMMING),
+        )
+        self.js8_to_audio = blocks.complex_to_real()
+        self.js8_audio_gain = blocks.multiply_const_ff(0.0)
+        self.connect(self.js8_source, self.js8_tx_resampler)
+        self.connect(self.js8_source, self.js8_to_audio)
+        self.connect(self.js8_to_audio, self.js8_audio_gain)
+
         # --- Meshtastic (LoRa CSS) branch. IQ-native like M17/RADE: gr-lora_sdr's
         # modulate emits complex baseband directly at 4x the LoRa bandwidth, so
         # the only thing needed on top is a resampler up to the device rate --
@@ -976,6 +1007,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
         self._null_sink_pocsag = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see POCSAG branch above
         self._null_sink_ft8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see FT8 branch above
+        self._null_sink_js8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see JS8 branch above
 
         # --- Live view of the modulated baseband actually fed to the sink,
         # zoomed in on a fixed span around center (WATERFALL_ZOOM_BANDWIDTH_HZ)
@@ -1201,6 +1233,7 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         producers[self.MODE_POCSAG] = self.pocsag_mod  # always available, see its branch above
         producers[self.MODE_FT8] = self.ft8_tx_resampler  # always built (mode falls back without ft8_lib)
+        producers[self.MODE_JS8] = self.js8_tx_resampler  # always built (pure Python codec)
         return producers
 
     def _null_sink_for(self, producer):
@@ -1228,6 +1261,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_pocsag
         if producer is self.ft8_tx_resampler:
             return self._null_sink_ft8
+        if producer is self.js8_tx_resampler:
+            return self._null_sink_js8
         raise ValueError(f"no null_sink registered for producer {producer!r}")
 
     def _soundcard_audio_producer_map(self):
@@ -1242,6 +1277,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self.MODE_PSK31: self.psk31_audio_gain,
             self.MODE_RTTY: self.rtty_audio_gain,
             self.MODE_FT8: self.ft8_audio_gain,
+            self.MODE_JS8: self.js8_audio_gain,
         }
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_audio_gain
@@ -1302,7 +1338,8 @@ class PlutoTxFlowgraph(gr.top_block):
 
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
                     self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
-                    self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG, self.MODE_FT8):
+                    self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG, self.MODE_FT8,
+                    self.MODE_JS8):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
@@ -1916,6 +1953,143 @@ class PlutoTxFlowgraph(gr.top_block):
         wait_s = 0.0 if start_at is None else max(0.0, start_at - time.time())
         self.ft8_hold_s = wait_s + len(self._ft8_iq) / config.AUDIO_RATE
 
+    # --- JS8 ------------------------------------------------------------
+    def set_js8_message(self, frames, submode=None, tone_hz=None):
+        """frames: [(frame, flags)] as js8_message.build_frames() returns them. Cancels a running one."""
+        self.js8_cancel()
+        self.js8_frames = list(frames)
+        if submode is not None:
+            self.js8_submode = int(submode)
+        if tone_hz is not None:
+            self.js8_tone_hz = float(tone_hz)
+
+    def set_js8_tone_hz(self, tone_hz: float):
+        self.js8_tone_hz = float(tone_hz)
+
+    def js8_occupied_hz(self):
+        """(low, high) RF edges of the JS8 signal: carrier + tone 0 .. + 8 tones (upper sideband)."""
+        carrier = self.nominal_freq_hz + self.fine_offset_hz
+        bw = js8_phy.submode_info(self.js8_submode)["bandwidth_hz"]
+        return carrier + self.js8_tone_hz, carrier + self.js8_tone_hz + bw
+
+    def js8_problem(self):
+        """None if the current JS8 message can be sent, else a short reason."""
+        if self.js8_submode not in js8_phy.SUBMODES:
+            return f"unknown JS8 speed {self.js8_submode}"
+        lo, hi = config.JS8_TONE_RANGE_HZ
+        bw = js8_phy.submode_info(self.js8_submode)["bandwidth_hz"]
+        if not (lo <= self.js8_tone_hz and self.js8_tone_hz + bw <= hi):
+            return f"audio offset must keep the signal inside {lo:.0f}..{hi:.0f} Hz"
+        if not self.js8_frames:
+            return "no message"
+        if len(self.js8_frames) > js8.MAX_FRAMES:
+            return f"message too long ({len(self.js8_frames)} frames, max {js8.MAX_FRAMES})"
+        for frame, flags in self.js8_frames:
+            try:
+                js8_phy.frame_to_bits(frame, flags)
+            except ValueError as e:
+                return str(e)
+        if not self.device.is_audio_only():
+            f_lo, f_hi = self.js8_occupied_hz()
+            band = config.in_amateur_band(f_lo)
+            if band is None or config.in_amateur_band(f_hi) != band:
+                return (f"{f_lo / 1e6:.6f}-{f_hi / 1e6:.6f} MHz is not completely inside an amateur band")
+        return None
+
+    def prepare_js8(self):
+        """Check the pending message and synthesise its first frame (raises ValueError if it can't be sent)."""
+        problem = self.js8_problem()
+        if problem:
+            raise ValueError(problem)
+        self._js8_synth(0, 0.0)
+
+    def js8_frame_duration_s(self):
+        return js8_phy.submode_info(self.js8_submode)["data_duration_s"] + config.JS8_TAIL_S + \
+            self.device.tx_end_loss_s
+
+    def js8_cancel(self):
+        """Abort the running JS8 transmission: no further frame is ever sent from it."""
+        src = self.js8_source
+        if isinstance(src, Js8SequenceSource):
+            src.cancel()
+        self._js8_active = False
+        self.js8_frame_index = 0
+        self.js8_start_at = None
+        self._js8_frame_end = None
+
+    @property
+    def js8_active(self):
+        return self._js8_active
+
+    def _js8_synth(self, i, drift_hz_s):
+        frame, flags = self.js8_frames[i]
+        iq, _ = js8.encode_frame_iq(frame, flags, self.js8_submode, self.js8_tone_hz, config.AUDIO_RATE,
+                                   amplitude=config.JS8_IQ_LEVEL,
+                                   tail_s=config.JS8_TAIL_S + self.device.tx_end_loss_s)
+        if drift_hz_s:
+            t = np.arange(len(iq)) / config.AUDIO_RATE
+            iq = (iq * np.exp(-1j * np.pi * drift_hz_s * t * t)).astype(np.complex64)
+        return iq
+
+    def _js8_frame_iq(self):
+        """The IQ of the frame the coming key_ptt() sends (raises ValueError before any RF action)."""
+        if not self._js8_active:
+            problem = self.js8_problem()
+            if problem:
+                raise ValueError(problem)
+            if self.js8_start_at is None:
+                raise ValueError("JS8: no slot planned (set js8_start_at, see js8.plan_frames())")
+            self.js8_frame_index = 0
+        elif self.js8_frame_index >= len(self.js8_frames):
+            raise ValueError("JS8: all frames of this message are sent")
+        drift = self.ft8_drift_hz_per_s()          # same device model, independent of the mode
+        self.js8_last_drift_comp_hz_s = drift
+        return self._js8_synth(self.js8_frame_index, drift)
+
+    def _js8_start_frame(self, iq):
+        """Called at the end of key_ptt(): swap the sequence source in for the first frame, then hand it
+        this frame's samples."""
+        i = self.js8_frame_index
+        if not self._js8_active:
+            start_at, self.js8_start_at = self.js8_start_at, None
+            info = js8_phy.submode_info(self.js8_submode)
+            period = info["period_s"]
+            slot0 = ft8.current_slot_start(start_at, period)
+            delay = info["start_delay_ms"] / 1000
+            self.js8_frame_starts = [start_at] + [slot0 + k * period + delay for k in range(1, len(self.js8_frames))]
+            t0 = time.monotonic()
+            self.lock()
+            try:
+                self.disconnect(self.js8_source, self.js8_tx_resampler)
+                self.disconnect(self.js8_source, self.js8_to_audio)
+                self.js8_source = Js8SequenceSource(self.js8_frame_starts, len(iq), config.AUDIO_RATE,
+                                                    lead_s=config.JS8_TX_LATENCY_S)
+                self.js8_source.set_max_output_buffer(2048)
+                self.connect(self.js8_source, self.js8_tx_resampler)
+                self.connect(self.js8_source, self.js8_to_audio)
+            finally:
+                self.unlock()
+            self.js8_swap_s = time.monotonic() - t0
+            self._js8_active = True
+        self.js8_source.load_frame(i, iq)
+        self._js8_frame_end = self.js8_frame_starts[i] + len(iq) / config.AUDIO_RATE
+        self.js8_hold_s = max(0.0, self._js8_frame_end - time.time())
+
+    def _js8_after_frame(self):
+        """unkey_ptt() in JS8: the regular end of a frame moves on to the next one (or ends the message);
+        an unkey before the frame's scheduled end is an abort -- no later frame is ever sent."""
+        self._ft8_last_tx_end = time.monotonic()   # the drift model's cool-down term
+        if not self._js8_active:
+            return
+        if self._js8_frame_end is not None and time.time() < self._js8_frame_end - config.JS8_ABORT_MARGIN_S:
+            self.js8_cancel()
+            return
+        self.js8_frame_index += 1
+        self._js8_frame_end = None
+        if self.js8_frame_index >= len(self.js8_frames):
+            self._js8_active = False
+            self.js8_frame_index = 0
+
     def add_filebroadcast_file(self, filename: str, data: bytes):
         """Adds a file to the rotation -- can be called at ANY time,
         including while already keyed/mid-broadcast (Phase 2's whole point,
@@ -2147,6 +2321,16 @@ class PlutoTxFlowgraph(gr.top_block):
                 self._keyed = True
                 self._ft8_start_source()
                 return
+        if self.mode == self.MODE_JS8:
+            iq = self._js8_frame_iq()  # raises ValueError before any RF action; the source starts last
+            if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
+                self.tx_gain.set_k(1.0 + 0j)
+                self.js8_audio_gain.set_k(config.JS8_SOUNDCARD_LEVEL)
+                self._keyed = True
+                self._js8_start_frame(iq)
+                return
         if self.mode == self.MODE_POCSAG:
             self._ensure_pocsag_audio()  # raises ValueError before any RF action; the source starts last
             if self.device.is_audio_only():
@@ -2219,6 +2403,8 @@ class PlutoTxFlowgraph(gr.top_block):
             self._pocsag_start_source()
         if self.mode == self.MODE_FT8:
             self._ft8_start_source()
+        if self.mode == self.MODE_JS8:
+            self._js8_start_frame(iq)
 
     def unkey_ptt(self):
         """PTT release. FM/SSB: mute tx_gain FIRST (severs the actual RF
@@ -2265,6 +2451,15 @@ class PlutoTxFlowgraph(gr.top_block):
         there's nothing to power down."""
         if self.mode == self.MODE_FT8 and self._keyed:
             self._ft8_last_tx_end = time.monotonic()
+        if self.mode == self.MODE_JS8 and self._keyed:
+            self._js8_after_frame()
+        if self.mode == self.MODE_JS8 and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.js8_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
         if self.mode == self.MODE_FM and self.device.is_audio_only():
             # Structural mirror of the RADE branch just below. needs_ptt_control's
             # post_unkey() call (AIOC only -- see devices/base.py) runs AFTER gain
@@ -2423,6 +2618,7 @@ class PlutoTxFlowgraph(gr.top_block):
 
     def shutdown_safe(self):
         """Stop the flowgraph and force the TX chain dark. Safe to call more than once."""
+        self.js8_cancel()
         if self._keyed:
             self.unkey_ptt()
         try:
