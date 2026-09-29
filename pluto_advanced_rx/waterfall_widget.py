@@ -191,9 +191,33 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
             plot.addItem(region)
             self._rtty_band_regions.append(region)
 
+        # A FOURTH, cursor-following band (cyan): e.g. JS8's signal width at the mouse position, to spot a
+        # free audio offset. Hidden until set_cursor_band() gives it a width.
+        self._cursor_band_hz = None
+        self._cursor_regions = []
+        for plot in (self.spectrum_plot, self.waterfall_plot):
+            region = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(0, 200, 255, 45),
+                                         pen=pg.mkPen(color="#00c8ff", width=1))
+            region.setZValue(-5)
+            region.setVisible(False)
+            plot.addItem(region)
+            self._cursor_regions.append(region)
+            plot.scene().sigMouseMoved.connect(lambda pos, plot=plot: self._on_mouse_moved(plot, pos))
+
         self._init_image_buffer(fft_size)
 
     # --- internal ------------------------------------------------------
+    def _on_mouse_moved(self, plot, scene_pos):
+        if not self._cursor_band_hz:
+            return
+        vb = plot.getPlotItem().getViewBox()
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return
+        f = vb.mapSceneToView(scene_pos).x()
+        for region in self._cursor_regions:
+            region.setRegion((f, f + self._cursor_band_hz))
+            region.setVisible(True)
+
     def _init_image_buffer(self, fft_size):
         self._fft_size = fft_size
         self._image_buf = np.full((self._history_rows, fft_size), self._db_range[0], dtype=np.float32)
@@ -276,6 +300,13 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
             marker.setVisible(visible)
         for region in self._rtty_band_regions:
             region.setVisible(visible)
+
+    def set_cursor_band(self, width_hz):
+        """Show a band of width_hz starting at the mouse position (None/0 hides it)."""
+        self._cursor_band_hz = float(width_hz) if width_hz else None
+        if not self._cursor_band_hz:
+            for region in self._cursor_regions:
+                region.setVisible(False)
 
     def set_fft_size(self, fft_size):
         self._init_image_buffer(fft_size)

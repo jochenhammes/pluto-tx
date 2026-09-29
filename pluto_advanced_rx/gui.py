@@ -37,6 +37,8 @@ from .meshcore_state import MeshcoreState
 from .meshtastic_state import MeshtasticState
 from .pocsag_state import PocsagState
 from .ft8_rx import Ft8State
+from .js8_rx import Js8State
+from pluto_tx import js8_phy
 from . import ft8_decoder
 if LORA_AVAILABLE:
     from pluto_tx import meshtastic_codec
@@ -121,6 +123,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # FT8 decodes -- same "constructed ONCE, survives rebuilds" reasoning.
         self._ft8_state = Ft8State()
         self._ft8_rendered_version = -1
+        # JS8 frames/messages/stations -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._js8_state = Js8State()
+        self._js8_rendered_version = -1
         self._link_state = None  # (id(tb), status) of the last network-link status shown, see _update_link_status()
         # Carrier (Hz) to restore when leaving Meshtastic, whose presets retune the receiver.
         self._freq_before_lora = None
@@ -293,6 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData("ft8"))
             ft8_item.setEnabled(False)
             ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
+        self.digimode_combo.addItem("JS8 (JS8Call)", "js8")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
         self.digimode_combo.addItem("MeshCore (LoRa)", "meshcore")
         if not MESHCORE_AVAILABLE:
@@ -657,6 +663,59 @@ class MainWindow(QtWidgets.QMainWindow):
         ft8_layout.addWidget(self.ft8_table)
         digimodes_tab_layout.addWidget(ft8_group, 1)
         self.ft8_group_widget = ft8_group
+
+        # --- JS8: band activity / assembled messages / heard stations (USB at the tuned dial frequency,
+        # e.g. 7.078 / 14.078 / 144.178 MHz). Double-click copies the station's call to the clipboard.
+        js8_group = QtWidgets.QWidget()
+        js8_layout = QtWidgets.QVBoxLayout(js8_group)
+        js8_layout.setContentsMargins(0, 0, 0, 0)
+        js8_row = QtWidgets.QHBoxLayout()
+        js8_row.addWidget(QtWidgets.QLabel("Speed:"))
+        self.js8_speed_combo = QtWidgets.QComboBox()
+        for name, sms in (("Normal (15 s)", (js8_phy.NORMAL,)), ("Fast (10 s)", (js8_phy.FAST,)),
+                          ("Turbo (6 s)", (js8_phy.TURBO,)), ("Slow (30 s)", (js8_phy.SLOW,)),
+                          ("All four", (js8_phy.NORMAL, js8_phy.FAST, js8_phy.TURBO, js8_phy.SLOW))):
+            self.js8_speed_combo.addItem(name, sms)
+        self.js8_speed_combo.setToolTip("Which JS8 speed(s) to decode (each at its own period boundaries)")
+        self.js8_speed_combo.currentIndexChanged.connect(self._on_js8_speed_changed)
+        js8_row.addWidget(self.js8_speed_combo)
+        js8_row.addStretch(1)
+        self.js8_clear_button = QtWidgets.QPushButton("Clear")
+        self.js8_clear_button.clicked.connect(self._on_js8_clear_clicked)
+        js8_row.addWidget(self.js8_clear_button)
+        js8_layout.addLayout(js8_row)
+        self.js8_signal_label = QtWidgets.QLabel()
+        self.js8_signal_label.setWordWrap(True)
+        js8_layout.addWidget(self.js8_signal_label)
+        self.js8_tabs = QtWidgets.QTabWidget()
+
+        def js8_table(headers, tip):
+            t = QtWidgets.QTableWidget(0, len(headers))
+            t.setHorizontalHeaderLabels(headers)
+            t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            t.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+            t.verticalHeader().setVisible(False)
+            t.horizontalHeader().setStretchLastSection(True)
+            t.setMinimumHeight(160)
+            t.setStyleSheet("font-family: monospace;")
+            t.setToolTip(tip)
+            return t
+
+        self.js8_activity_table = js8_table(["Offset", "UTC", "dB", "Speed", "Last text"],
+                                            "Band activity: the latest frame per audio offset")
+        self.js8_messages_table = js8_table(["UTC", "dB", "Offset", "From", "To", "Message"],
+                                            "Assembled messages (… = a frame is missing)")
+        self.js8_stations_table = js8_table(["Call", "Grid", "dB", "Offset", "Heard (UTC)", "Last"],
+                                            "Stations heard; double-click copies the call")
+        self.js8_tabs.addTab(self.js8_messages_table, "Messages")
+        self.js8_tabs.addTab(self.js8_activity_table, "Band activity")
+        self.js8_tabs.addTab(self.js8_stations_table, "Stations")
+        for t in (self.js8_activity_table, self.js8_messages_table, self.js8_stations_table):
+            t.cellDoubleClicked.connect(lambda row, _col, t=t: self._on_js8_row_double_clicked(t, row))
+        js8_layout.addWidget(self.js8_tabs)
+        digimodes_tab_layout.addWidget(js8_group, 1)
+        self.js8_group_widget = js8_group
+        self._js8_row_calls = {}
         self._ft8_clock_ok = _ntp_synchronized()
         self._update_ft8_signal_label()
 
@@ -1216,6 +1275,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_group_widget.setVisible(selected == "meshcore")
         self.pocsag_group_widget.setVisible(selected == "pocsag")
         self.ft8_group_widget.setVisible(selected == "ft8")
+        self.js8_group_widget.setVisible(selected == "js8")
 
     def _update_device_connection_labels(self):
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
@@ -1505,6 +1565,8 @@ class MainWindow(QtWidgets.QMainWindow):
             on_pocsag_message=self._pocsag_state.on_message,
             on_ft8_decodes=self._ft8_state.on_decodes,
             ft8_my_call=self._ft8_tx_setting("my_call"), ft8_my_grid=self._ft8_tx_setting("locator"),
+            on_js8_decodes=self._js8_state.on_decodes, js8_submodes=self.js8_speed_combo.currentData(),
+            js8_backend=config.JS8_DECODER_BACKEND,
         )
 
     def _sync_waterfall(self):
@@ -1558,6 +1620,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # decoder is actually locked, not just where it started.
         self.waterfall.set_psk31_visible(self.tb.active_digimode == "psk31")
         self.waterfall.set_rtty_visible(self.tb.active_digimode == "rtty")
+        js8_sms = self.js8_speed_combo.currentData()
+        self.waterfall.set_cursor_band(
+            js8_phy.submode_info(min(js8_sms))["bandwidth_hz"] if self.tb.active_digimode == "js8" and len(js8_sms) == 1
+            else (50.0 if self.tb.active_digimode == "js8" else None))
         if self.tb.active_digimode == "psk31":
             psk31_freq = freq + self.tb.psk31_tone_center_hz
             psk31_half_bw = config.PSK31_DISPLAY_BANDWIDTH_HZ / 2
@@ -2040,6 +2106,94 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return ""
 
+    # --- JS8 -------------------------------------------------------------
+    def _on_js8_speed_changed(self, _idx):
+        self._sync_waterfall_if_connected()
+        if self.tb is not None and self.tb.active_digimode == "js8":
+            self._rebuild_for_digimode("js8", force=True)
+
+    def _sync_waterfall_if_connected(self):
+        if self.tb is not None:
+            self._sync_waterfall()
+
+    def _on_js8_clear_clicked(self):
+        self._js8_state.clear()
+        self._render_js8_tables()
+
+    def _update_js8_signal_label(self):
+        if self.tb is None:
+            self.js8_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "js8" or self.tb.js8_receiver is None:
+            self.js8_signal_label.setText("Not listening.")
+            return
+        recv = self.tb.js8_receiver
+        if recv.last_error:
+            self.js8_signal_label.setText(f"Decoder error: {recv.last_error}")
+            return
+        backend = {"js8": "JS8Call's decoder (js8ref)", "own": "built-in decoder"}.get(
+            recv.decoder.backend if recv.decoder else "", "starting")
+        last = self._js8_state.last_slot
+        seen = "" if last is None else (
+            f", last period {time.strftime('%H:%M:%S', time.gmtime(last[0]))} UTC: {last[2]} frame(s)")
+        where = f"{(self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6:.6f} MHz USB"
+        self.js8_signal_label.setText(f"Listening on {where} ({backend}){seen}. Messages are assembled from "
+                                      "consecutive frames; no automatic replies.")
+
+    def _render_js8_tables(self):
+        snap = self._js8_state.get_snapshot()
+        self._js8_rendered_version = snap["version"]
+        names = {sm: js8_phy.SUBMODE_NAMES[sm] for sm in js8_phy.SUBMODES}
+        self._js8_row_calls = {}
+
+        def fill(table, rows, key):
+            bar = table.verticalScrollBar()
+            at_bottom = bar.value() >= bar.maximum() - 4
+            table.setRowCount(len(rows))
+            calls = []
+            for r, (cells, call, freq) in enumerate(rows):
+                for c, text in enumerate(cells):
+                    item = QtWidgets.QTableWidgetItem(str(text))
+                    if c < len(cells) - 1 and isinstance(text, (int, float)):
+                        item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                    table.setItem(r, c, item)
+                calls.append((call, freq))
+            table.resizeColumnsToContents()
+            if at_bottom:
+                table.scrollToBottom()
+            self._js8_row_calls[key] = calls
+
+        latest = {}
+        for row in snap["rows"]:
+            latest[round(row["freq"] / 10) * 10] = row
+        activity = []
+        for off in sorted(latest):
+            row = latest[off]
+            call = row["text"].split(":")[0] if ":" in row["text"] else ""
+            activity.append(([f"{row['freq']:.0f}", row["utc"], f"{row['snr']:+.0f}", names[row["submode"]],
+                              row["text"].strip()], call, row["freq"]))
+        fill(self.js8_activity_table, activity, "activity")
+        msgs = [([m["utc"], f"{m['snr']:+.0f}", f"{m['freq']:.0f}", m["sender"], m["to"],
+                  m["text"] + ("" if m["closed"] else " ▸")], m["sender"], m["freq"]) for m in snap["messages"]]
+        fill(self.js8_messages_table, msgs, "messages")
+        stations = [([s["call"], s["grid"], f"{s['snr_db']:+.0f}", f"{s['freq_hz']:.0f}",
+                      time.strftime("%H:%M:%S", time.gmtime(s["last_heard"])), s["last_text"]], s["call"], s["freq_hz"])
+                    for s in snap["stations"]]
+        fill(self.js8_stations_table, stations, "stations")
+
+    def _on_js8_row_double_clicked(self, table, row):
+        key = {id(self.js8_activity_table): "activity", id(self.js8_messages_table): "messages",
+               id(self.js8_stations_table): "stations"}[id(table)]
+        calls = self._js8_row_calls.get(key, [])
+        if row >= len(calls):
+            return
+        call, freq = calls[row]
+        if not call or call.startswith("@") or call == "<....>":
+            return
+        QtWidgets.QApplication.clipboard().setText(call)
+        self.status_label.setText(f"Copied {call} to the clipboard (offset {freq:.0f} Hz) -- paste it into "
+                                  f"pluto-tx's JS8 \"To:\" field.")
+
     def _on_ft8_clear_clicked(self):
         self._ft8_state.clear()
         self._render_ft8_table()
@@ -2205,6 +2359,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_ft8_signal_label()
         if self._ft8_state.version != self._ft8_rendered_version:
             self._render_ft8_table()
+        self._update_js8_signal_label()
+        if self._js8_state.version != self._js8_rendered_version:
+            self._render_js8_tables()
         # Independent of self.tb's connection state (unlike the AFC step
         # below) -- each transcript lives on MainWindow and should keep
         # showing whatever was already received even across a rebuild,
