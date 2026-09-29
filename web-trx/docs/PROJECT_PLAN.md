@@ -431,6 +431,20 @@ Radio-Server gegen Pluto+ verifiziert):
     - Ohne Umbau je Slot 6/14/3/14/4/15, also gleichauf.
     - Nach einem einzelnen Moduswechsel fehlt nur der angebrochene Slot.
 
+- **FT8, Phase F2 (Sendeserie) und Code von F3 (29.09.2026):**
+  - `ft8_series.py`: Serie scharf → sendet → Pause, Planung mit pluto-tx'
+    `plan_transmission()`, Wiederholungen in der Parität der ersten, Abbruch
+    in jedem Zustand. Nach einem Abbruch wird nie mehr aufgetastet, auch
+    nicht, wenn der Abbruch während des Auftastens kommt.
+  - `GnuRadioBackend`: `set_ft8_text()`/`prepare_ft8()` beim Scharfschalten,
+    `ft8_start_at` + `key_ptt()` 3 s vor dem Signal, Abtasten nach
+    `ft8_hold_s`. Moduswechsel und (bei Pluto) RX-Bandbreite gesperrt,
+    solange eine Serie scharf ist.
+  - SimBackend mit derselben Serie und Loopback in die Decode-Tabelle.
+  - Geprüft gegen SimBackend mit echter Uhr: aufgetastet 3 s vor dem Signal,
+    Signal bei Slot +0,5 s, Wiederholung 30 s später in derselben Parität,
+    beide Aussendungen im TX-Log. Noch keine Aussendung über Hardware.
+
 - Unterer Bereich: Empfang (Dekoder), TX-Verlauf und Events als Tabs in
   einem Feld, Standard „Empfang“. Die Höhe zwischen Wasserfall und Tabs
   lässt sich über einen Trenner ziehen (pro Browser gespeichert,
@@ -445,4 +459,4 @@ Radio-Server gegen Pluto+ verifiziert):
   bleibt zusätzlich.
 
 Noch offen: Latenzmessung über echten VPN-Link, Opus über langsame Links;
-FT8 Phasen F2–F4 (Senden).
+FT8 Funktest F3.2/F3.3 und Funkbetrieb F4.

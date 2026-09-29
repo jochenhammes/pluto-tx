@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import station
+from . import ft8_series, station
 from .session import AudioFrame, SessionBackend, SessionError, SpectrumFrame
 
 FFT_SIZE = 2048
@@ -31,7 +31,7 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
-TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext")
+TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8")
 RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8")
 
 # FT8 receive: invented decodes per 15 s slot, delivered like pluto-tx's
@@ -42,6 +42,27 @@ FT8_SLOT_S = 15.0
 FT8_DECODE_AT_S = 14.8
 FT8_SIM_STATIONS = (("DL1ABC", "JO62"), ("G4XYZ", "IO91"), ("OK1RR", "JN79"), ("EA3AAA", "JN11"))
 ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext")  # auto-unkey, like GnuRadioBackend
+# FT8 transmit: slot timing as in pluto_tx/config.py; airtime of one frame
+# (79 symbols x 0.16 s) plus pluto-tx' tail.
+FT8_KEY_EARLY_S = 3.0
+FT8_START_IN_SLOT_S = 0.5
+FT8_LATE_START_MAX_S = 1.0
+FT8_FRAME_S = 12.64 + 0.1
+
+
+def sim_plan_transmission(now: float, parity: str = "any") -> tuple[float, float]:
+    """Test double of pluto_tx.ft8.plan_transmission() (tests/test_ft8_series.py
+    compares the two) -> (key_at, start_at)."""
+    slot_parity = ft8_series.slot_parity
+    cur = now // FT8_SLOT_S * FT8_SLOT_S
+    if (parity == "any" or slot_parity(cur) == parity) and now <= cur + FT8_START_IN_SLOT_S + FT8_LATE_START_MAX_S:
+        start = max(cur + FT8_START_IN_SLOT_S, now)
+        return max(now, start - FT8_KEY_EARLY_S), start
+    slot = cur + FT8_SLOT_S
+    while parity != "any" and slot_parity(slot) != parity:
+        slot += FT8_SLOT_S
+    start = slot + FT8_START_IN_SLOT_S
+    return max(now, start - FT8_KEY_EARLY_S), start
 DEVICE_TYPES = ("sim",)
 
 
@@ -68,6 +89,9 @@ class SimBackend(SessionBackend):
         self._pocsag_unkey_task: asyncio.Task | None = None
         self._ft8_task: asyncio.Task | None = None
         self._ft8_slots = 0
+        self._ft8_series: ft8_series.Ft8Series | None = None
+        # Loopback: our own transmissions show up in the ft8_slot of their slot.
+        self._ft8_sent: list[tuple[float, str]] = []
         self._audio_phase = 0.0
         self.tx_audio_frames_received = 0  # test/diagnostic hook, see submit_tx_audio()
 
@@ -98,8 +122,10 @@ class SimBackend(SessionBackend):
         st.connection = connection or "sim:0"
 
     async def disconnect(self, direction: str) -> None:
-        if direction == "tx" and self.keyed:
-            await self.ptt(False)
+        if direction == "tx":
+            await self._cancel_ft8("disconnect")
+            if self.keyed:
+                await self.ptt(False)
         st = self._state(direction)
         st.device_type = None
         st.connection = None
@@ -112,6 +138,8 @@ class SimBackend(SessionBackend):
         allowed = TX_MODES if direction == "tx" else RX_MODES
         if mode not in allowed:
             raise SessionError(f"unsupported {direction} mode '{mode}'")
+        if direction == "tx" and self._ft8_armed():
+            raise SessionError("tx: FT8 series is armed -- cancel it first")
         st.mode = mode
         st.mode_params = params
 
@@ -123,10 +151,21 @@ class SimBackend(SessionBackend):
     async def set_gain(self, direction: str, name: str, value: float) -> None:
         self._state(direction).gains[name] = value
 
-    async def ptt(self, on: bool) -> None:
+    def _ft8_armed(self) -> bool:
+        return self._ft8_series is not None and self._ft8_series.armed
+
+    async def _cancel_ft8(self, reason: str, device_safe: bool = False) -> None:
+        series, self._ft8_series = self._ft8_series, None
+        if series is not None:
+            await series.cancel(reason, device_safe=device_safe)
+
+    async def ptt(self, on: bool, reason: str = "ptt_off") -> None:
         if on:
             if self.tx.connection is None or self.tx.mode is None:
                 raise SessionError("tx: not connected or no mode selected")
+            if self.tx.mode == "ft8":
+                await self._arm_ft8()
+                return
             if self.keyed:
                 return
             self.keyed = True
@@ -149,6 +188,7 @@ class SimBackend(SessionBackend):
                 # in for computing real airtime here.
                 self._pocsag_unkey_task = asyncio.create_task(self._auto_unkey_after(1.5))
         else:
+            await self._cancel_ft8(reason)
             if self._pocsag_unkey_task is not None:
                 self._pocsag_unkey_task.cancel()
                 self._pocsag_unkey_task = None
@@ -156,6 +196,31 @@ class SimBackend(SessionBackend):
                 return
             self.keyed = False
             await self._emit_event("unkeyed", {"mode": self.tx.mode})
+
+    async def _arm_ft8(self) -> None:
+        if self._ft8_armed():
+            return
+        params = self.tx.mode_params
+        text = ft8_series.compose_text(self.station, params)
+        if not text:
+            raise SessionError("ft8: no message (station callsign or DX callsign missing)")
+
+        async def key(start_at: float) -> float:
+            self.keyed = True
+            await self._emit_event("keyed", {"mode": "ft8", "text": text})
+            await self._emit_event("tx_text", {"mode": "ft8", "text": text, "duration_s": FT8_FRAME_S})
+            self._ft8_sent.append((start_at // FT8_SLOT_S * FT8_SLOT_S, text))
+            return max(0.0, start_at - time.time()) + FT8_FRAME_S
+
+        async def unkey() -> None:
+            if self.keyed:
+                self.keyed = False
+                await self._emit_event("unkeyed", {"mode": "ft8"})
+
+        self._ft8_series = ft8_series.Ft8Series(
+            plan=sim_plan_transmission, key=key, unkey=unkey, emit=self._emit_event,
+            parity=params.get("slot", "any"), count=params.get("repeat_count", 1))
+        self._ft8_series.start()
 
     async def _auto_unkey_after(self, seconds: float) -> None:
         """Runs as self._pocsag_unkey_task. Must clear that reference
@@ -176,6 +241,7 @@ class SimBackend(SessionBackend):
         await self.ptt(False)
 
     async def estop(self) -> None:
+        await self._cancel_ft8("estop", device_safe=True)
         if self._pocsag_unkey_task is not None:
             self._pocsag_unkey_task.cancel()
             self._pocsag_unkey_task = None
@@ -193,11 +259,12 @@ class SimBackend(SessionBackend):
 
     def snapshot(self) -> dict:
         return {
-            "tx": _snapshot_direction(self.tx, self.keyed),
+            "tx": {**_snapshot_direction(self.tx, self.keyed), "ft8_armed": self._ft8_armed()},
             "rx": _snapshot_direction(self.rx, False),
         }
 
     async def shutdown(self) -> None:
+        await self._cancel_ft8("shutdown", device_safe=True)
         if self._spectrum_task is not None:
             self._spectrum_task.cancel()
         if self._audio_task is not None:
@@ -250,9 +317,13 @@ class SimBackend(SessionBackend):
         my_call = self.station.get("call") or ""
         if my_call:
             texts.append(f"{my_call} {cq_call} -07")
+        texts += [text for slot, text in self._ft8_sent if slot == slot_start]  # loopback, like RTTY
+        self._ft8_sent = [(slot, text) for slot, text in self._ft8_sent if slot > slot_start]
         decodes = []
         for i, text in enumerate(texts):
-            sender = text.split()[2] if text.startswith("CQ ") else text.split()[1]
+            words = text.split()
+            sender_at = 2 if words[0] == "CQ" else 1
+            sender = words[sender_at] if len(words) > sender_at else ""
             decodes.append({
                 "snr_db": int(self._rng.integers(-22, 10)), "dt_s": round(float(self._rng.normal(0.1, 0.2)), 1),
                 "freq_hz": 400 + 450 * i + int(self._rng.integers(0, 60)), "text": text, "sender": sender,

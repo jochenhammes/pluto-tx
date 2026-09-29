@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import modes, protocol, station
+from . import ft8_series, modes, protocol, station
 
 logger = logging.getLogger("web_trx.session")
 
@@ -121,8 +121,9 @@ class SessionBackend(abc.ABC):
         ...
 
     @abc.abstractmethod
-    async def ptt(self, on: bool) -> None:
-        ...
+    async def ptt(self, on: bool, reason: str = "ptt_off") -> None:
+        """FT8: on arms a transmit series (ft8_series.py), off cancels an armed
+        one -- `reason` goes into its ft8_cancelled event."""
 
     @abc.abstractmethod
     async def estop(self) -> None:
@@ -175,9 +176,10 @@ class SessionManager:
 
     async def _operator_gone(self, grace_s: float, stop_tx_now: bool) -> None:
         try:
-            if stop_tx_now and self.backend.snapshot()["tx"].get("keyed"):
+            tx = self.backend.snapshot()["tx"]
+            if stop_tx_now and (tx.get("keyed") or tx.get("ft8_armed")):
                 logger.warning("no browser connected -- ending the transmission")
-                await self.backend.ptt(False)
+                await self.backend.ptt(False, reason="no_operator")
             await asyncio.sleep(grace_s)
         except asyncio.CancelledError:
             return
@@ -276,9 +278,7 @@ class SessionManager:
             except ValueError as e:
                 raise SessionError(str(e)) from e
             await b.select_mode(params["direction"], params["mode"], mode_params)
-            await self._emit_event("mode", {
-                "direction": params["direction"], "mode": params["mode"], "params": mode_params,
-            })
+            await self._emit_mode(params["direction"], params["mode"], mode_params)
         elif request == "tune":
             await b.tune(params["direction"], float(params["freq_hz"]))
             await self._emit_event("tuned", {"direction": params["direction"], "freq_hz": params["freq_hz"]})
@@ -298,6 +298,20 @@ class SessionManager:
                 raise SessionError(str(e)) from e
             b.set_station(value)
             await self._emit_event("station", value)
+            tx = b.snapshot()["tx"]
+            if tx.get("mode") == "ft8":  # the message text depends on the station data
+                await self._emit_mode("tx", "ft8", tx.get("mode_params") or {})
+
+    async def _emit_mode(self, direction: str, mode: str, mode_params: dict) -> None:
+        fields = {"direction": direction, "mode": mode, "params": mode_params}
+        if direction == "tx" and mode == "ft8":
+            # Preview of what will actually be sent (pluto-tx' compose()).
+            try:
+                fields["text"] = ft8_series.compose_text(self.backend.station, mode_params)
+            except (RuntimeError, ImportError, ValueError):
+                logger.exception("composing the FT8 message failed")
+                fields["text"] = ""
+        await self._emit_event("mode", fields)
 
     async def _handle_binary(self, data: bytes) -> None:
         if not data or protocol.peek_frame_type(data) != protocol.BinaryFrameType.TX_AUDIO:
@@ -307,10 +321,10 @@ class SessionManager:
 
     async def _emit_event(self, name: str, fields: dict) -> None:
         if self.tx_log is not None:
-            self._record_tx_log(name)
+            self._record_tx_log(name, fields)
         await self._broadcast_json({"event": name, **fields})
 
-    def _record_tx_log(self, event_name: str) -> None:
+    def _record_tx_log(self, event_name: str, fields: dict) -> None:
         """keyed -> open a record (using the backend's own tx snapshot for
         mode/freq/device/params, not the event's fields -- keeps this
         working for ANY SessionBackend, not just fields SimBackend happens
@@ -319,10 +333,13 @@ class SessionManager:
         harmless no-op, see TxLog.record_unkeyed()."""
         if event_name == "keyed":
             tx = self.backend.snapshot()["tx"]
+            params = dict(tx.get("mode_params") or {})
+            if "text" in fields:  # FT8: the message actually sent, built from station data + params
+                params["text"] = fields["text"]
             self.tx_log.record_keyed(
                 mode=tx.get("mode"), freq_hz=tx.get("freq_hz"),
                 device_type=tx.get("device_type"), connection=tx.get("connection"),
-                params=tx.get("mode_params") or {},
+                params=params,
             )
         elif event_name in ("unkeyed", "estop"):
             self.tx_log.record_unkeyed()

@@ -353,6 +353,18 @@ die Stationsdaten stehen in `web-trx.env`.
 
 ### F2 — Sendeserie ohne Hardware
 
+> **Erledigt am 29.09.2026**, zusammen mit Schritt F3.1 (Code). Abweichungen
+> vom Plan:
+> - Statt die Zahl der Clients zu melden, gibt `snapshot()["tx"]` jetzt
+>   `ft8_armed` aus, und der „Kein Bediener“-Watchdog ruft
+>   `ptt(False, reason="no_operator")` auch für eine scharfe Serie. Das ist
+>   strenger als 30 s: Abbruch sofort, wenn der letzte Browser geht.
+> - Zusätzliches Event `ft8_done` nach der letzten Aussendung einer Serie.
+> - `ft8_armed` trägt zusätzlich `parity`, `keyed` bei FT8 den gesendeten
+>   `text` (landet so im TX-Log).
+> - Während eine Serie scharf ist, lehnt das Backend `select_mode` für TX
+>   ab. Parameter lassen sich also erst nach Abbruch oder Ende ändern.
+
 1. `web_trx/ft8_series.py` mit Tests (simulierte Uhr), siehe 6.
 2. `modes.py`: TX-Schema `ft8`.
 3. SimBackend-TX über die Serienlogik.
@@ -373,6 +385,20 @@ die Stationsdaten stehen in `web-trx.env`.
 Leistung, Aufbau.
 
 ### F3 — Senden auf Kurzstrecke
+
+> **Schritt 1 erledigt am 29.09.2026** (Code). **Erster Funktest am
+> 29.09.2026 durch den Betreiber:**
+> - HackRF One auf 14,074 MHz (Senden bei 14,1 MHz freigegeben), Empfang mit
+>   RTL-SDR über Direct Sampling (Q-Zweig).
+> - Laut Betreiber funktioniert es.
+> - TX-Log: drei Aussendungen „CQ DA2JH JO43“ (19:16:59, 19:17:27,
+>   19:18:01), aufgetastet 18,4 / 18,4 / 15,8 s. Erwartet sind ~15,8 s
+>   (3 s Vorlauf + 12,7 s Signal); woher die längeren ersten beiden kommen,
+>   ist noch nicht untersucht.
+> - Offen aus Schritt 2 und 3: Zählung der Decodes (3 von 3), DT und
+>   Tonabstand mit `jt9`/WSJT-X, und die Abbruchwege (scharf, während der
+>   Aussendung, NOTAUS, Browser schließen) am echten Gerät. Außerdem der Test
+>   mit dem Pluto (Driftkompensation).
 
 1. `GnuRadioBackend`-TX wie in 4.3.
 2. Test Pluto → RTL-SDR auf kurze Distanz, Pluto-Dämpfung −40 dB oder

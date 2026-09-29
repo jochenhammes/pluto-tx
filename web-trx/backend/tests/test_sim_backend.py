@@ -164,3 +164,14 @@ async def test_submit_tx_audio_is_counted():
     assert b.tx_audio_frames_received == 0
     await b.submit_tx_audio(AudioFrame(pcm16=b"\x00\x01\x02\x03", sample_rate_hz=48_000))
     assert b.tx_audio_frames_received == 1
+
+
+async def test_ft8_loopback_shows_our_transmission_in_its_own_slot():
+    b, _events, _spectrum, _audio = make_backend()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    b._ft8_sent = [(1790600115.0, "CQ DA2JH JO43")]
+    before = [d["text"] for d in b.fake_ft8_slot(1790600100.0)["decodes"]]
+    during = [d["text"] for d in b.fake_ft8_slot(1790600115.0)["decodes"]]
+    assert "CQ DA2JH JO43" not in before
+    assert "CQ DA2JH JO43" in during
+    assert b._ft8_sent == []

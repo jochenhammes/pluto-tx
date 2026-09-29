@@ -3,7 +3,7 @@
   import Waterfall from "./lib/Waterfall.svelte";
   import FreqInput from "./lib/FreqInput.svelte";
   import RxDecoder, {
-    type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status,
+    type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status, type Ft8Decode,
   } from "./lib/RxDecoder.svelte";
   import Login from "./lib/Login.svelte";
   import { WebTrxClient, type ServerEvent, type SpectrumRow, type AudioChunk } from "./lib/ws";
@@ -25,7 +25,8 @@
   $: txModes = (features.tx_modes ?? DEFAULT_MODES).map((m) => [m, MODE_LABELS[m] ?? m] as [string, string]);
   // One-shot text modes: a single "send" click, the server renders the
   // whole transmission and unkeys on its own. Everything else takes the mic.
-  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext"];
+  // FT8: the click arms a series of slot-timed transmissions instead.
+  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8"];
   const isAudioMode = (mode: string) => !ONE_SHOT_MODES.includes(mode);
 
   let waterfall: Waterfall;
@@ -211,6 +212,26 @@
   let rttyTxText = "CQ CQ DE DA2JH";
   let digitext = { text: "DA2JH", layout: "horizontal", zoom: 1, min_freq_hz: 4000 };
   let radeEoo = false;
+  // FT8 transmit (backend web_trx/modes.py, ft8_series.py): manual QSO -- the
+  // operator picks the message per series; the server builds the text from
+  // the station data (preview in ft8TxText) and times it to the UTC slots.
+  interface Ft8TxOptions {
+    message_kinds: string[]; free_text_max: number; report_range_db: [number, number];
+    tone_range_hz: [number, number]; tone_default_hz: number; slots: string[]; max_repeats: number;
+  }
+  const FT8_KIND_LABELS: Record<string, string> = {
+    cq: "CQ", reply: "Antwort (Call + Locator)", report: "Rapport", r_report: "R + Rapport",
+    rrr: "RRR", rr73: "RR73", "73": "73", free: "Freitext",
+  };
+  const FT8_SLOT_LABELS: Record<string, string> = { any: "nächster", even: "1. (:00/:30)", odd: "2. (:15/:45)" };
+  let ft8Options: Ft8TxOptions | null = null;
+  let ft8Tx = {
+    kind: "cq", dx_call: "", report_db: -10, free_text: "", offset_hz: 1500, slot: "any",
+    drift_comp: true, repeat_count: 1,
+  };
+  let ft8TxText = "";
+  let ft8Armed: { start_at: number; slot_utc: string; parity: string; repetition: number; of: number } | null = null;
+  $: ft8CountdownS = ft8Armed ? Math.max(0, Math.ceil(ft8Armed.start_at - nowS)) : 0;
   // What the receiver decoded (RxDecoder panel)
   let rttyRxText = "";
   let pocsagCalls: PocsagCall[] = [];
@@ -335,7 +356,7 @@
   };
   type DirSnapshot = { device_type: string | null; connection: string | null; mode: string | null;
     freq_hz: number; mode_params: Record<string, unknown>; power?: TxPower | null; settings?: TxSettings;
-    gains?: Record<string, number> };
+    gains?: Record<string, number>; ft8_armed?: boolean };
 
   // Take over the server's actual state -- another tab or a script may have
   // changed it, and the server (not this page) is what actually transmits.
@@ -386,6 +407,9 @@
     }
     if (tx.mode === "digitext") digitext = { ...digitext, ...(p as typeof digitext) };
     if (tx.mode === "rade" && typeof p.eoo === "boolean") radeEoo = p.eoo;
+    if (tx.mode === "ft8") ft8Tx = { ...ft8Tx, ...(p as Partial<typeof ft8Tx>) };
+    // An armed series survives a page reload; its details come with the next ft8_armed.
+    ft8Armed = tx.ft8_armed ? (ft8Armed ?? { start_at: 0, slot_utc: "…", parity: "", repetition: 0, of: 0 }) : null;
     txPower = tx.power ?? null;
     txSettings = tx.settings ?? null;
     txNeedsRearm = txConnected && !tx.mode;
@@ -404,9 +428,13 @@
         fmPreemphasis = fmOptions.preemphasis_default;
         rxDeemphasis = fmOptions.deemphasis_default;
       }
-      const opts = e.mode_options as { rtty?: RttyOptions; digitext?: DigitextOptions };
+      const opts = e.mode_options as { rtty?: RttyOptions; digitext?: DigitextOptions; ft8?: Ft8TxOptions };
       rttyOptions = opts.rtty ?? null;
       digitextOptions = opts.digitext ?? null;
+      if (ft8Options === null && opts.ft8?.message_kinds) {
+        ft8Options = opts.ft8;
+        ft8Tx.offset_hz = ft8Options.tone_default_hz;
+      }
       const types = e.device_types as { rx: [string, string][]; tx: [string, string][] };
       rxDeviceTypes = types.rx;
       txDeviceTypes = types.tx;
@@ -432,6 +460,14 @@
     if (e.event === "mode") {
       if (e.direction === "rx") rxMode = String(e.mode);
       if (e.direction === "tx") txMode = String(e.mode);
+      if (e.direction === "tx" && e.mode === "ft8") ft8TxText = String(e.text ?? "");
+    }
+    if (e.event === "ft8_armed") ft8Armed = e as unknown as typeof ft8Armed;
+    if (e.event === "ft8_done") ft8Armed = null;
+    if (e.event === "ft8_cancelled") {
+      ft8Armed = null;
+      if (e.reason === "error") txError = `FT8: ${String(e.message ?? "")}`;
+      else if (e.reason !== "ptt_off") pushNotice(`FT8-Serie abgebrochen (${String(e.reason)})`, "info");
     }
     if (e.event === "tx_settings") txSettings = e.settings as TxSettings;
     if (e.event === "station") applyStation(e as { call?: string; locator?: string });
@@ -463,7 +499,10 @@
     if (e.event === "mode" && e.direction === "rx") radeStatus = null;
     if (e.event === "disconnected") {
       if (e.direction === "rx") rxConnected = false;
-      if (e.direction === "tx") txConnected = false;
+      if (e.direction === "tx") {
+        txConnected = false;
+        ft8Armed = null;
+      }
     }
     if (e.event === "scanned") {
       const devices = Object.entries(e.devices as Record<string, string>);
@@ -501,6 +540,7 @@
     }
     if (e.event === "estop") {
       keyed = false;
+      ft8Armed = null;
       txNeedsRearm = true; // the backend drops the TX flowgraph on E-STOP
       void refreshTxLog();
     }
@@ -596,6 +636,8 @@
     if (txMode === "rtty") return { ...txRtty, text: rttyTxText };
     if (txMode === "digitext") return { ...digitext };
     if (txMode === "rade") return { eoo: radeEoo };
+    if (txMode === "ft8") return { ...ft8Tx, report_db: Math.round(Number(ft8Tx.report_db)),
+                                   offset_hz: Number(ft8Tx.offset_hz), repeat_count: Math.round(Number(ft8Tx.repeat_count)) };
     return {};
   }
   function selectTxMode(): void {
@@ -699,6 +741,24 @@
   function pocsagPtt(): void {
     commitPendingTxParams();
     client.request("ptt_on"); // one-shot; SimBackend/real POCSAG both auto-unkey, see docs/PROJECT_PLAN.md section 4
+  }
+  // FT8: first click arms the series (the server waits for the slot), a
+  // second click cancels it -- in any state, also while transmitting.
+  function ft8Ptt(): void {
+    if (ft8Armed) {
+      client.request("ptt_off");
+      return;
+    }
+    commitPendingTxParams();
+    client.request("ptt_on");
+  }
+  // Click on a received decode: its sender becomes the DX callsign, and the
+  // reply goes into the other slot parity. The message kind stays the operator's.
+  function pickFt8Decode(d: Ft8Decode, slot: Ft8Slot): void {
+    if (!d.sender || ft8Armed) return;
+    ft8Tx.dx_call = d.sender;
+    ft8Tx.slot = Math.floor(slot.slot_start / 15) % 2 === 0 ? "odd" : "even";
+    if (txMode === "ft8" && txConnected) selectTxMode();
   }
 
   function fmtFreq(hz: number | null): string {
@@ -911,6 +971,9 @@
           color: "rgba(137, 147, 168, 0.12)", edgeColor: "rgba(170, 180, 200, 0.7)", label: "" }] : []),
         { hz: rxFreqHz, color: "#8993a8", label: "RX" },
         ...(txConnected ? [{ hz: txFreqHz, color: keyed ? "#ff4d4d" : "#f5c211", label: "TX" }] : []),
+        // FT8: where our own signal sits (dial + offset, 8 tones = 50 Hz)
+        ...(txConnected && txMode === "ft8" ? [{ hz: txFreqHz + Number(ft8Tx.offset_hz), widthHz: 50,
+          color: keyed ? "rgba(255, 77, 77, 0.45)" : "rgba(245, 194, 17, 0.3)", label: "FT8 TX" }] : []),
       ]}
       onClickFreq={onWaterfallClick}
       onAutoLevel={(f, c) => { floorDb = f; ceilingDb = c; }} />
@@ -983,7 +1046,7 @@
     </div>
 
     <div class="row">
-      <select id="txModeSel" bind:value={txMode} on:change={selectTxMode} disabled={!txConnected || keyed}>
+      <select id="txModeSel" bind:value={txMode} on:change={selectTxMode} disabled={!txConnected || keyed || !!ft8Armed}>
         {#each txModes as [v, l]}<option value={v}>{l}</option>{/each}
       </select>
       {#if txMode === "fm"}
@@ -1086,6 +1149,62 @@
         </div>
       </div>
       <div class="dim">Erscheint im Wasserfall oberhalb der Sendefrequenz (USB + Abstand) — zum Mitlesen reinzoomen.</div>
+    {:else if txMode === "ft8" && ft8Options}
+      <fieldset class="ft8-tx" disabled={!!ft8Armed}>
+        <div class="row">
+          <div class="field">
+            <label for="ft8Kind">Nachricht</label>
+            <select id="ft8Kind" bind:value={ft8Tx.kind} on:change={selectTxMode}>
+              {#each ft8Options.message_kinds as k}<option value={k}>{FT8_KIND_LABELS[k] ?? k}</option>{/each}
+            </select>
+          </div>
+          {#if ft8Tx.kind === "free"}
+            <div class="field grow">
+              <label for="ft8Free">Freitext ({ft8Tx.free_text.length}/{ft8Options.free_text_max})</label>
+              <input id="ft8Free" type="text" maxlength={ft8Options.free_text_max} bind:value={ft8Tx.free_text}
+                on:change={selectTxMode} />
+            </div>
+          {:else if ft8Tx.kind !== "cq"}
+            <div class="field">
+              <label for="ft8Dx">DX-Rufzeichen</label>
+              <input id="ft8Dx" type="text" class="callsign" bind:value={ft8Tx.dx_call} on:change={selectTxMode}
+                placeholder="Klick auf Decode" />
+            </div>
+            {#if ft8Tx.kind === "report" || ft8Tx.kind === "r_report"}
+              <div class="field narrow">
+                <label for="ft8Report">Rapport dB</label>
+                <input id="ft8Report" type="number" min={ft8Options.report_range_db[0]} max={ft8Options.report_range_db[1]}
+                  step="1" bind:value={ft8Tx.report_db} on:change={selectTxMode} />
+              </div>
+            {/if}
+          {/if}
+        </div>
+        <div class="row">
+          <div class="field narrow">
+            <label for="ft8Offset">Offset Hz</label>
+            <input id="ft8Offset" type="number" min={ft8Options.tone_range_hz[0]} max={ft8Options.tone_range_hz[1]}
+              step="10" bind:value={ft8Tx.offset_hz} on:change={selectTxMode} />
+          </div>
+          <div class="field">
+            <label for="ft8Slot">Slot</label>
+            <select id="ft8Slot" bind:value={ft8Tx.slot} on:change={selectTxMode}>
+              {#each ft8Options.slots as s}<option value={s}>{FT8_SLOT_LABELS[s] ?? s}</option>{/each}
+            </select>
+          </div>
+          <div class="field narrow">
+            <label for="ft8Repeat">Aussendungen</label>
+            <input id="ft8Repeat" type="number" min="1" max={ft8Options.max_repeats} step="1"
+              bind:value={ft8Tx.repeat_count} on:change={selectTxMode} />
+          </div>
+          <label class="check" title="Gleicht die gemessene Oszillatordrift des Pluto während der Aussendung aus">
+            <input type="checkbox" bind:checked={ft8Tx.drift_comp} on:change={selectTxMode} /> Driftkompensation
+          </label>
+        </div>
+      </fieldset>
+      <div class="ft8-preview" class:empty={!ft8TxText}>
+        {ft8TxText || (stationCall ? "— DX-Rufzeichen fehlt —" : "— eigenes Rufzeichen fehlt (Station) —")}
+      </div>
+      {#if !clockSynced}<div class="mic-error">Server-Uhr nicht per NTP synchronisiert — FT8-Zeitlage unsicher.</div>{/if}
     {/if}
 
     {#if txPower}
@@ -1180,6 +1299,18 @@
         >
           {keyed ? "\u{1F534} SENDET — halten" : pttHeld ? "tastet auf…" : "PTT (halten / Leertaste)"}
         </button>
+      {:else if txMode === "ft8"}
+        <button class="ptt" class:active={keyed} class:armed={!!ft8Armed && !keyed}
+          disabled={!txConnected || txNeedsRearm || !wsConnected || (!ft8Armed && !ft8TxText)} on:click={ft8Ptt}>
+          {#if keyed}
+            {"\u{1F534}"} SENDET {ft8Armed?.of ? `(${ft8Armed.repetition}/${ft8Armed.of})` : ""} — Abbrechen
+          {:else if ft8Armed}
+            Scharf · Slot {ft8Armed.slot_utc} in {ft8CountdownS} s
+            {ft8Armed.of > 1 ? `(${ft8Armed.repetition}/${ft8Armed.of})` : ""} — Abbrechen
+          {:else}
+            Scharf schalten
+          {/if}
+        </button>
       {:else}
         <button class="ptt" class:active={keyed} disabled={!txConnected || keyed || txNeedsRearm || !wsConnected} on:click={pocsagPtt}>
           {keyed ? "\u{1F534} SENDET" : "Aussenden"}
@@ -1222,6 +1353,7 @@
   <div class="tab-body" class:hidden={bottomTab !== "rx"}>
     <RxDecoder mode={rxMode} connected={rxConnected} rttyText={rttyRxText} {pocsagCalls} {m17Caller} {radeStatus}
       {ft8Slots} {ft8Status} myCall={stationCall}
+      onPickDecode={features.ft8?.tx ? pickFt8Decode : null}
       onClearRtty={() => (rttyRxText = "")} />
   </div>
 
@@ -1512,6 +1644,37 @@
     border-color: var(--danger);
     color: #fff;
     box-shadow: 0 0 14px rgba(255, 77, 77, 0.6);
+  }
+  /* FT8 series armed: waiting for its slot */
+  button.ptt.armed {
+    background: #5c3d0f;
+    border-color: #f5c211;
+    color: #f5c211;
+  }
+  fieldset.ft8-tx {
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: inherit;
+  }
+  .ft8-tx input.callsign {
+    text-transform: uppercase;
+    width: 9em;
+  }
+  .ft8-preview {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    padding: 4px 8px;
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .ft8-preview.empty {
+    color: var(--text-dim);
+    font-size: 0.8rem;
   }
 
   .tx-panel.keyed {

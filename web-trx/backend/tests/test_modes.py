@@ -156,3 +156,33 @@ def test_ft8_rx_tables_match_pluto_tx():
     cli = PLUTO_CLI_RX.read_text()
     choices = re.search(r'"--ft8-decoder", choices=(\(.*?\))', cli).group(1)
     assert ast.literal_eval(choices) == modes.FT8_DECODERS
+
+
+def test_ft8_tx_defaults_and_validation():
+    assert modes.normalize_params("tx", "ft8", {}) == {
+        "kind": "cq", "dx_call": "", "report_db": -10, "free_text": "", "offset_hz": 1500.0,
+        "slot": "any", "drift_comp": True, "repeat_count": 1,
+    }
+    out = modes.normalize_params("tx", "ft8", {"kind": "free", "free_text": "tnx 73", "dx_call": " dl1abc "})
+    assert out["free_text"] == "TNX 73" and out["dx_call"] == "DL1ABC"
+    for bad in ({"kind": "qrz"}, {"dx_call": "not a call"}, {"report_db": 31}, {"report_db": -9.5},
+                {"free_text": "x" * 14}, {"offset_hz": 100}, {"slot": "first"}, {"repeat_count": 21},
+                {"repeat_count": 0}, {"drift_comp": "yes"}, {"decoder": "jt9"}):
+        with pytest.raises(ValueError):
+            modes.normalize_params("tx", "ft8", bad)
+
+
+@pytest.mark.skipif(not PLUTO_TX_CONFIG.exists(), reason="not inside a pluto-tx checkout")
+def test_ft8_tx_tables_match_pluto_tx():
+    """pluto_tx/ft8.py has relative imports: imported as a package (repo root
+    on sys.path); it needs only numpy/ctypes, no GNU Radio or ft8_lib."""
+    from web_trx import ft8_series, pluto_path
+
+    pluto_path.ensure_importable()
+    from pluto_tx import config, ft8
+
+    assert modes.FT8_MESSAGE_KINDS == tuple(kind for kind, _label in ft8.MESSAGE_KINDS)
+    assert modes.FT8_FREE_TEXT_MAX == ft8.FREE_TEXT_MAX
+    assert modes.FT8_TONE_RANGE_HZ == tuple(config.FT8_TONE_RANGE_HZ)
+    assert modes.FT8_TONE_DEFAULT_HZ == config.FT8_DEFAULT_TONE_HZ
+    assert modes.FT8_MAX_REPEATS == ft8_series.FT8_MAX_REPEATS
