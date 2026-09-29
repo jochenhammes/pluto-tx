@@ -13,6 +13,8 @@ from pluto_tx.flowgraph import (
     FT8_AVAILABLE,
 )
 from pluto_tx import ft8 as tx_ft8
+from pluto_tx import js8 as tx_js8
+from pluto_tx import js8_message as tx_js8_message
 from pluto_tx import config as tx_config
 from pluto_tx import dcs as tx_dcs
 from pluto_tx import pocsag_codec as tx_pocsag
@@ -20,7 +22,7 @@ from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "ft8", "meshtastic", "meshcore", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "ft8", "js8", "meshtastic", "meshcore", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -455,6 +457,71 @@ def run_ft8(args):
                 ft8_text=text, ft8_tone_hz=args.offset_hz)
 
 
+def add_js8_subparser(subparsers):
+    p = subparsers.add_parser(
+        "js8", help="JS8 (JS8Call) message: its frames go out in consecutive periods of the chosen speed "
+                    "(USB, no automatic replies)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--kind", choices=[k for k, _ in tx_js8_message.MESSAGE_KINDS], default="cq",
+                   help="What to send (default: cq): cq, hb (heartbeat), allcall (@ALLCALL + --text), directed "
+                        "(--to + --text), snr_query / snr_reply / ack (to --to), free (--text, prefixed with "
+                        "your call)")
+    p.add_argument("--to", default="", help="The other station's callsign (directed, snr_query, snr_reply, ack)")
+    p.add_argument("--text", default="", help="Message text (allcall, directed, free)")
+    p.add_argument("--snr", type=int, default=-10, help="Report in dB for snr_reply (default: -10)")
+    p.add_argument("--submode", choices=sorted(tx_js8.SPEEDS, key=tx_js8.SPEEDS.get), default="normal",
+                   help="Speed: normal 15 s, fast 10 s, turbo 6 s, slow 30 s periods (default: normal)")
+    p.add_argument("--offset-hz", type=float, default=tx_config.JS8_DEFAULT_TONE_HZ,
+                   help=f"Audio offset of the lowest tone above the dial frequency "
+                        f"(default: {tx_config.JS8_DEFAULT_TONE_HZ:.0f})")
+    p.add_argument("--mycall", default="", help="Your callsign (required; it is in every JS8 message)")
+    p.add_argument("--mygrid", default="", help="Your locator (first 4 characters are sent with cq/hb)")
+    p.add_argument("--no-drift-comp", action="store_true",
+                   help="Don't pre-compensate the device's oscillator drift during a frame (on by default "
+                        "for devices with a measured drift model, currently pluto)")
+    p.set_defaults(func=run_js8)
+
+
+def run_js8(args):
+    emitter = runtime.Emitter(args.json)
+    submode = tx_js8.submode_from_name(args.submode)
+    if args.interactive:
+        emitter.error("--interactive is not available for js8 (the frames follow a slot plan)")
+        return 1
+    if not args.mycall.strip():
+        emitter.error("--mycall is required")
+        return 1
+    text = tx_js8_message.compose(args.kind, args.mycall, args.mygrid, args.to, args.text, args.snr)
+    if not text:
+        emitter.error("no message: give --to (and --text for directed/allcall/free)")
+        return 1
+    try:
+        frames = tx_js8_message.build_frames(args.mycall, args.mygrid, text, submode)
+    except ValueError as e:
+        emitter.error(str(e))
+        return 1
+    if len(frames) > tx_js8.MAX_FRAMES:
+        emitter.error(f"message too long: {len(frames)} frames (max {tx_js8.MAX_FRAMES})")
+        return 1
+
+    def preflight(tb):
+        tb.ft8_drift_comp_enabled = not args.no_drift_comp
+        problem = tb.js8_problem()
+        if problem:  # before any RF action
+            emitter.error(problem)
+            tb.shutdown_safe()
+            sys.exit(1)
+        tb.prepare_js8()
+        emitter.emit("js8_message", text=tx_js8_message.frames_text(frames, submode), frames=len(frames),
+                     speed=args.submode, offset_hz=args.offset_hz,
+                     duration_s=round(tx_js8.transmission_time_s(len(frames), submode), 2))
+
+    return _run(args, PlutoTxFlowgraph.MODE_JS8, emitter, post_construct=preflight,
+                js8_frames=frames, js8_submode=submode, js8_tone_hz=args.offset_hz)
+
+
 def add_meshtastic_subparser(subparsers):
     p = subparsers.add_parser(
         "meshtastic",
@@ -648,6 +715,7 @@ def add_subparsers(tx_subparsers):
     add_rtty_subparser(tx_subparsers)
     add_pocsag_subparser(tx_subparsers)
     add_ft8_subparser(tx_subparsers)
+    add_js8_subparser(tx_subparsers)
     add_meshtastic_subparser(tx_subparsers)
     add_meshcore_subparser(tx_subparsers)
     add_filebroadcast_subparser(tx_subparsers)

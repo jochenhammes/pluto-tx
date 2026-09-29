@@ -205,6 +205,8 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                     _tail_wait_tx(tb, mode)
         elif mode == PlutoTxFlowgraph.MODE_FT8:
             _run_ft8_series(tb, args, emitter)
+        elif mode == PlutoTxFlowgraph.MODE_JS8:
+            _run_js8_series(tb, args, emitter)
         else:
             count = getattr(args, "repeat_count", 1) or 1
             interval = getattr(args, "repeat_interval", 0.0)
@@ -268,6 +270,43 @@ def _run_ft8_series(tb, args, emitter: Emitter):
         time.sleep(tb.ft8_hold_s)
         tb.unkey_ptt()
         emitter.emit("unkeyed", mode=PlutoTxFlowgraph.MODE_FT8)
+
+
+def _run_js8_series(tb, args, emitter: Emitter):
+    """JS8: the message's frames in consecutive periods of its speed (pluto_tx.js8.plan_frames(): the first
+    frame keyed JS8_KEY_EARLY_S ahead -- one source swap --, every later one JS8_REKEY_EARLY_S ahead), each
+    frame keyed and unkeyed on its own. Ctrl-C / SIGTERM runs shutdown_safe(), which aborts the rest."""
+    from pluto_tx.flowgraph import PlutoTxFlowgraph
+    from pluto_tx import config as tx_config
+    from pluto_tx import js8 as tx_js8
+
+    n = len(tb.js8_frames)
+    plan = tx_js8.plan_frames(time.time(), tb.js8_submode, n, key_early_s=tx_config.JS8_KEY_EARLY_S,
+                              late_max_s=tx_config.JS8_LATE_START_MAX_S,
+                              rekey_early_s=tx_config.JS8_REKEY_EARLY_S)
+    start = plan[0][1]
+    period = tx_js8.speed_info(tb.js8_submode)["period_s"]
+    emitter.emit("js8_waiting", slot_utc=time.strftime("%H:%M:%S", time.gmtime(start // period * period)),
+                 seconds=round(max(0.0, start - time.time()), 1), frames=n)
+    tb.js8_start_at = start
+    sent = 0
+    try:
+        for i, (key_at, _) in enumerate(plan):
+            while time.time() < key_at:
+                time.sleep(min(0.05, max(0.0, key_at - time.time())))
+            tb.key_ptt()
+            emitter.emit("keyed", mode=PlutoTxFlowgraph.MODE_JS8, frame=i + 1, of=n)
+            time.sleep(tb.js8_hold_s)
+            tb.unkey_ptt()
+            emitter.emit("unkeyed", mode=PlutoTxFlowgraph.MODE_JS8, frame=i + 1, of=n)
+            frame, flags = tb.js8_frames[i]
+            emitter.emit("js8_frame_sent", frame_no=i + 1, of=n, frame=frame, flags=flags)
+            sent += 1
+    except BaseException:
+        tb.js8_cancel()
+        emitter.emit("js8_cancelled", sent=sent, of=n)
+        raise
+    emitter.emit("js8_done", frames=n)
 
 
 def _tail_wait_tx(tb, mode):
