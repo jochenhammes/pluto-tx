@@ -488,3 +488,16 @@ FT8_DECODE_AT_S = 14.8
 FT8_RX_LATENCY_S = 0.0
 # "auto" = WSJT-X's jt9 if installed (finds ~1.5x more), else ft8_lib; or force "jt9" / "ft8lib".
 FT8_DECODER_BACKEND = "auto"
+
+# --- JS8 (pluto_advanced_rx/js8_rx.py, js8_decoder.py, js8_assembly.py; docs/js8/SPEC.md) ----------------
+# Same USB audio path and band as FT8; JS8Call's heartbeat sub-band is 500-1000 Hz, traffic anywhere.
+JS8_BAND_HZ = FT8_BAND_HZ
+JS8_BAND_TRANS_HZ = FT8_BAND_TRANS_HZ
+# A period [t, t + period) is decoded at t + period + this (all of it is in the ring buffer by then).
+JS8_DECODE_LAG_S = 0.3
+JS8_RX_LATENCY_S = FT8_RX_LATENCY_S
+# "auto" = tools/js8ref (JS8Call's own decoder, install-js8.sh) if built, else the numpy decoder; or
+# force "js8" / "own".
+JS8_DECODER_BACKEND = "auto"
+# Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)
+JS8_DEFAULT_SUBMODES = (0,)

@@ -109,7 +109,9 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_meshtastic_frame=None, meshtastic_preset_index=0,
                  frequency_correction_ppm=0.0, direct_sampling=0, on_pocsag_message=None,
                  on_meshcore_packet=None, meshcore_preset_index=0, on_ft8_decodes=None,
-                 ft8_backend=config.FT8_DECODER_BACKEND, ft8_my_call="", ft8_my_grid=""):
+                 ft8_backend=config.FT8_DECODER_BACKEND, ft8_my_call="", ft8_my_grid="",
+                 on_js8_decodes=None, js8_submodes=config.JS8_DEFAULT_SUBMODES,
+                 js8_backend=config.JS8_DECODER_BACKEND):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -824,7 +826,30 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.connect(self.ft8_band_filter, self.ft8_to_real)
             self.connect(self.ft8_to_real, self.ft8_receiver)
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8"):
+        # --- JS8 RX: the same USB -> 12 kHz -> band-pass -> real audio path as FT8, into Js8Receiver, which
+        # decodes every period of each selected speed (js8_rx.py; decoders in js8_decoder.py).
+        self.js8_receiver = None
+        if active_digimode == "js8":
+            from .js8_rx import Js8Receiver
+            from .js8_decoder import SAMPLE_RATE as JS8_RATE
+            if_rate_i = int(round(self.if_rate))
+            g_js8 = math.gcd(JS8_RATE, if_rate_i)
+            js8_interp, js8_decim = JS8_RATE // g_js8, if_rate_i // g_js8
+            self.js8_resampler = filter.rational_resampler_ccf(
+                interpolation=js8_interp, decimation=js8_decim,
+                taps=firdes.low_pass(js8_interp, if_rate_i * js8_interp, 4000, 2000, window.WIN_HAMMING))
+            lo, hi = config.JS8_BAND_HZ
+            self.js8_band_filter = filter.fir_filter_ccc(1, firdes.complex_band_pass(
+                1.0, JS8_RATE, lo, hi, config.JS8_BAND_TRANS_HZ, window.WIN_HAMMING))
+            self.js8_to_real = blocks.complex_to_real()
+            self.js8_receiver = Js8Receiver(on_js8_decodes or (lambda slot, submode, decodes: None),
+                                            submodes=js8_submodes, backend=js8_backend)
+            self.connect(self.if_filter, self.js8_resampler)
+            self.connect(self.js8_resampler, self.js8_band_filter)
+            self.connect(self.js8_band_filter, self.js8_to_real)
+            self.connect(self.js8_to_real, self.js8_receiver)
+
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the
