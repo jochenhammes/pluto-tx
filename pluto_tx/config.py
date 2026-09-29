@@ -689,6 +689,8 @@ LORA_TX_RF_BANDWIDTH_MARGIN = 1.2
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
 DE_AMATEUR_BANDS_HZ = [
+    ("40m", 7_000_000, 7_200_000),
+    ("20m", 14_000_000, 14_350_000),
     ("2m", 144_000_000, 146_000_000),
     ("70cm", 430_000_000, 440_000_000),
     ("23cm", 1_240_000_000, 1_300_000_000),
@@ -733,3 +735,21 @@ FT8_TX_LATENCY_S = 0.11
 FT8_DRIFT_MODEL = {
     "pluto": dict(tx_ppb_s=-0.95, warmup_ppb_s=-1.9, warmup_tau_s=45.0, cooldown_ppb_s=-0.3, cooldown_tau_s=60.0),
 }
+
+
+# --- JS8 (pluto_tx/js8*.py, docs/js8/SPEC.md; RX: pluto_advanced_rx/js8_*.py) -------------------------
+# Audio frequency of tone 0 (the signal occupies tone_hz .. tone_hz + 8 tone spacings, 25-160 Hz).
+JS8_DEFAULT_TONE_HZ = 1500.0
+JS8_TONE_RANGE_HZ = (200.0, 3000.0)       # the whole signal stays inside this audio range
+JS8_IQ_LEVEL = FT8_IQ_LEVEL
+JS8_SOUNDCARD_LEVEL = FT8_SOUNDCARD_LEVEL
+JS8_TAIL_S = FT8_TAIL_S
+JS8_AUTO_UNKEY_WATCHDOG_S = FT8_AUTO_UNKEY_WATCHDOG_S
+# The first frame is keyed this long ahead (covers the one source swap, like FT8_KEY_EARLY_S); every
+# later frame only needs the RF path keyed again (no graph lock), JS8_REKEY_EARLY_S ahead.
+JS8_KEY_EARLY_S = FT8_KEY_EARLY_S
+JS8_REKEY_EARLY_S = 0.5
+JS8_LATE_START_MAX_S = FT8_LATE_START_MAX_S
+JS8_TX_LATENCY_S = FT8_TX_LATENCY_S
+# An unkey this long (or more) before a frame's scheduled end counts as an abort of the whole message.
+JS8_ABORT_MARGIN_S = 0.05

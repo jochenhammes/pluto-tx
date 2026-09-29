@@ -54,9 +54,11 @@ def transmission_time_s(n_frames, submode):
     return (n_frames - 1) * info["period_s"] + info["start_delay_ms"] / 1000 + info["data_duration_s"]
 
 
-def plan_frames(now, submode, n_frames, key_early_s=3.0, late_max_s=1.0):
+def plan_frames(now, submode, n_frames, key_early_s=3.0, late_max_s=1.0, rekey_early_s=0.5):
     """-> [(key_at, start_at)] for n_frames in consecutive periods. The first period is the current one if
-    its nominal start (period + start delay) is at most late_max_s ago, else the next one."""
+    its nominal start (period + start delay) is at most late_max_s ago, else the next one. The first frame
+    is keyed key_early_s ahead (covers the flowgraph's one source swap), every later one rekey_early_s
+    ahead (only the RF path is keyed again, see PlutoTxFlowgraph)."""
     if not 1 <= n_frames <= MAX_FRAMES:
         raise ValueError(f"a JS8 transmission has 1..{MAX_FRAMES} frames, not {n_frames}")
     info = speed_info(submode)
@@ -69,7 +71,7 @@ def plan_frames(now, submode, n_frames, key_early_s=3.0, late_max_s=1.0):
     plan = []
     for i in range(n_frames):
         start = first if i == 0 else slot0 + i * period + delay     # later frames on time even if the first was late
-        plan.append((max(now, start - key_early_s), start))
+        plan.append((max(now, start - (key_early_s if i == 0 else rekey_early_s)), start))
     return plan
 
 
