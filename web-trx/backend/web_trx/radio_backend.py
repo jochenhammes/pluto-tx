@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import clock, ft8_series, pluto_path, station
+from . import clock, ft8_series, js8_series, pluto_path, station
 from .session import AudioFrame, SessionBackend, SessionError, SpectrumFrame
 from .tx_audio import JitterBuffer
 
@@ -45,10 +45,14 @@ from pluto_advanced_rx.flowgraph import RADE_AVAILABLE as RX_RADE_AVAILABLE
 from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph
 from pluto_advanced_rx.ft8_decoder import available_backends as ft8_rx_backends
 from pluto_advanced_rx.ft8_decoder import sender_call as ft8_sender_call
+from pluto_advanced_rx.js8_assembly import Js8Assembler
+from pluto_advanced_rx.js8_decoder import available_backends as js8_rx_backends
 from pluto_advanced_rx.pocsag_state import PocsagState
 from pluto_tx import config as tx_config
 from pluto_tx import devices as tx_devices
 from pluto_tx import ft8 as tx_ft8
+from pluto_tx import js8 as tx_js8
+from pluto_tx import js8_message as tx_js8_message
 from pluto_tx.config import normalize_uri
 from pluto_tx.flowgraph import FT8_AVAILABLE as TX_FT8_AVAILABLE
 from pluto_tx.flowgraph import M17_AVAILABLE as TX_M17_AVAILABLE
@@ -78,8 +82,9 @@ RX_DEMOD_MODES = {
     "pocsag": AdvancedRxFlowgraph.MODE_FM,
     "rtty": AdvancedRxFlowgraph.MODE_SSB,
     "ft8": AdvancedRxFlowgraph.MODE_SSB,
+    "js8": AdvancedRxFlowgraph.MODE_SSB,
 }
-RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8"}
+RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8"}
 
 
 def rx_bands() -> dict[str, list[float]]:
@@ -98,8 +103,9 @@ def rx_bands() -> dict[str, list[float]]:
         "rade": [rx_config.RADE_OFDM_LOW_HZ, rx_config.RADE_OFDM_HIGH_HZ],
         "m17": [-m17_half, m17_half],
     }
-SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8")  # squelch probe after the SSB filter
+SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8", "js8")  # squelch probe after the SSB filter
 FT8_STATUS_S = 15.0  # ft8_status at least once per slot, and on every change
+JS8_STATUS_S = 15.0
 RTTY_FLUSH_S = 0.2
 # Squelch (pluto-tx's RX flowgraph has none): average power of the
 # channel-filtered IF signal, gates the audio sent to the browser.
@@ -121,11 +127,12 @@ TX_MODES = {
     "rtty": PlutoTxFlowgraph.MODE_RTTY,
     "digitext": PlutoTxFlowgraph.MODE_DIGITEXT,
     "ft8": PlutoTxFlowgraph.MODE_FT8,
+    "js8": PlutoTxFlowgraph.MODE_JS8,
 }
 # One-shot modes render their whole transmission at key time and unkey on
 # their own (pluto_cli.runtime.run_tx_session); all others take the
 # browser microphone while PTT is held. FT8 is one too, keyed by its series.
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8")
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8")
 ONE_SHOT_TAIL_S = 0.3
 
 # TX audio processing (FM/SSB/LSB; M17 bypasses this chain in pluto-tx).
@@ -257,6 +264,9 @@ class GnuRadioBackend(SessionBackend):
         self._unkey_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._ft8_series: ft8_series.Ft8Series | None = None
+        self._js8_series: js8_series.Js8Series | None = None
+        self._js8_lock = threading.Lock()
+        self._js8_assembler = Js8Assembler()
         self._mic_buffer = JitterBuffer(tx_config.AUDIO_RATE)
         self._keying = False
         self._over_stats = _new_over_stats()
@@ -295,6 +305,9 @@ class GnuRadioBackend(SessionBackend):
                 "rx_direct_sampling": [t for t in RX_DEVICE_TYPES if _supports_direct_sampling(t)],
                 "ft8": {"tx": _tx_mode_available("ft8"), "rx_backends": ft8_rx_backends(),
                         "clock_synced": clock.ntp_synchronized()},
+                "js8": {"tx": _tx_mode_available("js8"), "rx_backends": js8_rx_backends(),
+                        "submodes": list(tx_js8.SPEEDS), "jsc": tx_js8_message.jsc_available(),
+                        "clock_synced": clock.ntp_synchronized()},
                 "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)]}
 
     def device_types(self) -> dict[str, list[list[str]]]:
@@ -327,6 +340,7 @@ class GnuRadioBackend(SessionBackend):
         if direction == "tx":
             # Outside the TX lock: a series unkeys under that lock.
             await self._cancel_ft8("disconnect")
+            await self._cancel_js8("disconnect")
             async with self._tx_lock:
                 await self._teardown_tx()
         else:
@@ -374,7 +388,7 @@ class GnuRadioBackend(SessionBackend):
         elif name not in (RX_GAIN_NAMES if direction == "rx" else TX_GAIN_NAMES):
             raise SessionError(f"unknown {direction} gain '{name}'")
         elif name == "sample_rate":
-            if self._ft8_armed() and self.tx.device_type == "pluto":
+            if (self._ft8_armed() or self._js8_armed()) and self.tx.device_type == "pluto":
                 # pluto-tx: changing the RX bandwidth mid-transmission shifts the
                 # Pluto's TX timing (docs/FT8_PLAN.md section 7).
                 raise SessionError("rx: bandwidth can't change while an FT8 series is armed")
@@ -516,10 +530,13 @@ class GnuRadioBackend(SessionBackend):
         if on:
             if self.tx.mode == "ft8":
                 await self._arm_ft8()
+            elif self.tx.mode == "js8":
+                await self._arm_js8()
             else:
                 await self._key()
         else:
             await self._cancel_ft8(reason)
+            await self._cancel_js8(reason)
             self._cancel_tx_tasks()
             await self._unkey()
 
@@ -531,6 +548,10 @@ class GnuRadioBackend(SessionBackend):
             await self._cancel_ft8("estop", device_safe=True)
         except Exception:  # E-STOP must not raise
             logger.exception("cancelling the FT8 series failed during E-STOP")
+        try:
+            await self._cancel_js8("estop", device_safe=True)
+        except Exception:  # E-STOP must not raise
+            logger.exception("cancelling the JS8 message failed during E-STOP")
         self._cancel_tx_tasks()
         was_keyed = self.keyed
         mode = self.tx.mode
@@ -565,6 +586,7 @@ class GnuRadioBackend(SessionBackend):
     def snapshot(self) -> dict:
         tx = _snapshot_direction(self.tx, self.keyed)
         tx["ft8_armed"] = self._ft8_armed()
+        tx["js8_armed"] = self._js8_armed()
         tx["power"] = _power_info(self.tx.tb) if self.tx.tb is not None else None
         tx["settings"] = self._tx_settings()
         return {
@@ -579,6 +601,7 @@ class GnuRadioBackend(SessionBackend):
             self._squelch_task.cancel()
             self._spectrum_task = None
         await self._cancel_ft8("shutdown", device_safe=True)  # the flowgraph stops safely just below
+        await self._cancel_js8("shutdown", device_safe=True)
         self._cancel_tx_tasks()
         self.keyed = False
         for tb in (self.tx.tb, self.rx.tb):
@@ -676,6 +699,10 @@ class GnuRadioBackend(SessionBackend):
             on_ft8_decodes=self._on_ft8_decodes,
             ft8_backend=params.get("decoder", "auto"),
             ft8_my_call=self.station.get("call", ""), ft8_my_grid=self.station.get("locator", ""),
+            # JS8: every period of each selected speed, decoded in pluto-tx' own worker thread.
+            on_js8_decodes=self._on_js8_decodes,
+            js8_submodes=_js8_rx_submodes(params.get("submode", "normal")),
+            js8_backend=params.get("decoder", "auto"),
         )
         try:
             decim = gr_filter.rational_resampler_fff(1, AUDIO_DECIMATION)
@@ -786,8 +813,8 @@ class GnuRadioBackend(SessionBackend):
         (pluto_cli.runtime.run_rx_session does it in a sleep loop): RTTY
         AFC steps (nothing inside the flowgraph calls them), batched RTTY
         text, RADE sync/SNR status."""
-        last_afc = last_rade = last_ft8 = 0.0
-        last_rade_state = last_ft8_state = None
+        last_afc = last_rade = last_ft8 = last_js8 = 0.0
+        last_rade_state = last_ft8_state = last_js8_state = None
         while True:
             await asyncio.sleep(RTTY_FLUSH_S)
             tb, mode = self.rx.tb, self.rx.mode
@@ -811,6 +838,17 @@ class GnuRadioBackend(SessionBackend):
                         await self._emit_event("ft8_status", {
                             "decoder": decoder, "slots_decoded": receiver.slots_decoded,
                             "last_error": receiver.last_error, "clock_synced": clock.ntp_synchronized(),
+                        })
+                js8_receiver = getattr(tb, "js8_receiver", None)
+                if mode == "js8" and js8_receiver is not None:
+                    decoder = getattr(js8_receiver.decoder, "backend", None)
+                    state = (decoder, js8_receiver.slots_decoded, js8_receiver.last_error)
+                    if state != last_js8_state or now - last_js8 >= JS8_STATUS_S:
+                        last_js8_state, last_js8 = state, now
+                        await self._emit_event("js8_status", {
+                            "decoder": decoder, "periods_decoded": js8_receiver.slots_decoded,
+                            "last_error": js8_receiver.last_error, "clock_synced": clock.ntp_synchronized(),
+                            "speeds": [tx_js8.speed_info(sm)["name"].lower() for sm in js8_receiver.submodes],
                         })
                 if mode == "rade" and getattr(tb, "rade_decoder", None) is not None:
                     dec = tb.rade_decoder
@@ -841,6 +879,23 @@ class GnuRadioBackend(SessionBackend):
             ],
         }))
 
+    def _on_js8_decodes(self, slot_start: float, submode: int, decodes: list) -> None:
+        """Decoder thread -> one js8_frames event per decoded period (all its frames), then a js8_message
+        event for every message that changed (grew, completed or timed out)."""
+        speed = tx_js8.speed_info(submode)["name"].lower()
+        utc = time.strftime("%H%M%S", time.gmtime(slot_start))
+        with self._js8_lock:
+            changed = self._js8_assembler.feed(slot_start, submode, decodes)
+            changed += self._js8_assembler.expire(slot_start + tx_js8.speed_info(submode)["period_s"])
+            messages = [_js8_message_event(m) for m in changed]
+        self._from_gr_thread(self._emit_event("js8_frames", {
+            "slot_start": slot_start, "utc": utc, "speed": speed,
+            "decodes": [{"snr_db": round(d.snr_db), "dt_s": round(d.dt_s, 1), "freq_hz": round(d.freq_hz),
+                         "text": d.text, "frame": d.frame, "flags": d.flags} for d in decodes],
+        }))
+        for m in messages:
+            self._from_gr_thread(self._emit_event("js8_message", m))
+
     def _on_m17_fields(self, fields: dict) -> None:
         self._from_gr_thread(self._emit_event("m17_fields", _json_safe(fields)))
 
@@ -861,6 +916,7 @@ class GnuRadioBackend(SessionBackend):
             raise SessionError("tx: cannot change mode while keyed")
         if self._ft8_armed():
             raise SessionError("tx: FT8 series is armed -- cancel it first")
+        await self._cancel_js8("mode_change")  # a mode change ends a running JS8 message
         st = self.tx
         async with self._tx_lock:
             if st.tb is None:
@@ -919,6 +975,7 @@ class GnuRadioBackend(SessionBackend):
         # Normally already cancelled (disconnect() does it outside the lock);
         # device_safe: never waits, shutdown_safe() below forces the safe state.
         await self._cancel_ft8("disconnect", device_safe=True)
+        await self._cancel_js8("disconnect", device_safe=True)
         self._cancel_tx_tasks()
         self.keyed = False
         tb, self.tx.tb = self.tx.tb, None
@@ -1035,6 +1092,84 @@ class GnuRadioBackend(SessionBackend):
             plan=_plan_ft8, key=key, unkey=self._unkey, emit=self._emit_event,
             parity=params["slot"], count=params["repeat_count"], parity_of=tx_ft8.slot_parity)
         self._ft8_series = series
+        series.start()
+
+    # -- JS8 transmit (pluto-tx docs/JS8_PLAN.md J6): the frames of one message in consecutive periods --
+
+    def _js8_armed(self) -> bool:
+        return self._js8_series is not None and self._js8_series.armed
+
+    async def _cancel_js8(self, reason: str, device_safe: bool = False) -> None:
+        """device_safe=False waits for the series to unkey, which needs the TX lock -- never call it while
+        holding that lock."""
+        series, self._js8_series = self._js8_series, None
+        if series is not None:
+            await series.cancel(reason, device_safe=device_safe)
+
+    async def _arm_js8(self) -> None:
+        if self._js8_armed():
+            return  # at most one message at a time
+        async with self._tx_lock:
+            tb = self.tx.tb
+            if tb is None or self.tx.mode != "js8":
+                raise SessionError("tx: not connected or no mode selected")
+            if self.keyed:
+                return
+            params = dict(self.tx.mode_params)
+            try:
+                frames, text = await asyncio.to_thread(js8_series.build_message, self.station, params)
+            except ValueError as e:
+                raise SessionError(f"js8: {e}") from e
+            submode = tx_js8.submode_from_name(params["submode"])
+            await asyncio.to_thread(tb.set_js8_message, frames, submode, params["offset_hz"])
+            tb.ft8_drift_comp_enabled = bool(params["drift_comp"])
+            problem = _tx_problem(tb, "js8")
+            if problem:
+                raise SessionError(f"js8: {problem}")
+            await asyncio.to_thread(tb.prepare_js8)
+
+        def plan(now: float) -> list:
+            return tx_js8.plan_frames(now, submode, len(frames), key_early_s=tx_config.JS8_KEY_EARLY_S,
+                                      late_max_s=tx_config.JS8_LATE_START_MAX_S,
+                                      rekey_early_s=tx_config.JS8_REKEY_EARLY_S)
+
+        async def key(i: int, start_at: float) -> float:
+            async with self._tx_lock:
+                if series.cancelled:  # cancelled while waiting for the lock: never key
+                    raise SessionError("js8: message cancelled")
+                if self.tx.tb is not tb:
+                    raise SessionError("tx: flowgraph was rebuilt, message ends")
+                if i == 0:
+                    tb.js8_start_at = start_at  # the flowgraph places every later frame from here
+                try:
+                    await asyncio.to_thread(tb.key_ptt)
+                except ValueError as e:  # a refusal from the flowgraph, before any RF
+                    raise SessionError(str(e)) from e
+                if self.tx.tb is not tb:
+                    # E-STOP while key_ptt() ran in its thread: force the safe state once more.
+                    try:
+                        await asyncio.to_thread(tb.shutdown_safe)
+                    except Exception:
+                        logger.exception("shutdown_safe() after an E-STOP during JS8 keying failed")
+                    return 0.0
+                self.keyed = True
+                self._keyed_at = time.monotonic()
+                hold_s = tb.js8_hold_s
+            await self._emit_event("keyed", {"mode": "js8", "text": text, "frame": i + 1, "of": len(frames)})
+            if i == 0:
+                await self._emit_event("tx_text", {
+                    "mode": "js8", "text": text, "frames": len(frames),
+                    "duration_s": round(tx_js8.transmission_time_s(len(frames), submode), 2)})
+            return hold_s
+
+        async def abort() -> None:
+            if self.tx.tb is tb:
+                await asyncio.to_thread(tb.js8_cancel)
+
+        series = js8_series.Js8Series(
+            plan=plan, key=key, unkey=self._unkey, abort=abort, emit=self._emit_event, count=len(frames),
+            info={"text": text, "speed": params["submode"], "offset_hz": params["offset_hz"]})
+        self._js8_series = series
         series.start()
 
     async def _auto_unkey_after(self, seconds: float) -> None:
@@ -1158,6 +1293,20 @@ def _rx_mode_available(mode: str) -> bool:
 
 def _tx_mode_available(mode: str) -> bool:
     return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE, "ft8": TX_FT8_AVAILABLE}.get(mode, True)
+
+
+def _js8_rx_submodes(name: str) -> tuple:
+    if name == "all":
+        return tuple(sorted(tx_js8.SPEEDS.values()))
+    return (tx_js8.submode_from_name(name),)
+
+
+def _js8_message_event(m) -> dict:
+    return {"id": m.id, "speed": tx_js8.speed_info(m.submode)["name"].lower(),
+            "utc": time.strftime("%H%M%S", time.gmtime(m.first_slot)), "first_slot": m.first_slot,
+            "last_slot": m.last_slot, "freq_hz": round(m.freq_hz), "snr_db": round(m.snr_db),
+            "sender": m.sender, "to": m.to, "text": m.text, "closed": m.closed,
+            "complete": m.complete and not m.incomplete, "incomplete": m.incomplete}
 
 
 def _plan_ft8(now: float, parity: str) -> tuple[float, float]:
@@ -1320,6 +1469,10 @@ def _apply_tx_params(tb, mode: str, params: dict) -> None:
         # built from the station data, which can change after select_mode.
         tb.set_ft8_tone_hz(params["offset_hz"])
         tb.ft8_drift_comp_enabled = bool(params["drift_comp"])
+    elif mode == "js8":
+        # The frames are built when the message is armed (_arm_js8), from the station data.
+        tb.set_js8_tone_hz(params["offset_hz"])
+        tb.ft8_drift_comp_enabled = bool(params["drift_comp"])
     elif mode == "m17":
         if "src_callsign" in params:
             tb.set_m17_src_callsign(str(params["src_callsign"]).strip().upper())
@@ -1333,6 +1486,8 @@ def _tx_problem(tb, mode: str) -> str | None:
         return tb.pocsag_problem()
     if mode == "ft8":
         return tb.ft8_problem()
+    if mode == "js8":
+        return tb.js8_problem()
     if mode == "m17" and not tb.m17_src_callsign:
         return "source callsign is empty"
     if mode in ("rtty", "digitext") and not (tb.rtty_text if mode == "rtty" else tb.digitext_text).strip():

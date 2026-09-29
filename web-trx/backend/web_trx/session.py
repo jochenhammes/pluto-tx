@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import ft8_series, modes, protocol, station
+from . import ft8_series, js8_series, modes, protocol, station
 
 logger = logging.getLogger("web_trx.session")
 
@@ -122,8 +122,8 @@ class SessionBackend(abc.ABC):
 
     @abc.abstractmethod
     async def ptt(self, on: bool, reason: str = "ptt_off") -> None:
-        """FT8: on arms a transmit series (ft8_series.py), off cancels an armed
-        one -- `reason` goes into its ft8_cancelled event."""
+        """FT8/JS8: on arms a transmit series (ft8_series.py / js8_series.py), off
+        cancels an armed one -- `reason` goes into its *_cancelled event."""
 
     @abc.abstractmethod
     async def estop(self) -> None:
@@ -177,7 +177,7 @@ class SessionManager:
     async def _operator_gone(self, grace_s: float, stop_tx_now: bool) -> None:
         try:
             tx = self.backend.snapshot()["tx"]
-            if stop_tx_now and (tx.get("keyed") or tx.get("ft8_armed")):
+            if stop_tx_now and (tx.get("keyed") or tx.get("ft8_armed") or tx.get("js8_armed")):
                 logger.warning("no browser connected -- ending the transmission")
                 await self.backend.ptt(False, reason="no_operator")
             await asyncio.sleep(grace_s)
@@ -299,8 +299,8 @@ class SessionManager:
             b.set_station(value)
             await self._emit_event("station", value)
             tx = b.snapshot()["tx"]
-            if tx.get("mode") == "ft8":  # the message text depends on the station data
-                await self._emit_mode("tx", "ft8", tx.get("mode_params") or {})
+            if tx.get("mode") in ("ft8", "js8"):  # the message text depends on the station data
+                await self._emit_mode("tx", tx["mode"], tx.get("mode_params") or {})
 
     async def _emit_mode(self, direction: str, mode: str, mode_params: dict) -> None:
         fields = {"direction": direction, "mode": mode, "params": mode_params}
@@ -311,6 +311,18 @@ class SessionManager:
             except (RuntimeError, ImportError, ValueError):
                 logger.exception("composing the FT8 message failed")
                 fields["text"] = ""
+        if direction == "tx" and mode == "js8":
+            # Preview: what receivers will show, and how many frames (pluto-tx' js8_message).
+            try:
+                frames, fields["text"] = js8_series.build_message(self.backend.station, mode_params)
+                fields["frames"] = len(frames)
+                fields["duration_s"] = js8_series.transmission_time_s(len(frames), mode_params["submode"])
+                fields["problem"] = ""
+            except ValueError as e:
+                fields.update(text="", frames=0, duration_s=0.0, problem=str(e))
+            except (RuntimeError, ImportError):
+                logger.exception("building the JS8 message failed")
+                fields.update(text="", frames=0, duration_s=0.0, problem="JS8 codec not available")
         await self._emit_event("mode", fields)
 
     async def _handle_binary(self, data: bytes) -> None:
@@ -334,8 +346,10 @@ class SessionManager:
         if event_name == "keyed":
             tx = self.backend.snapshot()["tx"]
             params = dict(tx.get("mode_params") or {})
-            if "text" in fields:  # FT8: the message actually sent, built from station data + params
+            if "text" in fields:  # FT8/JS8: the message actually sent, built from station data + params
                 params["text"] = fields["text"]
+            if "frame" in fields:  # JS8: one record per frame
+                params["frame"], params["of"] = fields["frame"], fields.get("of")
             self.tx_log.record_keyed(
                 mode=tx.get("mode"), freq_hz=tx.get("freq_hz"),
                 device_type=tx.get("device_type"), connection=tx.get("connection"),
