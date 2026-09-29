@@ -115,6 +115,39 @@ def _gfsk_phase(symbols: np.ndarray, f0_hz: float, symbol_bt: float,
     return phi, env
 
 
+def _cpfsk_phase(symbols: np.ndarray, f0_hz: float, symbol_period: float, sample_rate: float):
+    """Plain continuous-phase FSK (rectangular frequency pulses, no Gaussian smoothing) with the same
+    conventions as _gfsk_phase(): tone spacing = one symbol rate, phase before the sample's own
+    increment, the same raised-cosine key-up/key-down ramp. This is what JS8Call's Modulator sends
+    (docs/js8/SPEC.md 1.2); the ramp is ours (only 1/8 symbol, against key clicks)."""
+    n_spsym = int(round(sample_rate * symbol_period))
+    n_wave = len(symbols) * n_spsym
+    dphi = 2 * np.pi * f0_hz / sample_rate + (2 * np.pi / n_spsym) * np.repeat(
+        np.asarray(symbols, dtype=np.float64), n_spsym)
+    phi = np.cumsum(dphi) - dphi
+    env = np.ones(n_wave)
+    n_ramp = n_spsym // 8
+    if n_ramp > 0:
+        i = np.arange(n_ramp)
+        ramp = (1 - np.cos(2 * np.pi * i / (2 * n_ramp))) / 2
+        env[:n_ramp] = ramp
+        env[n_wave - n_ramp:] = ramp[::-1]
+    return phi, env
+
+
+def gfsk_iq(symbols, tone_hz: float, symbol_period: float, bt, sample_rate: float,
+            amplitude: float = 0.7) -> np.ndarray:
+    """Complex baseband exp(j*phi) for 8-FSK tone indices `symbols` (tone 0 at +tone_hz, spacing
+    1/symbol_period), i.e. the synthesis behind encode_iq() for other modes (JS8). bt: Gaussian
+    bandwidth-time product (FT8: FT8_SYMBOL_BT), or None for plain CPFSK. Signal only, no tail."""
+    symbols = np.asarray(symbols)
+    if bt is None:
+        phi, env = _cpfsk_phase(symbols, tone_hz, symbol_period, sample_rate)
+    else:
+        phi, env = _gfsk_phase(symbols, tone_hz, bt, symbol_period, sample_rate)
+    return (amplitude * env * np.exp(1j * phi)).astype(np.complex64)
+
+
 def _synth_gfsk(symbols: np.ndarray, f0_hz: float, symbol_bt: float,
                  symbol_period: float, sample_rate: float) -> np.ndarray:
     """Real audio (sin(phi)), exactly ft8_lib's synth_gfsk() output."""
