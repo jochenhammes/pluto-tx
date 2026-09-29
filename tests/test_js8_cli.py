@@ -87,14 +87,23 @@ class TxCliTests(unittest.TestCase):
             safe_calls.append(time.time())
             orig(self)
 
+        from pluto_tx.flowgraph import PlutoTxFlowgraph
+        keyed = threading.Event()
+        frame_start = []
+        real_key = PlutoTxFlowgraph.key_ptt
+
+        def key_and_note(fg):
+            real_key(fg)
+            frame_start.append(fg.js8_frame_starts[fg.js8_frame_index])
+            keyed.set()
+
         def interrupt_during_first_frame():
-            # the first frame starts at the next 6 s boundary + 0.1 s; interrupt 1 s into it
-            now = time.time()
-            start = js8.plan_frames(now, P.TURBO, 1, late_max_s=1.0)[0][1]
-            time.sleep(max(0.0, start + 1.0 - time.time()))
+            keyed.wait(30)                                                   # the first frame is keyed ...
+            time.sleep(max(0.0, frame_start[0] + 1.0 - time.time()))        # ... interrupt 1 s into it
             os.kill(os.getpid(), signal.SIGINT)
 
-        with mock.patch.object(fakes.FakeTxDevice, "force_safe_state", spy):
+        with mock.patch.object(fakes.FakeTxDevice, "force_safe_state", spy), \
+                mock.patch.object(PlutoTxFlowgraph, "key_ptt", key_and_note):
             t = threading.Thread(target=interrupt_during_first_frame, daemon=True)
             t.start()
             code, events = run_cli(TX + ["--kind", "allcall", "--text", "JS8 SEQUENCE TEST DE DA2JH"])
