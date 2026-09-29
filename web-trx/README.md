@@ -176,7 +176,7 @@ web-trx start
 
 ## Betrieb
 
-Bewusst manuell, (noch) kein systemd-Dienst:
+Manuell, oder als systemd-Dienst ([Headless-Betrieb](#headless-betrieb-autostart-als-systemd-dienst-optional)):
 
 ```bash
 web-trx start              # = scripts/start.sh: startet im Hintergrund, baut das Frontend falls nötig
@@ -228,6 +228,39 @@ einem NOTAUS bleibt der Sender aus. Unter `run/` liegen Log (`web-trx.log`), PID
 (`web_trx_tx_log.sqlite3`), die Bedien-Einstellungen (`settings.json`:
 Frequenzen, Modi, Leistung, Audio-Aufbereitung, Wasserfall) und das
 Zertifikat.
+
+### Headless-Betrieb (Autostart als systemd-Dienst, optional)
+
+```bash
+web-trx/scripts/install-service.sh     # einrichten (ruft sudo selbst auf, nicht mit sudo starten)
+web-trx/scripts/uninstall-service.sh   # wieder entfernen
+```
+
+`install-service.sh` richtet `/etc/systemd/system/web-trx.service` ein:
+Web-TRX startet bei jedem Systemstart, **ohne dass sich jemand anmeldet**,
+und nach einem Absturz neu. Der Dienst läuft als der Benutzer, der das
+Skript aufruft (nicht als root), und benutzt `start.sh`/`stop.sh`, also
+dieselbe PID-Datei und denselben Safe-State beim Stoppen. `web-trx
+status`/`log` und die Web-TRX-Zeile in den Apps funktionieren weiter.
+Beliebig oft wiederholbar.
+
+- **Ton ohne Anmeldung:** Der TX-Flowgraph öffnet auch für Pluto/HackRF
+  immer die Standard-Soundkarte. Vor der Anmeldung läuft kein PipeWire,
+  „Connect“ scheitert dann mit `audio_alsa_sink :error: [default]: Host
+  is down`. Der Dienst setzt deshalb GNU Radios ALSA-Standardgerät auf
+  `null` (`GR_CONF_AUDIO_ALSA_DEFAULT_OUTPUT_DEVICE`/`_INPUT_DEVICE`).
+  Das Mikrofon kommt ohnehin aus dem Browser; ausdrücklich gewählte
+  Geräte (AIOC `plughw:…`) sind nicht betroffen.
+- **Netzwerk ohne Anmeldung:** Das Skript warnt, wenn das aktive WLAN erst
+  nach der Anmeldung verbindet (Profil nur für einen Benutzer oder Passwort
+  im Schlüsselbund).
+- **Bedienung:** `sudo systemctl stop|start|restart web-trx`. `web-trx stop`
+  (oder **Stop** in der App) beendet den Server auch, der Dienst startet ihn
+  dann aber erst beim nächsten Boot wieder.
+
+`uninstall-service.sh` stoppt den Server (mit Safe-State), schaltet den
+Autostart ab und löscht die Unit. `web-trx.env` und `run/` bleiben
+erhalten, `web-trx start` funktioniert danach wie vorher.
 
 ### Konfiguration
 
@@ -291,12 +324,13 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
   abreißt, Sende-Zeitbegrenzung, persistentes TX-Log.
 - Login mit geteiltem Passwort, HTTPS, Bedien-Einstellungen bleiben über
   Neustarts erhalten, manueller Betrieb über `web-trx` bzw.
-  `scripts/start.sh`/`stop.sh` und aus der TX-/RX-App.
+  `scripts/start.sh`/`stop.sh` und aus der TX-/RX-App, optional als
+  systemd-Dienst für Headless-Betrieb (`scripts/install-service.sh`).
 - Modus-Parameter zentral geprüft in `backend/web_trx/modes.py`.
 
 **Offen**
 - Latenzmessung über einen echten VPN-Link, Opus über langsame Links.
-- Mehrgeräte-Betrieb, systemd-Dienst, TLS-Reverse-Proxy.
+- Mehrgeräte-Betrieb, TLS-Reverse-Proxy.
 - FT8 (in pluto-tx vorhanden, dort noch ungetestet im Funkbetrieb; Plan in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
 - Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
