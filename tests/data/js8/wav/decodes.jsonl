@@ -1,0 +1,5 @@
+{"bits": 1, "dt": -0.01000000536441803, "file": "allcall60_sm1_f0.wav", "frame": "QpYbXVGGOry0", "frame_type": 3, "freq": 1500, "mask": 2, "message": "DA2JH: @ALLCALL  ", "snr": 32, "submode": 1}
+{"bits": 6, "dt": -0.01000000536441803, "file": "allcall60_sm1_f4.wav", "frame": "m68nM6mjraU1", "frame_type": 4, "freq": 1500, "mask": 2, "message": "56789 ABCDEFGHIJKL", "snr": 32, "submode": 1}
+{"bits": 3, "dt": 0.004999995231628418, "file": "cq_sm0_f0.wav", "frame": "1evxkMBjPUWe", "frame_type": 0, "freq": 1500, "mask": 1, "message": "DA2JH: @ALLCALL CQ CQ CQ JO31 ", "snr": 38, "submode": 0}
+{"bits": 3, "dt": -0.04000002145767212, "file": "hb_sm4_f0.wav", "frame": "1evxkMBjOUWe", "frame_type": 0, "freq": 1500, "mask": 8, "message": "DA2JH: @HB HEARTBEAT JO31 ", "snr": 42, "submode": 4}
+{"bits": 3, "dt": -0.004166662693023682, "file": "snr_query_sm2_f0.wav", "frame": "QpYbXBUUeS00", "frame_type": 3, "freq": 1500, "mask": 4, "message": "DA2JH: DL1ABC SNR? ", "snr": 25, "submode": 2}
