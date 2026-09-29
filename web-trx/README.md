@@ -309,8 +309,16 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
   einen Decode übernimmt das Rufzeichen und stellt die Gegenparität ein.
   Jede Aussendung steht mit Text im TX-Log. Im Funkbetrieb noch ungetestet
   (Phase F3 in [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
+- **JS8 (JS8Call):** Empfang in Normal/Fast/Turbo/Slow (einzeln oder alle),
+  Nachrichten aus mehreren Rahmen zusammengesetzt (Chat nach Gegenstation,
+  @ALLCALL), Band-Aktivität und gehörte Stationen; Klick übernimmt das
+  Rufzeichen. Senden: CQ, Heartbeat, @ALLCALL- und gerichteter Text, SNR?,
+  SNR-Rapport, ACK, Freitext -- gebaut wie JS8Call selbst, Vorschau mit
+  Rahmenzahl und Dauer; die Rahmen gehen in aufeinanderfolgenden Perioden
+  raus, jeder einzeln getastet. Keine automatischen Antworten. Details:
+  [`docs/JS8.md`](docs/JS8.md).
 - Stationsdaten (Rufzeichen, Locator) in der Kopfzeile, gespeichert; genutzt
-  für FT8 und als M17-Vorbelegung. Startwert aus `WEB_TRX_STATION_CALL` /
+  für FT8, JS8 und als M17-Vorbelegung. Startwert aus `WEB_TRX_STATION_CALL` /
   `WEB_TRX_STATION_LOCATOR` in `web-trx.env`.
 - Empfang: FM (mit De-Emphasis), SSB (USB/LSB), M17 mit Anzeige des
   Rufzeichens, RADE (Sync/SNR), RTTY- und POCSAG-Dekodierung im Panel
@@ -341,6 +349,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 - Mehrgeräte-Betrieb, TLS-Reverse-Proxy.
 - FT8-Senden im Funkbetrieb testen (F3/F4 in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
+- JS8 im Funkbetrieb testen (J7 in pluto-tx `docs/JS8_PLAN.md`).
 - Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
 
 ## Struktur
@@ -349,7 +358,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 backend/    FastAPI-Server (Python) -- SessionManager, SimBackend, GnuRadioBackend, Auth, TX-Log, Modus-Parameter
 frontend/   Svelte/TypeScript-SPA -- Login, Wasserfall, RX/TX-Panels, TX-Verlauf, Event-Log
 scripts/    start.sh / stop.sh / status.sh (manueller Betrieb, auch von den Apps aufgerufen)
-docs/       Projektplan, Debugging-Strategie, FT8-Plan
+docs/       Projektplan, Debugging-Strategie, FT8-Plan, JS8
 run/        Laufzeitdaten (nicht eingecheckt)
 ```
 
