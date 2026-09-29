@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import ft8_series, station
+from . import ft8_series, js8_series, pluto_path, station
 from .session import AudioFrame, SessionBackend, SessionError, SpectrumFrame
 
 FFT_SIZE = 2048
@@ -31,8 +31,14 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
-TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8")
-RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8")
+TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8")
+RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8")
+
+# JS8 receive: frames built with pluto-tx' real JS8 codec and assembled like GnuRadioBackend does -- our own
+# transmissions come back in their periods (loopback), plus a simulated neighbour (CQ, heartbeat, and a
+# report to the station's own callsign when one is set).
+JS8_DECODE_LAG_S = 0.3
+JS8_SIM_NEIGHBOUR = ("DL1ABC", "JO62")
 
 # FT8 receive: invented decodes per 15 s slot, delivered like pluto-tx's
 # Ft8Receiver (~14.8 s after the slot start) -- enough to develop the decode
@@ -92,6 +98,11 @@ class SimBackend(SessionBackend):
         self._ft8_series: ft8_series.Ft8Series | None = None
         # Loopback: our own transmissions show up in the ft8_slot of their slot.
         self._ft8_sent: list[tuple[float, str]] = []
+        self._js8_task: asyncio.Task | None = None
+        self._js8_series: js8_series.Js8Series | None = None
+        self._js8_sent: list[tuple[float, int, str, int]] = []   # (period start, submode, frame, flags)
+        self._js8_assembler = None
+        self._js8_periods = 0
         self._audio_phase = 0.0
         self.tx_audio_frames_received = 0  # test/diagnostic hook, see submit_tx_audio()
 
@@ -107,7 +118,9 @@ class SimBackend(SessionBackend):
 
     def features(self) -> dict:
         return {"rx_modes": list(RX_MODES), "tx_modes": list(TX_MODES),
-                "ft8": {"tx": "ft8" in TX_MODES, "rx_backends": ["sim"], "clock_synced": True}}
+                "ft8": {"tx": "ft8" in TX_MODES, "rx_backends": ["sim"], "clock_synced": True},
+                "js8": {"tx": "js8" in TX_MODES, "rx_backends": ["sim"], "submodes": ["normal", "fast", "turbo", "slow"],
+                        "jsc": _js8_modules()[1].jsc_available(), "clock_synced": True}}
 
     async def scan(self, direction: str, device_type: str) -> dict[str, str]:
         if device_type not in DEVICE_TYPES:
@@ -124,6 +137,7 @@ class SimBackend(SessionBackend):
     async def disconnect(self, direction: str) -> None:
         if direction == "tx":
             await self._cancel_ft8("disconnect")
+            await self._cancel_js8("disconnect")
             if self.keyed:
                 await self.ptt(False)
         st = self._state(direction)
@@ -140,6 +154,8 @@ class SimBackend(SessionBackend):
             raise SessionError(f"unsupported {direction} mode '{mode}'")
         if direction == "tx" and self._ft8_armed():
             raise SessionError("tx: FT8 series is armed -- cancel it first")
+        if direction == "tx":
+            await self._cancel_js8("mode_change")  # like GnuRadioBackend: a mode change ends a JS8 message
         st.mode = mode
         st.mode_params = params
 
@@ -166,6 +182,9 @@ class SimBackend(SessionBackend):
             if self.tx.mode == "ft8":
                 await self._arm_ft8()
                 return
+            if self.tx.mode == "js8":
+                await self._arm_js8()
+                return
             if self.keyed:
                 return
             self.keyed = True
@@ -189,6 +208,7 @@ class SimBackend(SessionBackend):
                 self._pocsag_unkey_task = asyncio.create_task(self._auto_unkey_after(1.5))
         else:
             await self._cancel_ft8(reason)
+            await self._cancel_js8(reason)
             if self._pocsag_unkey_task is not None:
                 self._pocsag_unkey_task.cancel()
                 self._pocsag_unkey_task = None
@@ -222,6 +242,53 @@ class SimBackend(SessionBackend):
             parity=params.get("slot", "any"), count=params.get("repeat_count", 1))
         self._ft8_series.start()
 
+    def _js8_armed(self) -> bool:
+        return self._js8_series is not None and self._js8_series.armed
+
+    async def _cancel_js8(self, reason: str, device_safe: bool = False) -> None:
+        series, self._js8_series = self._js8_series, None
+        if series is not None:
+            await series.cancel(reason, device_safe=device_safe)
+
+    async def _arm_js8(self) -> None:
+        if self._js8_armed():
+            return
+        params = self.tx.mode_params
+        try:
+            frames, text = js8_series.build_message(self.station, params)
+        except ValueError as e:
+            raise SessionError(f"js8: {e}") from e
+        js8, _msg = _js8_modules()
+        submode = js8.submode_from_name(params["submode"])
+        info = js8.speed_info(submode)
+        frame_s = info["data_duration_s"] + 0.1
+
+        def plan(now: float) -> list:
+            return js8.plan_frames(now, submode, len(frames))
+
+        async def key(i: int, start_at: float) -> float:
+            self.keyed = True
+            await self._emit_event("keyed", {"mode": "js8", "text": text, "frame": i + 1, "of": len(frames)})
+            if i == 0:
+                await self._emit_event("tx_text", {"mode": "js8", "text": text, "frames": len(frames),
+                                                   "duration_s": round(js8.transmission_time_s(len(frames), submode), 2)})
+            period = info["period_s"]
+            self._js8_sent.append((start_at // period * period, submode, *frames[i]))
+            return max(0.0, start_at - time.time()) + frame_s
+
+        async def unkey() -> None:
+            if self.keyed:
+                self.keyed = False
+                await self._emit_event("unkeyed", {"mode": "js8"})
+
+        async def abort() -> None:
+            pass
+
+        self._js8_series = js8_series.Js8Series(
+            plan=plan, key=key, unkey=unkey, abort=abort, emit=self._emit_event, count=len(frames),
+            info={"text": text, "speed": params["submode"], "offset_hz": params.get("offset_hz", 1500.0)})
+        self._js8_series.start()
+
     async def _auto_unkey_after(self, seconds: float) -> None:
         """Runs as self._pocsag_unkey_task. Must clear that reference
         *before* calling ptt(False) below -- otherwise ptt(False) finds
@@ -242,6 +309,7 @@ class SimBackend(SessionBackend):
 
     async def estop(self) -> None:
         await self._cancel_ft8("estop", device_safe=True)
+        await self._cancel_js8("estop", device_safe=True)
         if self._pocsag_unkey_task is not None:
             self._pocsag_unkey_task.cancel()
             self._pocsag_unkey_task = None
@@ -259,12 +327,16 @@ class SimBackend(SessionBackend):
 
     def snapshot(self) -> dict:
         return {
-            "tx": {**_snapshot_direction(self.tx, self.keyed), "ft8_armed": self._ft8_armed()},
+            "tx": {**_snapshot_direction(self.tx, self.keyed), "ft8_armed": self._ft8_armed(),
+                   "js8_armed": self._js8_armed()},
             "rx": _snapshot_direction(self.rx, False),
         }
 
     async def shutdown(self) -> None:
         await self._cancel_ft8("shutdown", device_safe=True)
+        await self._cancel_js8("shutdown", device_safe=True)
+        if self._js8_task is not None:
+            self._js8_task.cancel()
         if self._spectrum_task is not None:
             self._spectrum_task.cancel()
         if self._audio_task is not None:
@@ -288,6 +360,78 @@ class SimBackend(SessionBackend):
             self._audio_task = asyncio.create_task(self._audio_loop())
         if self._ft8_task is None:
             self._ft8_task = asyncio.create_task(self._ft8_loop())
+        if self._js8_task is None:
+            self._js8_task = asyncio.create_task(self._js8_loop())
+
+    def _js8_rx_submode(self) -> int:
+        js8, _msg = _js8_modules()
+        name = (self.rx.mode_params or {}).get("submode", "normal")
+        return js8.SPEEDS.get(name, js8.NORMAL)          # "all": the simulator plays Normal
+
+    async def _js8_loop(self) -> None:
+        js8, _msg = _js8_modules()
+        last = None
+        while True:
+            period = js8.speed_info(self._js8_rx_submode())["period_s"]
+            now = time.time()
+            slot = (now - JS8_DECODE_LAG_S) // period * period
+            if slot == last:
+                slot += period
+            await asyncio.sleep(max(0.0, slot + period + JS8_DECODE_LAG_S - time.time()))
+            last = slot
+            if self.rx.connection is None or self.rx.mode != "js8":
+                continue
+            for name, fields in self.fake_js8_period(slot, self._js8_rx_submode()):
+                await self._emit_event(name, fields)
+            self._js8_periods += 1
+            await self._emit_event("js8_status", {"decoder": "sim", "periods_decoded": self._js8_periods,
+                                                   "last_error": "", "clock_synced": True,
+                                                   "speeds": [js8.speed_info(self._js8_rx_submode())["name"].lower()]})
+
+    def fake_js8_period(self, slot_start: float, submode: int) -> list:
+        """The events GnuRadioBackend sends for one decoded period: js8_frames, then js8_message for every
+        message that changed. Every 4th period the neighbour calls CQ, every 4th + 2 it sends a heartbeat
+        and -- with a station callsign set -- a report to us; our own frames come back in their period."""
+        js8, msg = _js8_modules()
+        from pluto_advanced_rx.js8_assembly import Js8Assembler
+        from pluto_advanced_rx.js8_decoder import Js8Decode
+
+        if self._js8_assembler is None:
+            self._js8_assembler = Js8Assembler()
+        n = int(slot_start // js8.speed_info(submode)["period_s"])
+        call, grid = JS8_SIM_NEIGHBOUR
+        texts = []
+        if n % 4 == 0:
+            texts.append((1200.0, msg.build_frames(call, grid, f"CQ CQ CQ {grid}", submode)[0]))
+        elif n % 4 == 2:
+            texts.append((700.0, msg.build_frames(call, grid, f"{call}: HEARTBEAT {grid}", submode)[0]))
+            my_call = self.station.get("call") or ""
+            if my_call:
+                texts.append((1600.0, msg.build_frames(call, grid, f"{my_call} SNR -07", submode)[0]))
+        mine = [(sm, f, b) for s, sm, f, b in self._js8_sent if s == slot_start and sm == submode]
+        self._js8_sent = [e for e in self._js8_sent if e[0] > slot_start]
+        offset = float((self.tx.mode_params or {}).get("offset_hz", 1500.0))
+        texts += [(offset, (f, b)) for _sm, f, b in mine]
+        decodes = []
+        for freq, (frame, flags) in texts:
+            d = msg.decode_frame(frame, flags, submode)
+            decodes.append(Js8Decode(frame, flags, submode, float(self._rng.integers(-20, 5)),
+                                     round(float(self._rng.normal(0.0, 0.2)), 1), freq, d["message"], d["frame_type"]))
+        speed = js8.speed_info(submode)["name"].lower()
+        events = [("js8_frames", {
+            "slot_start": slot_start, "utc": time.strftime("%H%M%S", time.gmtime(slot_start)), "speed": speed,
+            "decodes": [{"snr_db": round(d.snr_db), "dt_s": d.dt_s, "freq_hz": round(d.freq_hz), "text": d.text,
+                         "frame": d.frame, "flags": d.flags} for d in decodes],
+        })]
+        changed = self._js8_assembler.feed(slot_start, submode, decodes)
+        changed += self._js8_assembler.expire(slot_start + js8.speed_info(submode)["period_s"])
+        for m in changed:
+            events.append(("js8_message", {
+                "id": m.id, "speed": speed, "utc": time.strftime("%H%M%S", time.gmtime(m.first_slot)),
+                "first_slot": m.first_slot, "last_slot": m.last_slot, "freq_hz": round(m.freq_hz),
+                "snr_db": round(m.snr_db), "sender": m.sender, "to": m.to, "text": m.text, "closed": m.closed,
+                "complete": m.complete and not m.incomplete, "incomplete": m.incomplete}))
+        return events
 
     async def _ft8_loop(self) -> None:
         last_slot = None
@@ -390,3 +534,11 @@ def _snapshot_direction(st: _DirectionState, keyed: bool) -> dict:
         "gains": dict(st.gains),
         "keyed": keyed,
     }
+
+
+def _js8_modules():
+    """pluto_tx.js8 / js8_message (numpy only, no GNU Radio), imported late like ft8_series.compose_text."""
+    pluto_path.ensure_importable()
+    from pluto_tx import js8, js8_message
+
+    return js8, js8_message

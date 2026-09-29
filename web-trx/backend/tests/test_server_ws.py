@@ -431,3 +431,134 @@ def test_closing_the_last_browser_cancels_an_armed_ft8_series(monkeypatch):
             assert ws.receive_json()["event"] == "ft8_armed"
         assert _wait_until(lambda: not backend.snapshot()["tx"]["ft8_armed"], timeout=0.5)
         assert not backend.keyed
+
+
+def _fast_js8(monkeypatch, key_in_s=0.05):
+    """SimBackend's JS8 message without waiting for real periods: frames 0.2 s apart, 0.05 s long."""
+    from web_trx import pluto_path
+
+    pluto_path.ensure_importable()
+    from pluto_tx import js8
+
+    real_info = js8.speed_info
+    monkeypatch.setattr(js8, "plan_frames", lambda now, sm, n, **kw: [(now + key_in_s + 0.2 * i,
+                                                                        now + key_in_s + 0.05 + 0.2 * i)
+                                                                       for i in range(n)])
+    monkeypatch.setattr(js8, "speed_info", lambda sm: dict(real_info(sm), data_duration_s=0.05))
+
+
+def _js8_tx_ready(ws, params=None):
+    ws.receive_json()  # hello
+    ws.send_json({"request": "set_station", "call": "DA2JH", "locator": "JO43"})
+    assert ws.receive_json()["event"] == "station"
+    ws.send_json({"request": "connect", "direction": "tx", "device_type": "sim"})
+    assert ws.receive_json()["event"] == "connected"
+    ws.send_json({"request": "select_mode", "direction": "tx", "mode": "js8", "params": params or {}})
+    return ws.receive_json()
+
+
+def test_js8_message_round_trip_over_ws(monkeypatch):
+    _fast_js8(monkeypatch)
+    with make_client() as client:
+        login(client)
+        with client.websocket_connect("/ws") as ws:
+            mode = _js8_tx_ready(ws, {"kind": "allcall", "text": "js8 sequence test", "submode": "normal"})
+            assert mode["event"] == "mode"
+            assert mode["text"] == "DA2JH: @ALLCALL  JS8 SEQUENCE TEST"   # preview, pluto-tx' js8_message
+            n = mode["frames"]
+            assert n >= 2 and mode["problem"] == ""
+            ws.send_json({"request": "ptt_on"})
+            names = []
+            while "js8_done" not in names:
+                event = ws.receive_json()
+                names.append(event["event"])
+                if event["event"] == "keyed":
+                    assert event["text"] == "DA2JH: @ALLCALL  JS8 SEQUENCE TEST" and event["of"] == n
+            assert names == ["js8_armed", "keyed", "tx_text", "unkeyed", "js8_frame"] + \
+                ["keyed", "unkeyed", "js8_frame"] * (n - 1) + ["js8_done"]
+        entries = client.get("/tx-log").json()
+        assert len(entries) == n                                   # one record per frame
+        assert sorted(e["params"]["frame"] for e in entries) == list(range(1, n + 1))
+        assert all(e["mode"] == "js8" and e["params"]["text"] == "DA2JH: @ALLCALL  JS8 SEQUENCE TEST"
+                   and e["ended_at"] for e in entries)
+
+
+def test_js8_ptt_off_and_mode_change_cancel_without_keying(monkeypatch):
+    _fast_js8(monkeypatch, key_in_s=5.0)
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            _js8_tx_ready(ws)
+            ws.send_json({"request": "ptt_on"})
+            assert ws.receive_json()["event"] == "js8_armed"
+            assert backend.snapshot()["tx"]["js8_armed"] is True
+            ws.send_json({"request": "ptt_off"})
+            assert ws.receive_json() == {"event": "js8_cancelled", "reason": "ptt_off", "sent": 0, "of": 1}
+            ws.send_json({"request": "ptt_on"})
+            assert ws.receive_json()["event"] == "js8_armed"
+            ws.send_json({"request": "select_mode", "direction": "tx", "mode": "fm", "params": {}})
+            assert ws.receive_json() == {"event": "js8_cancelled", "reason": "mode_change", "sent": 0, "of": 1}
+            assert not backend.keyed and backend.snapshot()["tx"]["js8_armed"] is False
+        assert client.get("/tx-log").json() == []
+
+
+def test_js8_without_station_callsign_is_refused():
+    with make_client() as client:
+        login(client)
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            ws.send_json({"request": "connect", "direction": "tx", "device_type": "sim"})
+            ws.receive_json()
+            ws.send_json({"request": "select_mode", "direction": "tx", "mode": "js8", "params": {}})
+            mode = ws.receive_json()
+            assert mode["frames"] == 0 and "callsign" in mode["problem"]
+            ws.send_json({"request": "ptt_on"})
+            err = ws.receive_json()
+            assert err["event"] == "error" and "callsign" in err["message"]
+
+
+def test_closing_the_last_browser_cancels_an_armed_js8_message(monkeypatch):
+    from web_trx import session
+
+    _fast_js8(monkeypatch, key_in_s=5.0)
+    monkeypatch.setattr(session, "NO_OPERATOR_GRACE_S", 5.0)
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            _js8_tx_ready(ws)
+            ws.send_json({"request": "ptt_on"})
+            assert ws.receive_json()["event"] == "js8_armed"
+        assert _wait_until(lambda: not backend.snapshot()["tx"]["js8_armed"], timeout=0.5)
+        assert not backend.keyed
+
+
+def test_js8_sim_loopback_reaches_the_browser_as_a_message():
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            backend.station = {"call": "DA2JH", "locator": "JO43"}
+            from web_trx import js8_series
+
+            frames, text = js8_series.build_message(backend.station, {"kind": "snr_query", "to": "DL1ABC",
+                                                                      "text": "", "report_db": -10,
+                                                                      "submode": "turbo"})
+            t0 = 1790600102.0
+            backend._js8_sent = [(t0, 2, *frames[0])]
+
+            async def deliver():
+                for name, fields in backend.fake_js8_period(t0, 2):
+                    await backend._emit_event(name, fields)
+
+            client.portal.call(deliver)
+            events = []
+            while not any(e["event"] == "js8_message" and e["sender"] == "DA2JH" for e in events):
+                events.append(ws.receive_json())
+            frames_ev = next(e for e in events if e["event"] == "js8_frames")
+            assert frames_ev["speed"] == "turbo" and any(d["frame"] == frames[0][0] for d in frames_ev["decodes"])
+            msg = next(e for e in events if e["event"] == "js8_message" and e["sender"] == "DA2JH")
+            assert msg["text"] == text and msg["to"] == "DL1ABC" and msg["complete"]
+

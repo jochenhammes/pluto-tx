@@ -175,3 +175,24 @@ async def test_ft8_loopback_shows_our_transmission_in_its_own_slot():
     assert "CQ DA2JH JO43" not in before
     assert "CQ DA2JH JO43" in during
     assert b._ft8_sent == []
+
+
+async def test_js8_neighbour_and_loopback_are_assembled_like_the_real_backend():
+    b, _events, _spectrum, _audio = make_backend()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    from web_trx import js8_series
+
+    frames, text = js8_series.build_message(b.station, {"kind": "allcall", "text": "HELLO", "to": "",
+                                                        "report_db": -10, "submode": "normal"})
+    t0 = 1790600100.0                                     # n % 4 == 0 for 15 s periods? whatever: loopback check
+    b._js8_sent = [(t0 + 15 * i, 0, f, fl) for i, (f, fl) in enumerate(frames)]
+    events = []
+    for i in range(len(frames)):
+        events += b.fake_js8_period(t0 + 15 * i, 0)
+    names = [n for n, _ in events]
+    assert names.count("js8_frames") == len(frames)
+    mine = [f for n, f in events if n == "js8_message" and f["sender"] == "DA2JH" and f["closed"]]
+    assert [m["text"] for m in mine] == [text] and mine[0]["complete"]
+    assert b._js8_sent == []
+    other = [f for n, f in events if n == "js8_message" and f["sender"] == "DL1ABC"]
+    assert other and all(m["text"].startswith("DL1ABC: ") for m in other)
