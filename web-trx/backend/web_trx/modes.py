@@ -60,6 +60,24 @@ FT8_TONE_DEFAULT_HZ = 1500.0
 FT8_SLOTS = ("any", "even", "odd")  # next slot / 1st :00 :30 / 2nd :15 :45
 FT8_MAX_REPEATS = 20  # same as ft8_series.FT8_MAX_REPEATS
 
+# JS8 (pluto_tx/js8*.py, pluto-tx docs/js8/SPEC.md). A message is built by
+# pluto-tx' js8_message (exactly as JS8Call builds it) from the station data
+# and these parameters; its frames go out in consecutive periods of the speed.
+JS8_SUBMODES = ("normal", "fast", "turbo", "slow")
+JS8_RX_SUBMODES = (*JS8_SUBMODES, "all")
+JS8_SUBMODE_DEFAULT = "normal"
+JS8_PERIOD_S = {"normal": 15.0, "fast": 10.0, "turbo": 6.0, "slow": 30.0}
+JS8_BANDWIDTH_HZ = {"normal": 50.0, "fast": 80.0, "turbo": 160.0, "slow": 25.0}
+JS8_DECODERS = ("auto", "js8", "own")  # js8 = JS8Call's own decoder (tools/js8ref), own = numpy
+JS8_DECODER_DEFAULT = "auto"
+JS8_BAND_HZ = (100.0, 3100.0)
+JS8_MESSAGE_KINDS = ("cq", "hb", "allcall", "directed", "snr_query", "snr_reply", "ack", "free")
+JS8_TEXT_MAX = 400          # the frame limit below is the real bound
+JS8_REPORT_RANGE_DB = (-30, 30)
+JS8_TONE_RANGE_HZ = (200.0, 3000.0)  # the whole signal (offset .. offset + bandwidth) stays inside
+JS8_TONE_DEFAULT_HZ = 1500.0
+JS8_MAX_FRAMES = 20
+
 
 def client_options() -> dict:
     """Choice lists the frontend builds its dropdowns from (sent in the
@@ -84,6 +102,14 @@ def client_options() -> dict:
             "report_range_db": list(FT8_REPORT_RANGE_DB), "tone_range_hz": list(FT8_TONE_RANGE_HZ),
             "tone_default_hz": FT8_TONE_DEFAULT_HZ, "slots": list(FT8_SLOTS), "max_repeats": FT8_MAX_REPEATS,
         },
+        "js8": {
+            "submodes": list(JS8_SUBMODES), "rx_submodes": list(JS8_RX_SUBMODES),
+            "submode_default": JS8_SUBMODE_DEFAULT, "period_s": dict(JS8_PERIOD_S),
+            "bandwidth_hz": dict(JS8_BANDWIDTH_HZ), "decoders": list(JS8_DECODERS),
+            "band_hz": list(JS8_BAND_HZ), "message_kinds": list(JS8_MESSAGE_KINDS), "text_max": JS8_TEXT_MAX,
+            "report_range_db": list(JS8_REPORT_RANGE_DB), "tone_range_hz": list(JS8_TONE_RANGE_HZ),
+            "tone_default_hz": JS8_TONE_DEFAULT_HZ, "max_frames": JS8_MAX_FRAMES,
+        },
         "digitext": {
             "layouts": list(DIGITEXT_LAYOUTS), "zoom_range": list(DIGITEXT_ZOOM_RANGE),
             "min_freq_hz_range": [DIGITEXT_MIN_FREQ_HZ_FLOOR, DIGITEXT_MIN_FREQ_HZ],
@@ -107,6 +133,17 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
         return {"decoder": decoder}
     if mode == "ft8" and direction == "tx":
         return _ft8_tx(params)
+    if mode == "js8" and direction == "rx":
+        _reject_unknown(params, {"submode", "decoder"}, "js8")
+        submode = params.get("submode", JS8_SUBMODE_DEFAULT)
+        if submode not in JS8_RX_SUBMODES:
+            raise ValueError(f"js8: submode must be one of {JS8_RX_SUBMODES}")
+        decoder = params.get("decoder", JS8_DECODER_DEFAULT)
+        if decoder not in JS8_DECODERS:
+            raise ValueError(f"js8: decoder must be one of {JS8_DECODERS}")
+        return {"submode": submode, "decoder": decoder}
+    if mode == "js8" and direction == "tx":
+        return _js8_tx(params)
     if mode == "rade" and direction == "tx":
         _reject_unknown(params, {"eoo"}, "rade")
         return {"eoo": _bool(params, "eoo", False)}
@@ -159,6 +196,35 @@ def _ft8_tx(params: dict) -> dict:
         "free_text": _text(params, FT8_FREE_TEXT_MAX, "ft8", key="free_text").upper(),
         "offset_hz": offset, "slot": slot, "drift_comp": _bool(params, "drift_comp", True),
         "repeat_count": repeats,
+    }
+
+
+def _js8_tx(params: dict) -> dict:
+    _reject_unknown(params, {"kind", "to", "text", "report_db", "submode", "offset_hz", "drift_comp"}, "js8")
+    kind = params.get("kind", "cq")
+    if kind not in JS8_MESSAGE_KINDS:
+        raise ValueError(f"js8: kind must be one of {JS8_MESSAGE_KINDS}")
+    to = params.get("to", "")
+    if not isinstance(to, str):
+        raise ValueError("js8: to must be a string")  # noqa: TRY004 -- one error type for all bad client input
+    to = to.strip().upper()
+    if to and not to.startswith("@"):
+        station.normalize(to, "")  # same callsign rule as the station's own; groups (@...) pass
+    report = params.get("report_db", -10)
+    lo, hi = JS8_REPORT_RANGE_DB
+    if not isinstance(report, int) or isinstance(report, bool) or not lo <= report <= hi:
+        raise ValueError(f"js8: report_db must be an integer {lo}..{hi}")
+    submode = params.get("submode", JS8_SUBMODE_DEFAULT)
+    if submode not in JS8_SUBMODES:
+        raise ValueError(f"js8: submode must be one of {JS8_SUBMODES}")
+    offset = _number(params, "offset_hz", JS8_TONE_DEFAULT_HZ, "js8")
+    lo_hz, hi_hz = JS8_TONE_RANGE_HZ
+    if not (lo_hz <= offset and offset + JS8_BANDWIDTH_HZ[submode] <= hi_hz):
+        raise ValueError(f"js8: offset_hz must keep the {JS8_BANDWIDTH_HZ[submode]:g} Hz wide signal inside "
+                         f"{lo_hz:g}..{hi_hz:g} Hz")
+    return {
+        "kind": kind, "to": to, "text": _text(params, JS8_TEXT_MAX, "js8"), "report_db": report,
+        "submode": submode, "offset_hz": offset, "drift_comp": _bool(params, "drift_comp", True),
     }
 
 

@@ -186,3 +186,53 @@ def test_ft8_tx_tables_match_pluto_tx():
     assert modes.FT8_TONE_RANGE_HZ == tuple(config.FT8_TONE_RANGE_HZ)
     assert modes.FT8_TONE_DEFAULT_HZ == config.FT8_DEFAULT_TONE_HZ
     assert modes.FT8_MAX_REPEATS == ft8_series.FT8_MAX_REPEATS
+
+
+def test_js8_rx_choices():
+    assert modes.normalize_params("rx", "js8", {}) == {"submode": "normal", "decoder": "auto"}
+    assert modes.normalize_params("rx", "js8", {"submode": "all", "decoder": "own"}) == {"submode": "all",
+                                                                                           "decoder": "own"}
+    for bad in ({"submode": "ludicrous"}, {"decoder": "wsjtx"}, {"offset_hz": 1500}):
+        with pytest.raises(ValueError):
+            modes.normalize_params("rx", "js8", bad)
+
+
+def test_js8_tx_defaults_and_validation():
+    assert modes.normalize_params("tx", "js8", {}) == {
+        "kind": "cq", "to": "", "text": "", "report_db": -10, "submode": "normal", "offset_hz": 1500.0,
+        "drift_comp": True}
+    out = modes.normalize_params("tx", "js8", {"kind": "directed", "to": " dl1abc ", "text": "hi", "submode": "turbo",
+                                               "offset_hz": 2840})
+    assert (out["to"], out["submode"], out["offset_hz"]) == ("DL1ABC", "turbo", 2840.0)
+    assert modes.normalize_params("tx", "js8", {"to": "@allcall"})["to"] == "@ALLCALL"
+    for bad in ({"kind": "relay"}, {"to": "not a call"}, {"report_db": 99}, {"submode": "ultra"},
+                {"offset_hz": 2900, "submode": "turbo"}, {"offset_hz": 100}, {"text": "x" * 401},
+                {"drift_comp": "yes"}, {"unknown": 1}):
+        with pytest.raises(ValueError):
+            modes.normalize_params("tx", "js8", bad)
+
+
+def test_js8_tables_match_pluto_tx():
+    import ast
+    import re
+
+    from web_trx import js8_series, pluto_path
+
+    pluto_path.ensure_importable()
+    from pluto_advanced_rx import config as rx_config
+    from pluto_tx import config, js8, js8_message, js8_phy
+
+    assert modes.JS8_MESSAGE_KINDS == tuple(kind for kind, _label in js8_message.MESSAGE_KINDS)
+    assert modes.JS8_SUBMODES == tuple(js8.SPEEDS)
+    for name, sm in js8.SPEEDS.items():
+        info = js8_phy.submode_info(sm)
+        assert modes.JS8_PERIOD_S[name] == info["period_s"]
+        assert modes.JS8_BANDWIDTH_HZ[name] == info["bandwidth_hz"]
+    assert modes.JS8_TONE_RANGE_HZ == tuple(config.JS8_TONE_RANGE_HZ)
+    assert modes.JS8_TONE_DEFAULT_HZ == config.JS8_DEFAULT_TONE_HZ
+    assert modes.JS8_MAX_FRAMES == js8.MAX_FRAMES == js8_series.JS8_MAX_FRAMES
+    assert modes.JS8_DECODER_DEFAULT == rx_config.JS8_DECODER_BACKEND
+    assert modes.JS8_BAND_HZ == tuple(rx_config.JS8_BAND_HZ)
+    cli = (PLUTO_TX_CONFIG.parents[1] / "pluto_cli" / "rx.py").read_text()
+    choices = re.search(r'"--js8-decoder", choices=(\(.*?\))', cli).group(1)
+    assert ast.literal_eval(choices) == modes.JS8_DECODERS
