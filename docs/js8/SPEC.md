@@ -267,6 +267,19 @@ Quelle: `JS8_jsc/jsc.cpp`, Tabellen `jsc_map.cpp`, `jsc_list.cpp`.
 
 ### 2.4 Text → Rahmen (`Varicode::buildMessageFrames`, `varicode.cpp:2037-2331`)
 
+**Eingabe:** Die Sendebox von JS8Call wandelt jeden Text in Großbuchstaben
+um und filtert ihn (`JS8_Main/TransmitTextEdit.cpp:127, 258-285`). Erhalten
+bleiben nur:
+- Latin-1 32–127,
+- 0x10 und 0x1A,
+- die erweiterten JSC-Einzelzeichen (`Varicode::extendedChars()`), darunter
+  auch `\n`.
+
+`buildMessageFrames` sieht deshalb nie Kleinbuchstaben. Mit Kleinbuchstaben
+**hängt es in einer Endlosschleife**; das ist mit `js8ref` nachgeprüft.
+pluto-tx übernimmt den Filter (`js8_message.normalize_text`). Der Port
+bricht an dieser Stelle mit einer klaren Meldung ab, statt zu hängen.
+
 Pro Zeile wiederholt, bis der Text aufgebraucht ist:
 
 1. Das eigene Rufzeichen am Zeilenanfang wird entfernt (`MYCALL:` bzw.
@@ -394,11 +407,17 @@ aus Rahmen und Flags. Seine Ausgabe steht in den Referenzvektoren
 
 ## 6. Referenzmaterial in pluto-tx
 
-- `tests/data/js8/cases.tsv` → `vectors.jsonl`: 68 Fälle.
-  - Das sind 17 Fälle × 4 Speeds (CQ, HB, `@ALLCALL` mit 60 Zeichen,
-    gerichtet, `SNR?`, SNR-Antwort, ACK, `GRID?`, Freitext mit und ohne
-    Kennung, Compound-Absender und -Empfänger, `MSG` mit Prüfsumme,
-    `forceData`, Satzzeichen).
+- `tests/data/js8/cases.tsv` → `vectors.jsonl`: 176 Fälle.
+  - Das sind 44 Fälle × 4 Speeds, u. a.:
+    - CQ-Varianten und Heartbeat, auch ohne Grid,
+    - `@ALLCALL` mit 60 Zeichen und ein langer Text,
+    - gerichtete Nachrichten und Kommandos (`SNR?`, SNR ±, `HEARTBEAT SNR`,
+      ACK, `GRID?`, `GRID`, `INFO`, `STATUS?`, `QUERY MSGS`, `AGN?`,
+      `DIT DIT`, `73`, `?`, Relay `>`, `MSG` mit Prüfsumme),
+    - echte Compound-Rufzeichen (`/MM`, `EA8/`, `/QRP`) als Absender
+      und/oder Empfänger, Gruppen (`@JS8NET`, `@HB`),
+    - Freitext mit und ohne Kennung, `forceData`, Satzzeichen, Umlaute,
+      doppelte Leerzeichen.
   - Pro Fall festgehalten: Text → Rahmen → Flags → 79 Töne → Anzeige.
   - Erzeugt mit `js8ref vectors`.
   - Das Grid `JO31` und das Gegenrufzeichen `DL1ABC` sind nur

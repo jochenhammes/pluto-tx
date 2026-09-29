@@ -115,7 +115,7 @@ class ReferenceDataTests(unittest.TestCase):
     def test_vectors_file(self):
         with open(os.path.join(DATA, "vectors.jsonl")) as f:
             cases = [json.loads(line) for line in f]
-        self.assertEqual(len(cases), 68)
+        self.assertEqual(len(cases), 176)
         for c in cases:
             self.assertIn(c["submode"], (0, 1, 2, 4))
             self.assertTrue(c["frames"])
