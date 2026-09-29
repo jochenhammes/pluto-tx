@@ -20,6 +20,7 @@ from . import filebroadcast
 from . import pocsag
 from . import pocsag_codec
 from . import ft8
+from . import js8, js8_message, js8_phy
 from . import freq_correction
 from .devices import pluto as pluto_device
 from .flowgraph import (
@@ -93,7 +94,8 @@ class MainWindow(QtWidgets.QMainWindow):
             mode if mode not in (PlutoTxFlowgraph.MODE_FILEBROADCAST, PlutoTxFlowgraph.MODE_DIGITEXT,
                                   PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
                                   PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE,
-                                  PlutoTxFlowgraph.MODE_POCSAG, PlutoTxFlowgraph.MODE_FT8)
+                                  PlutoTxFlowgraph.MODE_POCSAG, PlutoTxFlowgraph.MODE_FT8,
+                                  PlutoTxFlowgraph.MODE_JS8)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -120,6 +122,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ft8_tick_timer = QtCore.QTimer(self)
         self._ft8_tick_timer.setInterval(500)
         self._ft8_tick_timer.timeout.connect(self._ft8_tick)
+        # JS8: a PTT press arms a whole message (its frames in consecutive periods); every frame is keyed
+        # and unkeyed on its own by timers. Bumping the epoch makes all pending frame timers stale.
+        self._js8_epoch = 0
+        self._js8_active = False
+        self._js8_plan = []
+        self._js8_next = 0
+        self._js8_tick_timer = QtCore.QTimer(self)
+        self._js8_tick_timer.setInterval(500)
+        self._js8_tick_timer.timeout.connect(self._js8_tick)
         # Repeat series state, see _repeat_begin()/_finish_one_shot().
         self._repeat_active = False
         self._repeat_total = 1
@@ -623,6 +634,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_FT8))
             ft8_item.setEnabled(False)
             ft8_item.setToolTip("ft8_lib is not built -- run install-ft8.sh")
+        self.digimode_combo.addItem("JS8 (JS8Call)", PlutoTxFlowgraph.MODE_JS8)
         self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
         self.digimode_combo.addItem("MeshCore (LoRa)", PlutoTxFlowgraph.MODE_MESHCORE)
         if not MESHCORE_AVAILABLE:
@@ -1048,6 +1060,97 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ft8_clock_timer.timeout.connect(self._update_ft8_clock)
         self._ft8_clock_timer.start()
 
+        # --- JS8 controls (docs/js8/SPEC.md). The message is built exactly as JS8Call builds it
+        # (js8_message.build_frames); its frames go out in consecutive periods of the chosen speed, each
+        # keyed on its own (see _js8_arm()). No automatic replies.
+        js8_group = QtWidgets.QWidget()
+        js8_layout = QtWidgets.QVBoxLayout(js8_group)
+        js8_layout.setContentsMargins(0, 0, 0, 0)
+        js8_row1 = QtWidgets.QHBoxLayout()
+        js8_row1.addWidget(QtWidgets.QLabel("My call:"))
+        self.js8_mycall_edit = QtWidgets.QLineEdit(self._ft8_setting("my_call"))
+        self.js8_mycall_edit.setMaxLength(11)
+        self.js8_mycall_edit.setFixedWidth(100)
+        self.js8_mycall_edit.setToolTip("Your callsign -- the same setting as in the FT8 group")
+        js8_row1.addWidget(self.js8_mycall_edit)
+        js8_row1.addWidget(QtWidgets.QLabel("Locator:"))
+        self.js8_grid_edit = QtWidgets.QLineEdit(self._ft8_setting("locator"))
+        self.js8_grid_edit.setMaxLength(6)
+        self.js8_grid_edit.setFixedWidth(70)
+        self.js8_grid_edit.setToolTip("Maidenhead locator; CQ and heartbeat carry the first 4 characters")
+        js8_row1.addWidget(self.js8_grid_edit)
+        js8_row1.addWidget(QtWidgets.QLabel("To:"))
+        self.js8_to_edit = QtWidgets.QLineEdit()
+        self.js8_to_edit.setMaxLength(12)
+        self.js8_to_edit.setFixedWidth(110)
+        self.js8_to_edit.setPlaceholderText("CALL")
+        self.js8_to_edit.setToolTip("The station you address (directed text, SNR?, SNR report, ACK); the RX "
+                                    "app copies a callsign to the clipboard on double-click")
+        js8_row1.addWidget(self.js8_to_edit)
+        js8_row1.addWidget(QtWidgets.QLabel("Report:"))
+        self.js8_snr_spin = QtWidgets.QSpinBox()
+        self.js8_snr_spin.setRange(-30, 30)
+        self.js8_snr_spin.setValue(-10)
+        self.js8_snr_spin.setSuffix(" dB")
+        js8_row1.addWidget(self.js8_snr_spin)
+        js8_row1.addStretch(1)
+        js8_layout.addLayout(js8_row1)
+        js8_row2 = QtWidgets.QHBoxLayout()
+        js8_row2.addWidget(QtWidgets.QLabel("Send:"))
+        self.js8_kind_combo = QtWidgets.QComboBox()
+        for kind, label in js8_message.MESSAGE_KINDS:
+            self.js8_kind_combo.addItem(label, kind)
+        js8_row2.addWidget(self.js8_kind_combo)
+        self.js8_text_edit = QtWidgets.QLineEdit()
+        self.js8_text_edit.setMinimumWidth(300)
+        self.js8_text_edit.setStyleSheet("font-size: 13pt; font-family: monospace;")
+        self.js8_text_edit.setPlaceholderText("text (@ALLCALL, to a station, free)")
+        js8_row2.addWidget(self.js8_text_edit, 1)
+        js8_layout.addLayout(js8_row2)
+        js8_row3 = QtWidgets.QHBoxLayout()
+        js8_row3.addWidget(QtWidgets.QLabel("Speed:"))
+        self.js8_speed_combo = QtWidgets.QComboBox()
+        for name, sm in (("Normal (15 s)", js8_phy.NORMAL), ("Fast (10 s)", js8_phy.FAST),
+                         ("Turbo (6 s)", js8_phy.TURBO), ("Slow (30 s)", js8_phy.SLOW)):
+            self.js8_speed_combo.addItem(name, sm)
+        js8_row3.addWidget(self.js8_speed_combo)
+        js8_row3.addWidget(QtWidgets.QLabel("Audio offset:"))
+        self.js8_offset_spin = QtWidgets.QSpinBox()
+        self.js8_offset_spin.setRange(int(config.JS8_TONE_RANGE_HZ[0]), int(config.JS8_TONE_RANGE_HZ[1]) - 160)
+        self.js8_offset_spin.setSingleStep(10)
+        self.js8_offset_spin.setValue(int(config.JS8_DEFAULT_TONE_HZ))
+        self.js8_offset_spin.setSuffix(" Hz")
+        self.js8_offset_spin.setToolTip("Audio frequency of the lowest tone above the USB dial frequency "
+                                        "(heartbeats: 500-1000 Hz by convention)")
+        js8_row3.addWidget(self.js8_offset_spin)
+        self.js8_drift_check = QtWidgets.QCheckBox("Drift comp.")
+        self.js8_drift_check.setChecked(True)
+        self.js8_drift_check.setToolTip("Pre-compensate the device's oscillator drift during each frame "
+                                        "(same measured model as FT8)")
+        js8_row3.addWidget(self.js8_drift_check)
+        self.js8_clock_label = QtWidgets.QLabel("")
+        self.js8_clock_label.setStyleSheet("font-family: monospace;")
+        js8_row3.addWidget(self.js8_clock_label)
+        js8_row3.addStretch(1)
+        js8_layout.addLayout(js8_row3)
+        self.js8_preview_label = QtWidgets.QLabel("")
+        self.js8_preview_label.setWordWrap(True)
+        self.js8_preview_label.setStyleSheet("font-family: monospace;")
+        js8_layout.addWidget(self.js8_preview_label)
+        self.js8_sent_log = QtWidgets.QTextEdit()
+        self.js8_sent_log.setReadOnly(True)
+        self.js8_sent_log.setMaximumHeight(120)
+        self.js8_sent_log.setToolTip("Local echo of the JS8 frames THIS station has sent (UTC).")
+        js8_layout.addWidget(self.js8_sent_log)
+        digimodes_tab_layout.addWidget(js8_group)
+        self.js8_group_widget = js8_group
+        for signal_ in (self.js8_mycall_edit.textChanged, self.js8_grid_edit.textChanged,
+                        self.js8_to_edit.textChanged, self.js8_snr_spin.valueChanged,
+                        self.js8_kind_combo.currentIndexChanged, self.js8_text_edit.textChanged,
+                        self.js8_speed_combo.currentIndexChanged, self.js8_offset_spin.valueChanged):
+            signal_.connect(self._update_js8_preview)
+        self._update_js8_preview()
+
         # --- Meshtastic (LoRa) controls -- own group widget, same pattern as
         # rtty_group above. One-shot: PTT builds one real Meshtastic packet from
         # the fields below, sends it, and auto-unkeys after its airtime.
@@ -1258,6 +1361,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_pocsag_info()
         self._on_ft8_fields_changed()
         self._update_ft8_controls_enabled()
+        self._update_js8_controls_enabled()
         self._update_meshcore_controls_enabled()
         self._update_meshcore_regulatory_label()
         self._update_meshtastic_controls_enabled()
@@ -1515,7 +1619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31,
                                     PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
                                     PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_FT8,
-                                    PlutoTxFlowgraph.MODE_MESHTASTIC):
+                                    PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_JS8):
             self.mode_tab_widget.setCurrentIndex(1)
         # Connected AFTER the initial sync above (and after every widget it
         # touches exists) -- bidirectional counterpart to _on_mode_changed()/
@@ -1603,6 +1707,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_pocsag_controls_enabled()
         self._ft8_connected = enabled
         self._update_ft8_controls_enabled()
+        self._update_js8_controls_enabled()
         self._meshcore_connected = enabled
         self._update_meshcore_controls_enabled()
         self._filebroadcast_connected = enabled
@@ -2092,6 +2197,178 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tb is None or not self.tb.keyed:
             self._set_indicator_idle()
 
+    # --- JS8 -------------------------------------------------------------
+    def _update_js8_controls_enabled(self):
+        is_js8 = self._current_mode == PlutoTxFlowgraph.MODE_JS8
+        self.js8_group_widget.setVisible(is_js8)
+        if not is_js8 and self._js8_active:
+            self._js8_cancel_sequence()
+        connected = getattr(self, "_js8_connected", True)
+        for w in (self.js8_mycall_edit, self.js8_grid_edit, self.js8_to_edit, self.js8_snr_spin,
+                  self.js8_kind_combo, self.js8_text_edit, self.js8_speed_combo, self.js8_offset_spin,
+                  self.js8_drift_check):
+            w.setEnabled(connected and not self._js8_active)
+        self.js8_drift_check.setVisible(self.device_type_combo.currentData() in config.FT8_DRIFT_MODEL)
+
+    def _js8_build(self):
+        """-> (frames, submode, text) from the fields, or raises ValueError with a readable reason."""
+        submode = self.js8_speed_combo.currentData()
+        my = self.js8_mycall_edit.text().strip().upper()
+        if not my:
+            raise ValueError("enter your callsign")
+        text = js8_message.compose(self.js8_kind_combo.currentData(), my, self.js8_grid_edit.text(),
+                                   self.js8_to_edit.text(), self.js8_text_edit.text(), self.js8_snr_spin.value())
+        if not text:
+            raise ValueError("enter the station to address (To:) and/or a text")
+        frames = js8_message.build_frames(my, self.js8_grid_edit.text(), text, submode)
+        if len(frames) > js8.MAX_FRAMES:
+            raise ValueError(f"message too long ({len(frames)} frames, max {js8.MAX_FRAMES})")
+        return frames, submode, text
+
+    def _update_js8_preview(self, *_):
+        for key, edit in (("my_call", self.js8_mycall_edit), ("locator", self.js8_grid_edit)):
+            try:
+                QtCore.QSettings("pluto-tx", "ft8").setValue(key, edit.text().strip().upper())
+            except Exception:
+                pass
+        try:
+            frames, submode, _text = self._js8_build()
+        except ValueError as e:
+            self.js8_preview_label.setText(f"Not sendable: {e}")
+            return
+        info = js8_phy.submode_info(submode)
+        shown = js8_message.frames_text(frames, submode)
+        head = js8_message.decode_frame(*frames[0], submode)["message"].strip()
+        self.js8_preview_label.setText(
+            f"{len(frames)} frame{'s' if len(frames) != 1 else ''} ~ {js8.transmission_time_s(len(frames), submode):.0f} s "
+            f"({info['bandwidth_hz']:.0f} Hz wide)   header: {head}\nReceivers show: {shown.strip()}")
+
+    def _js8_ptt_allowed(self):
+        """Pre-flight for a JS8 PTT press (True outside JS8 mode): refuses BEFORE any RF action."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_JS8:
+            return True
+        try:
+            frames, submode, _text = self._js8_build()
+        except ValueError as e:
+            self.status_label.setText(f"Not sent: {e}")
+            return False
+        self.tb.set_js8_message(frames, submode, float(self.js8_offset_spin.value()))
+        problem = self.tb.js8_problem()
+        if problem:
+            self.status_label.setText(f"Not sent: {problem}")
+        return problem is None
+
+    def _js8_arm(self):
+        """Arm the message: the first frame is keyed JS8_KEY_EARLY_S before its period (one source swap in
+        the flowgraph), every later one JS8_REKEY_EARLY_S before its own; each is unkeyed after its hold
+        time (plus a watchdog). Stopping, E-STOP, a mode change or a disconnect cancel the rest."""
+        frames, submode, _text = self._js8_build()
+        self.tb.set_js8_message(frames, submode, float(self.js8_offset_spin.value()))
+        self.tb.ft8_drift_comp_enabled = self.js8_drift_check.isChecked()
+        self.tb.prepare_js8()
+        self._js8_plan = js8.plan_frames(time.time(), submode, len(frames), key_early_s=config.JS8_KEY_EARLY_S,
+                                         late_max_s=config.JS8_LATE_START_MAX_S,
+                                         rekey_early_s=config.JS8_REKEY_EARLY_S)
+        self.tb.js8_start_at = self._js8_plan[0][1]
+        self._js8_epoch += 1
+        self._js8_active = True
+        self._js8_next = 0
+        self._update_js8_controls_enabled()
+        self._js8_schedule(0, self.tb, self._js8_epoch)
+        self._js8_tick_timer.start()
+        self.tx_indicator.setText("JS8 WAIT")
+        self.tx_indicator.setStyleSheet(
+            "background-color: #e67e22; color: white; font-size: 18pt; font-weight: bold;")
+        self._js8_tick()
+
+    def _js8_schedule(self, i, token, epoch):
+        key_at = self._js8_plan[i][0]
+        QtCore.QTimer.singleShot(max(0, int((key_at - time.time()) * 1000)),
+                                 lambda: self._js8_fire(i, token, epoch))
+
+    def _js8_stale(self, token, epoch):
+        return self.tb is not token or epoch != self._js8_epoch or not self._js8_active
+
+    def _js8_fire(self, i, token, epoch):
+        if self._js8_stale(token, epoch) or self._js8_next != i:
+            return
+        if not self._armed:
+            self._js8_cancel_sequence()
+            return
+        try:
+            self.tb.key_ptt()
+        except Exception as e:
+            self.status_label.setText(f"JS8 not sent: {e}")
+            self._js8_cancel_sequence()
+            self._reset_digitext_ptt_visual()
+            self._set_indicator_idle()
+            return
+        self._set_indicator_on_air()
+        self._js8_tick()
+        frame, flags = self.tb.js8_frames[i]
+        start = self._js8_plan[i][1]
+        slot = ft8.current_slot_start(start, js8_phy.SUBMODES[self.tb.js8_submode]["period_s"])
+        self.js8_sent_log.append(
+            f"{time.strftime('%H%M%S', time.gmtime(slot))}  {self.js8_offset_spin.value():4d} Hz  "
+            f"{i + 1}/{len(self._js8_plan)}  {js8_message.decode_frame(frame, flags, self.tb.js8_submode)['message']}")
+        hold_s = self.tb.js8_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._js8_frame_done(i, token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.JS8_AUTO_UNKEY_WATCHDOG_S) * 1000),
+                                 lambda: self._js8_frame_done(i, token, epoch))
+
+    def _js8_frame_done(self, i, token, epoch):
+        if self._js8_stale(token, epoch) or self._js8_next != i:
+            return
+        self._js8_next = i + 1
+        if self.tb.keyed:
+            self.tb.unkey_ptt()                     # the regular end of frame i
+        if self._js8_next < len(self._js8_plan):
+            self.tx_indicator.setText("JS8 WAIT")
+            self.tx_indicator.setStyleSheet(
+                "background-color: #e67e22; color: white; font-size: 18pt; font-weight: bold;")
+            self._js8_schedule(self._js8_next, token, epoch)
+            self._js8_tick()
+            return
+        n = len(self._js8_plan)
+        self._js8_active = False
+        self._js8_tick_timer.stop()
+        self._update_js8_controls_enabled()
+        self._reset_digitext_ptt_visual()
+        self._set_indicator_idle()
+        self.status_label.setText(f"JS8 message sent ({n} frame{'s' if n != 1 else ''}).")
+
+    def _js8_cancel_sequence(self):
+        """Drop the rest of a running JS8 message (no-op if none). The flowgraph never sends another
+        frame of it (PlutoTxFlowgraph.js8_cancel())."""
+        if not self._js8_active:
+            return
+        self._js8_active = False
+        self._js8_epoch += 1
+        self._js8_tick_timer.stop()
+        if self.tb is not None:
+            self.tb.js8_cancel()
+        self._update_js8_controls_enabled()
+        if self.tb is None or not self.tb.keyed:
+            self._set_indicator_idle()
+
+    def _js8_tick(self):
+        if not self._js8_active:
+            self._js8_tick_timer.stop()
+            return
+        n = len(self._js8_plan)
+        i = min(self._js8_next, n - 1)
+        start = self._js8_plan[i][1]
+        if self.tb is not None and self.tb.keyed:
+            self.ptt_button.setText(f"JS8 frame {i + 1}/{n} on air (click to stop)")
+        else:
+            wait = max(0, int(round(start - time.time())))
+            at = time.strftime("%H:%M:%S", time.gmtime(start))
+            self.ptt_button.setText(f"JS8 frame {i + 1}/{n} at {at} UTC, in {wait} s (click to cancel)")
+        now = time.time()
+        period = js8_phy.SUBMODES[self.js8_speed_combo.currentData()]["period_s"]
+        self.js8_clock_label.setText(f"UTC {time.strftime('%H:%M:%S', time.gmtime(now))}  "
+                                     f"period +{now % period:4.1f} s")
+
     def _update_rtty_controls_enabled(self):
         # Structural mirror of _update_psk31_controls_enabled() above.
         is_rtty_mode = self._current_mode == PlutoTxFlowgraph.MODE_RTTY
@@ -2397,7 +2674,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _AUDIO_ONLY_CAPABLE_MODES = (
         PlutoTxFlowgraph.MODE_FM, PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
         PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
-        PlutoTxFlowgraph.MODE_FT8,
+        PlutoTxFlowgraph.MODE_FT8, PlutoTxFlowgraph.MODE_JS8,
     )
     _LORA_MODES = (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE)
 
@@ -2562,6 +2839,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
         self._update_ft8_controls_enabled()
+        self._update_js8_controls_enabled()
         self._update_baseband_controls_enabled()
         self._update_subtone_controls_enabled()
 
@@ -2917,6 +3195,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._repeat_begin()
             if self._ft8_waiting:
                 self._ft8_tick()
+            if self._js8_active:
+                self._js8_tick()
         else:
             self._repeat_cancel("Repeat stopped.")
             self.ptt_button.setText("PTT (click to send)")
@@ -2942,19 +3222,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._ft8_waiting:  # let go before the slot came: nothing is sent
             self._ft8_cancel_wait()
             return
+        if self._js8_active:  # let go during a JS8 message: the rest is not sent
+            self._release_ptt()
+            return
         if self.tb is None or not self.tb.keyed:
             return
         self._release_ptt()
 
     def _all_ptt_allowed(self):
         return (self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._meshcore_ptt_allowed()
-                and self._ft8_ptt_allowed())
+                and self._ft8_ptt_allowed() and self._js8_ptt_allowed())
 
     def _key_and_schedule(self):
         """Key the transmitter and start the per-mode auto-unkey timers/logs (one-shot modes).
         FT8 instead arms the transmission for its next UTC slot (see _ft8_arm())."""
         if self._current_mode == PlutoTxFlowgraph.MODE_FT8:
             self._ft8_arm()
+            return
+        if self._current_mode == PlutoTxFlowgraph.MODE_JS8:
+            self._js8_arm()
             return
         self.tb.key_ptt()
         self._set_indicator_on_air()
@@ -3065,6 +3351,7 @@ class MainWindow(QtWidgets.QMainWindow):
         NOT routed through here -- it calls tb.unkey_ptt() + force_safe_state()
         directly, an unconditional override of any pending M17 tail."""
         self._ft8_cancel_wait()
+        self._js8_cancel_sequence()
         if self.tb is None:
             return
         self.tb.unkey_ptt()
@@ -3490,6 +3777,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toggle button covers both directions instead of two separate ones."""
         if checked:
             self._repeat_cancel("E-STOP: repeat stopped.")
+            self._js8_cancel_sequence()
             self.tb.unkey_ptt()
             self.tb.device.force_safe_state()
             self._armed = False
