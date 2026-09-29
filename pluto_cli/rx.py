@@ -85,7 +85,7 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
@@ -105,6 +105,16 @@ def add_common_args(parser):
     )
     parser.add_argument(
         "--ft8-mygrid", default="", metavar="LOCATOR", help="Your locator (with --ft8-mycall)",
+    )
+    parser.add_argument(
+        "--js8-submode", choices=("normal", "fast", "turbo", "slow", "all"), default="normal",
+        help="JS8 speed(s) to decode with --digimode js8 (default: normal; all = the four at once, each "
+             "at its own period boundaries)",
+    )
+    parser.add_argument(
+        "--js8-decoder", choices=("auto", "js8", "own"), default=rx_config.JS8_DECODER_BACKEND,
+        help="JS8 decoder for --digimode js8: js8 = JS8Call's own (tools/js8ref, install-js8.sh), own = "
+             "the built-in numpy decoder, auto = js8 if built (default: auto)",
     )
     parser.add_argument(
         "--pocsag-charset", choices=("ascii", "de"), default="ascii",
@@ -274,6 +284,32 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                          freq_hz=round(d.freq_hz), text=d.text)
         emitter.emit("ft8_slot", utc=utc, decodes=len(decodes))
 
+    js8_assembler = None
+    if args.digimode == "js8":
+        from pluto_advanced_rx.js8_assembly import Js8Assembler
+        from pluto_tx import js8 as tx_js8
+        js8_assembler = Js8Assembler()
+
+    def emit_js8_message(msg):
+        emitter.emit("js8_message", utc=time.strftime("%H%M%S", time.gmtime(msg.first_slot)),
+                     speed=tx_js8.speed_info(msg.submode)["name"].lower(), freq_hz=round(msg.freq_hz),
+                     snr_db=round(msg.snr_db), sender=msg.sender, to=msg.to, text=msg.text,
+                     complete=msg.complete and not msg.incomplete)
+
+    def on_js8_decodes(slot_start, submode, decodes):
+        utc = time.strftime("%H%M%S", time.gmtime(slot_start))
+        speed = tx_js8.speed_info(submode)["name"].lower()
+        for d in decodes:
+            emitter.emit("js8_frame", utc=utc, speed=speed, snr_db=round(d.snr_db), dt_s=round(d.dt_s, 1),
+                         freq_hz=round(d.freq_hz), text=d.text, frame=d.frame, flags=d.flags)
+        for msg in js8_assembler.feed(slot_start, submode, decodes):
+            if msg.closed:
+                emit_js8_message(msg)
+        period = tx_js8.speed_info(submode)["period_s"]
+        for msg in js8_assembler.expire(slot_start + period):
+            emit_js8_message(msg)
+        emitter.emit("js8_slot", utc=utc, speed=speed, decodes=len(decodes))
+
     def on_m17_fields(fields):
         emitter.emit("m17_fields", **runtime.json_safe(fields))
 
@@ -331,6 +367,8 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             on_pocsag_message=on_pocsag_message,
             on_ft8_decodes=on_ft8_decodes, ft8_backend=args.ft8_decoder,
             ft8_my_call=args.ft8_mycall, ft8_my_grid=args.ft8_mygrid,
+            on_js8_decodes=on_js8_decodes if args.digimode == "js8" else None,
+            js8_submodes=_js8_submodes(args.js8_submode), js8_backend=args.js8_decoder,
             on_meshcore_packet=on_meshcore_packet, meshcore_preset_index=meshcore_preset_index,
             frequency_correction_ppm=args.freq_correction_ppm, direct_sampling=direct_sampling,
             **mode_kwargs,
@@ -340,6 +378,13 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     runtime.install_safety_handlers(tb, emitter)
     runtime.run_rx_session(tb, args, emitter, filebroadcast_state=filebroadcast_state)
     return 0
+
+
+def _js8_submodes(name):
+    from pluto_tx import js8 as tx_js8
+    if name == "all":
+        return tuple(sorted(tx_js8.SPEEDS.values()))
+    return (tx_js8.submode_from_name(name),)
 
 
 # --- mode subparsers -------------------------------------------------
