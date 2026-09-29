@@ -301,6 +301,14 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
   USB; Tabelle je 15-s-Slot mit CQ-Filter und Hervorhebung des eigenen
   Rufzeichens, Slot-Uhr nach Server-Zeit, NTP-Warnung. KW mit dem RTL-SDR
   über Direct Sampling (Q-Zweig, bis 28,8 MHz).
+- **FT8-Senden:** Nachricht wählen (CQ, Antwort, Rapport, R+Rapport, RRR,
+  RR73, 73, Freitext), Vorschau des gesendeten Texts, Offset, Slot
+  (nächster / :00/:30 / :15/:45), bis zu 20 Aussendungen. „Scharf schalten“
+  wartet auf den UTC-Slot (Zeitlage macht der Server), ein zweiter Klick,
+  NOTAUS, Trennen oder „kein Browser mehr da“ bricht jederzeit ab. Klick auf
+  einen Decode übernimmt das Rufzeichen und stellt die Gegenparität ein.
+  Jede Aussendung steht mit Text im TX-Log. Im Funkbetrieb noch ungetestet
+  (Phase F3 in [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
 - Stationsdaten (Rufzeichen, Locator) in der Kopfzeile, gespeichert; genutzt
   für FT8 und als M17-Vorbelegung. Startwert aus `WEB_TRX_STATION_CALL` /
   `WEB_TRX_STATION_LOCATOR` in `web-trx.env`.
@@ -331,7 +339,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 **Offen**
 - Latenzmessung über einen echten VPN-Link, Opus über langsame Links.
 - Mehrgeräte-Betrieb, TLS-Reverse-Proxy.
-- FT8 (in pluto-tx vorhanden, dort noch ungetestet im Funkbetrieb; Plan in
+- FT8-Senden im Funkbetrieb testen (F3/F4 in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
 - Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
 

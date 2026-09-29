@@ -149,6 +149,18 @@ wie bei pluto-cli; im Dauerbetrieb dekodiert Web-TRX gleich viel. Nicht
 weiter untersucht; falls es wieder auffällt: prüfen, ob der RTL-SDR nach
 dem Umschalten auf Direct Sampling einige Sekunden braucht.
 
+**FT8-Serie abbrechen und dabei die TX-Sperre halten = Deadlock.** Die
+Serie tastet unter `_tx_lock` auf und ab; ein Abbruch, der auf ihr Ende
+wartet (`Ft8Series.cancel()` ohne `device_safe`), darf deshalb nie
+aufgerufen werden, während der Aufrufer die Sperre hält. `disconnect()`
+bricht die Serie darum vor dem `async with self._tx_lock` ab; innerhalb der
+Sperre (`_teardown_tx`) nur mit `device_safe=True`, das nicht wartet.
+Außerdem: `key_ptt()` läuft im Worker-Thread und lässt sich nicht abbrechen.
+Ein `task.cancel()` während des Auftastens würde die Serie beenden, während
+der Thread den Sender trotzdem auftastet. `cancel()` wartet in dem Fall auf
+das Ende von `key()` und tastet sofort ab, und `key()` prüft nach dem Warten
+auf die Sperre `series.cancelled`, bevor es auftastet.
+
 **`pgrep -f`/`pkill -f` mit einem Muster aus der eigenen Kommandozeile**
 trifft auch die Shell, die den Befehl ausführt (Exit-Code 144). Web-TRX
 deshalb über `scripts/stop.sh` beenden, Testserver über die PID aus `$!`.

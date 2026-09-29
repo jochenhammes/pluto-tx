@@ -13,6 +13,8 @@ ValueError (SessionManager turns it into an 'error' event).
 """
 from __future__ import annotations
 
+from . import station
+
 FM_DEVIATION_CHOICES_HZ = (2500.0, 5000.0)
 FM_DEVIATION_DEFAULT_HZ = 2500.0
 FM_PREEMPHASIS_DEFAULT = True
@@ -47,6 +49,17 @@ FT8_DECODERS = ("auto", "jt9", "ft8lib")
 FT8_DECODER_DEFAULT = "auto"
 FT8_BAND_HZ = (100.0, 3100.0)  # audio band the RX decoder looks at, above the USB dial frequency
 
+# FT8 transmit (pluto_tx/ft8.py, pluto_tx/config.py). The message text itself is
+# built by pluto-tx' compose() from the station data and these parameters; only
+# ft8_lib knows whether it packs (GnuRadioBackend checks with ft8_problem()).
+FT8_MESSAGE_KINDS = ("cq", "reply", "report", "r_report", "rrr", "rr73", "73", "free")
+FT8_FREE_TEXT_MAX = 13
+FT8_REPORT_RANGE_DB = (-30, 30)
+FT8_TONE_RANGE_HZ = (200.0, 2900.0)
+FT8_TONE_DEFAULT_HZ = 1500.0
+FT8_SLOTS = ("any", "even", "odd")  # next slot / 1st :00 :30 / 2nd :15 :45
+FT8_MAX_REPEATS = 20  # same as ft8_series.FT8_MAX_REPEATS
+
 
 def client_options() -> dict:
     """Choice lists the frontend builds its dropdowns from (sent in the
@@ -65,7 +78,12 @@ def client_options() -> dict:
             "baud_default": RTTY_BAUD_RATE_DEFAULT, "baud_choices": list(RTTY_BAUD_RATE_PRESETS),
             "max_text_len": RTTY_MAX_TEXT_LEN,
         },
-        "ft8": {"decoders": list(FT8_DECODERS), "band_hz": list(FT8_BAND_HZ)},
+        "ft8": {
+            "decoders": list(FT8_DECODERS), "band_hz": list(FT8_BAND_HZ),
+            "message_kinds": list(FT8_MESSAGE_KINDS), "free_text_max": FT8_FREE_TEXT_MAX,
+            "report_range_db": list(FT8_REPORT_RANGE_DB), "tone_range_hz": list(FT8_TONE_RANGE_HZ),
+            "tone_default_hz": FT8_TONE_DEFAULT_HZ, "slots": list(FT8_SLOTS), "max_repeats": FT8_MAX_REPEATS,
+        },
         "digitext": {
             "layouts": list(DIGITEXT_LAYOUTS), "zoom_range": list(DIGITEXT_ZOOM_RANGE),
             "min_freq_hz_range": [DIGITEXT_MIN_FREQ_HZ_FLOOR, DIGITEXT_MIN_FREQ_HZ],
@@ -87,6 +105,8 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
         if decoder not in FT8_DECODERS:
             raise ValueError(f"ft8: decoder must be one of {FT8_DECODERS}")
         return {"decoder": decoder}
+    if mode == "ft8" and direction == "tx":
+        return _ft8_tx(params)
     if mode == "rade" and direction == "tx":
         _reject_unknown(params, {"eoo"}, "rade")
         return {"eoo": _bool(params, "eoo", False)}
@@ -108,6 +128,40 @@ def _rtty(params: dict, with_text: bool) -> dict:
     return out
 
 
+def _ft8_tx(params: dict) -> dict:
+    _reject_unknown(params, {"kind", "dx_call", "report_db", "free_text", "offset_hz", "slot", "drift_comp",
+                             "repeat_count"}, "ft8")
+    kind = params.get("kind", "cq")
+    if kind not in FT8_MESSAGE_KINDS:
+        raise ValueError(f"ft8: kind must be one of {FT8_MESSAGE_KINDS}")
+    dx_call = params.get("dx_call", "")
+    if not isinstance(dx_call, str):
+        raise ValueError("ft8: dx_call must be a string")  # noqa: TRY004 -- one error type for all bad client input
+    dx_call = dx_call.strip().upper()
+    if dx_call:
+        station.normalize(dx_call, "")  # same callsign rule as the station's own
+    report = params.get("report_db", -10)
+    lo, hi = FT8_REPORT_RANGE_DB
+    if not isinstance(report, int) or isinstance(report, bool) or not lo <= report <= hi:
+        raise ValueError(f"ft8: report_db must be an integer {lo}..{hi}")
+    offset = _number(params, "offset_hz", FT8_TONE_DEFAULT_HZ, "ft8")
+    lo_hz, hi_hz = FT8_TONE_RANGE_HZ
+    if not lo_hz <= offset <= hi_hz:
+        raise ValueError(f"ft8: offset_hz must be within {lo_hz:g}..{hi_hz:g} Hz")
+    slot = params.get("slot", "any")
+    if slot not in FT8_SLOTS:
+        raise ValueError(f"ft8: slot must be one of {FT8_SLOTS}")
+    repeats = params.get("repeat_count", 1)
+    if not isinstance(repeats, int) or isinstance(repeats, bool) or not 1 <= repeats <= FT8_MAX_REPEATS:
+        raise ValueError(f"ft8: repeat_count must be an integer 1..{FT8_MAX_REPEATS}")
+    return {
+        "kind": kind, "dx_call": dx_call, "report_db": report,
+        "free_text": _text(params, FT8_FREE_TEXT_MAX, "ft8", key="free_text").upper(),
+        "offset_hz": offset, "slot": slot, "drift_comp": _bool(params, "drift_comp", True),
+        "repeat_count": repeats,
+    }
+
+
 def _digitext(params: dict) -> dict:
     _reject_unknown(params, {"text", "layout", "zoom", "min_freq_hz"}, "digitext")
     layout = params.get("layout", "horizontal")
@@ -123,12 +177,12 @@ def _digitext(params: dict) -> dict:
             "min_freq_hz": min_freq}
 
 
-def _text(params: dict, max_len: int, mode: str) -> str:
-    text = params.get("text", "")
+def _text(params: dict, max_len: int, mode: str, key: str = "text") -> str:
+    text = params.get(key, "")
     if not isinstance(text, str):
-        raise ValueError(f"{mode}: text must be a string")  # noqa: TRY004 -- one error type for all bad client input
+        raise ValueError(f"{mode}: {key} must be a string")  # noqa: TRY004 -- one error type for all bad client input
     if len(text) > max_len:
-        raise ValueError(f"{mode}: text is longer than {max_len} characters")
+        raise ValueError(f"{mode}: {key} is longer than {max_len} characters")
     return text
 
 

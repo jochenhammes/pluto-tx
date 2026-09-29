@@ -337,3 +337,97 @@ def test_a_browser_returning_within_the_grace_time_keeps_the_devices(monkeypatch
             ws.receive_json()
             _wait_until(lambda: False, timeout=0.8)
             assert backend.snapshot()["rx"]["connection"] is not None
+
+
+def _fast_ft8(monkeypatch, key_in_s=0.05):
+    """SimBackend's FT8 series without waiting for real 15 s slots."""
+    import time as _time
+
+    from web_trx import sim_backend
+
+    monkeypatch.setattr(sim_backend, "sim_plan_transmission",
+                        lambda now, parity="any": (now + key_in_s, now + key_in_s + 0.05))
+    monkeypatch.setattr(sim_backend, "FT8_FRAME_S", 0.1)
+    return _time
+
+
+def _ft8_tx_ready(ws, params=None):
+    ws.receive_json()  # hello
+    ws.send_json({"request": "set_station", "call": "DA2JH", "locator": "JO43"})
+    assert ws.receive_json()["event"] == "station"
+    ws.send_json({"request": "connect", "direction": "tx", "device_type": "sim"})
+    assert ws.receive_json()["event"] == "connected"
+    ws.send_json({"request": "select_mode", "direction": "tx", "mode": "ft8", "params": params or {}})
+    return ws.receive_json()
+
+
+def test_ft8_series_round_trip_over_ws(monkeypatch):
+    _fast_ft8(monkeypatch)
+    with make_client() as client:
+        login(client)
+        with client.websocket_connect("/ws") as ws:
+            mode = _ft8_tx_ready(ws, {"kind": "report", "dx_call": "dl1abc", "report_db": -7, "repeat_count": 2})
+            assert mode["event"] == "mode"
+            assert mode["text"] == "DL1ABC DA2JH -07"  # preview, built by pluto-tx' compose()
+            assert mode["params"]["dx_call"] == "DL1ABC"
+            ws.send_json({"request": "ptt_on"})
+            names = []
+            while "ft8_done" not in names:
+                event = ws.receive_json()
+                names.append(event["event"])
+                if event["event"] == "keyed":
+                    assert event["text"] == "DL1ABC DA2JH -07"
+            assert names == ["ft8_armed", "keyed", "tx_text", "unkeyed"] * 2 + ["ft8_done"]
+        entries = client.get("/tx-log").json()
+        assert len(entries) == 2
+        assert all(e["mode"] == "ft8" and e["params"]["text"] == "DL1ABC DA2JH -07" and e["ended_at"]
+                   for e in entries)
+
+
+def test_ft8_ptt_off_while_armed_cancels_without_keying(monkeypatch):
+    _fast_ft8(monkeypatch, key_in_s=5.0)
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            _ft8_tx_ready(ws)
+            ws.send_json({"request": "ptt_on"})
+            assert ws.receive_json()["event"] == "ft8_armed"
+            assert backend.snapshot()["tx"]["ft8_armed"] is True
+            ws.send_json({"request": "select_mode", "direction": "tx", "mode": "fm", "params": {}})
+            err = ws.receive_json()
+            assert err["event"] == "error" and "armed" in err["message"]
+            ws.send_json({"request": "ptt_off"})
+            assert ws.receive_json() == {"event": "ft8_cancelled", "reason": "ptt_off"}
+            assert not backend.keyed and backend.snapshot()["tx"]["ft8_armed"] is False
+        assert client.get("/tx-log").json() == []
+
+
+def test_ft8_without_station_callsign_is_refused():
+    with make_client() as client:
+        login(client)
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()  # hello
+            ws.send_json({"request": "connect", "direction": "tx", "device_type": "sim"})
+            ws.receive_json()
+            ws.send_json({"request": "select_mode", "direction": "tx", "mode": "ft8", "params": {}})
+            assert ws.receive_json()["text"] == ""  # no station callsign: nothing to send
+            ws.send_json({"request": "ptt_on"})
+            err = ws.receive_json()
+            assert err["event"] == "error" and "callsign" in err["message"]
+
+
+def test_closing_the_last_browser_cancels_an_armed_ft8_series(monkeypatch):
+    from web_trx import session
+
+    _fast_ft8(monkeypatch, key_in_s=5.0)
+    monkeypatch.setattr(session, "NO_OPERATOR_GRACE_S", 5.0)
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            _ft8_tx_ready(ws)
+            ws.send_json({"request": "ptt_on"})
+            assert ws.receive_json()["event"] == "ft8_armed"
+        assert _wait_until(lambda: not backend.snapshot()["tx"]["ft8_armed"], timeout=0.5)
+        assert not backend.keyed

@@ -15,7 +15,8 @@ Scope of this first cut (see docs/PROJECT_PLAN.md section 9):
 - TX: FM/SSB/LSB/M17/RADE from the browser microphone (the flowgraph's local
   mic source is swapped for a jitter-buffered WebSocket source, see
   tx_audio.py); POCSAG, RTTY and Waterfall Writer as one-shot text modes. A watchdog unkeys voice modes when the browser
-  stops sending audio or the time-out timer expires.
+  stops sending audio or the time-out timer expires. FT8: PTT arms a series of
+  slot-timed transmissions (ft8_series.py).
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import clock, pluto_path, station
+from . import clock, ft8_series, pluto_path, station
 from .session import AudioFrame, SessionBackend, SessionError, SpectrumFrame
 from .tx_audio import JitterBuffer
 
@@ -47,7 +48,9 @@ from pluto_advanced_rx.ft8_decoder import sender_call as ft8_sender_call
 from pluto_advanced_rx.pocsag_state import PocsagState
 from pluto_tx import config as tx_config
 from pluto_tx import devices as tx_devices
+from pluto_tx import ft8 as tx_ft8
 from pluto_tx.config import normalize_uri
+from pluto_tx.flowgraph import FT8_AVAILABLE as TX_FT8_AVAILABLE
 from pluto_tx.flowgraph import M17_AVAILABLE as TX_M17_AVAILABLE
 from pluto_tx.flowgraph import RADE_AVAILABLE as TX_RADE_AVAILABLE
 from pluto_tx.flowgraph import PlutoTxFlowgraph
@@ -117,11 +120,12 @@ TX_MODES = {
     "pocsag": PlutoTxFlowgraph.MODE_POCSAG,
     "rtty": PlutoTxFlowgraph.MODE_RTTY,
     "digitext": PlutoTxFlowgraph.MODE_DIGITEXT,
+    "ft8": PlutoTxFlowgraph.MODE_FT8,
 }
 # One-shot modes render their whole transmission at key time and unkey on
 # their own (pluto_cli.runtime.run_tx_session); all others take the
-# browser microphone while PTT is held.
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext")
+# browser microphone while PTT is held. FT8 is one too, keyed by its series.
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8")
 ONE_SHOT_TAIL_S = 0.3
 
 # TX audio processing (FM/SSB/LSB; M17 bypasses this chain in pluto-tx).
@@ -252,6 +256,7 @@ class GnuRadioBackend(SessionBackend):
         self._spectrum_task: asyncio.Task | None = None
         self._unkey_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._ft8_series: ft8_series.Ft8Series | None = None
         self._mic_buffer = JitterBuffer(tx_config.AUDIO_RATE)
         self._keying = False
         self._over_stats = _new_over_stats()
@@ -288,8 +293,7 @@ class GnuRadioBackend(SessionBackend):
                                     for t in RX_DEVICE_TYPES},
                 "rx_gain": {t: _rx_gain_info(rx_devices.DEVICE_REGISTRY[t]) for t in RX_DEVICE_TYPES},
                 "rx_direct_sampling": [t for t in RX_DEVICE_TYPES if _supports_direct_sampling(t)],
-                # tx: FT8 transmit comes in phase F3 of docs/FT8_PLAN.md.
-                "ft8": {"tx": "ft8" in TX_MODES, "rx_backends": ft8_rx_backends(),
+                "ft8": {"tx": _tx_mode_available("ft8"), "rx_backends": ft8_rx_backends(),
                         "clock_synced": clock.ntp_synchronized()},
                 "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)]}
 
@@ -321,6 +325,8 @@ class GnuRadioBackend(SessionBackend):
     async def disconnect(self, direction: str) -> None:
         st = self._state(direction)
         if direction == "tx":
+            # Outside the TX lock: a series unkeys under that lock.
+            await self._cancel_ft8("disconnect")
             async with self._tx_lock:
                 await self._teardown_tx()
         else:
@@ -368,6 +374,10 @@ class GnuRadioBackend(SessionBackend):
         elif name not in (RX_GAIN_NAMES if direction == "rx" else TX_GAIN_NAMES):
             raise SessionError(f"unknown {direction} gain '{name}'")
         elif name == "sample_rate":
+            if self._ft8_armed() and self.tx.device_type == "pluto":
+                # pluto-tx: changing the RX bandwidth mid-transmission shifts the
+                # Pluto's TX timing (docs/FT8_PLAN.md section 7).
+                raise SessionError("rx: bandwidth can't change while an FT8 series is armed")
             value = int(value)
             choices = rx_devices.DEVICE_REGISTRY[st.device_type].sample_rate_hz_choices if st.device_type else ()
             if value not in choices:
@@ -502,10 +512,14 @@ class GnuRadioBackend(SessionBackend):
         overridden by whatever the operator changed."""
         return {name: self.tx.gains.get(name, spec[0]) for name, spec in TX_SETTINGS.items()}
 
-    async def ptt(self, on: bool) -> None:
+    async def ptt(self, on: bool, reason: str = "ptt_off") -> None:
         if on:
-            await self._key()
+            if self.tx.mode == "ft8":
+                await self._arm_ft8()
+            else:
+                await self._key()
         else:
+            await self._cancel_ft8(reason)
             self._cancel_tx_tasks()
             await self._unkey()
 
@@ -513,6 +527,10 @@ class GnuRadioBackend(SessionBackend):
         """Never raises, never waits for the TX lock (a key/unkey in progress
         must not delay it). shutdown_safe() unkeys, stops the flowgraph and
         forces the device's safe state (Pluto: max attenuation, TX LO off)."""
+        try:
+            await self._cancel_ft8("estop", device_safe=True)
+        except Exception:  # E-STOP must not raise
+            logger.exception("cancelling the FT8 series failed during E-STOP")
         self._cancel_tx_tasks()
         was_keyed = self.keyed
         mode = self.tx.mode
@@ -546,6 +564,7 @@ class GnuRadioBackend(SessionBackend):
 
     def snapshot(self) -> dict:
         tx = _snapshot_direction(self.tx, self.keyed)
+        tx["ft8_armed"] = self._ft8_armed()
         tx["power"] = _power_info(self.tx.tb) if self.tx.tb is not None else None
         tx["settings"] = self._tx_settings()
         return {
@@ -559,6 +578,7 @@ class GnuRadioBackend(SessionBackend):
             self._aux_task.cancel()
             self._squelch_task.cancel()
             self._spectrum_task = None
+        await self._cancel_ft8("shutdown", device_safe=True)  # the flowgraph stops safely just below
         self._cancel_tx_tasks()
         self.keyed = False
         for tb in (self.tx.tb, self.rx.tb):
@@ -839,6 +859,8 @@ class GnuRadioBackend(SessionBackend):
             raise SessionError(f"{mode.upper()} is not available on this server (see pluto-tx install-{mode}.sh)")
         if self.keyed:
             raise SessionError("tx: cannot change mode while keyed")
+        if self._ft8_armed():
+            raise SessionError("tx: FT8 series is armed -- cancel it first")
         st = self.tx
         async with self._tx_lock:
             if st.tb is None:
@@ -894,6 +916,9 @@ class GnuRadioBackend(SessionBackend):
         return tb
 
     async def _teardown_tx(self) -> None:
+        # Normally already cancelled (disconnect() does it outside the lock);
+        # device_safe: never waits, shutdown_safe() below forces the safe state.
+        await self._cancel_ft8("disconnect", device_safe=True)
         self._cancel_tx_tasks()
         self.keyed = False
         tb, self.tx.tb = self.tx.tb, None
@@ -946,6 +971,71 @@ class GnuRadioBackend(SessionBackend):
             self._unkey_task = asyncio.create_task(self._auto_unkey_after(duration_s + ONE_SHOT_TAIL_S))
         else:
             self._watchdog_task = asyncio.create_task(self._audio_watchdog())
+
+    # -- FT8 transmit series (docs/FT8_PLAN.md 4.3) --
+
+    def _ft8_armed(self) -> bool:
+        return self._ft8_series is not None and self._ft8_series.armed
+
+    async def _cancel_ft8(self, reason: str, device_safe: bool = False) -> None:
+        """device_safe=False waits for the series to unkey, which needs the TX
+        lock -- never call it while holding that lock."""
+        series, self._ft8_series = self._ft8_series, None
+        if series is not None:
+            await series.cancel(reason, device_safe=device_safe)
+
+    async def _arm_ft8(self) -> None:
+        if self._ft8_armed():
+            return
+        async with self._tx_lock:
+            tb = self.tx.tb
+            if tb is None or self.tx.mode != "ft8":
+                raise SessionError("tx: not connected or no mode selected")
+            if self.keyed:
+                return
+            params = dict(self.tx.mode_params)
+            text = ft8_series.compose_text(self.station, params)
+            if not text:
+                raise SessionError("ft8: no message (station callsign or DX callsign missing)")
+            await asyncio.to_thread(tb.set_ft8_text, text)
+            problem = _tx_problem(tb, "ft8")
+            if problem:
+                raise SessionError(f"ft8: {problem}")
+            await asyncio.to_thread(tb.prepare_ft8)  # synthesize now, not in the seconds before the slot
+
+        async def key(start_at: float) -> float:
+            async with self._tx_lock:
+                if series.cancelled:  # cancelled while waiting for the lock: never key
+                    raise SessionError("ft8: series cancelled")
+                if self.tx.tb is not tb:
+                    raise SessionError("tx: flowgraph was rebuilt, series ends")
+                await asyncio.to_thread(tb.prepare_ft8)  # no-op unless the message changed
+                tb.ft8_start_at = start_at  # Ft8TimedSource sends silence up to here
+                try:
+                    await asyncio.to_thread(tb.key_ptt)
+                except ValueError as e:  # a refusal from the flowgraph, before any RF
+                    raise SessionError(str(e)) from e
+                if self.tx.tb is not tb:
+                    # E-STOP while key_ptt() ran in its thread: estop()'s shutdown_safe()
+                    # may have finished before it -- force the safe state once more.
+                    try:
+                        await asyncio.to_thread(tb.shutdown_safe)
+                    except Exception:
+                        logger.exception("shutdown_safe() after an E-STOP during FT8 keying failed")
+                    return 0.0
+                self.keyed = True
+                self._keyed_at = time.monotonic()
+                hold_s = tb.ft8_hold_s
+            await self._emit_event("keyed", {"mode": "ft8", "text": text})
+            await self._emit_event("tx_text", {"mode": "ft8", "text": text,
+                                               "duration_s": round(tb.ft8_duration_s, 2)})
+            return hold_s
+
+        series = ft8_series.Ft8Series(
+            plan=_plan_ft8, key=key, unkey=self._unkey, emit=self._emit_event,
+            parity=params["slot"], count=params["repeat_count"], parity_of=tx_ft8.slot_parity)
+        self._ft8_series = series
+        series.start()
 
     async def _auto_unkey_after(self, seconds: float) -> None:
         """Same self-cancellation trap as SimBackend._auto_unkey_after (see
@@ -1067,7 +1157,13 @@ def _rx_mode_available(mode: str) -> bool:
 
 
 def _tx_mode_available(mode: str) -> bool:
-    return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE}.get(mode, True)
+    return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE, "ft8": TX_FT8_AVAILABLE}.get(mode, True)
+
+
+def _plan_ft8(now: float, parity: str) -> tuple[float, float]:
+    """(key_at, start_at) for the next transmission -- pluto-tx' own planner and timing."""
+    return tx_ft8.plan_transmission(now, parity, tx_config.FT8_KEY_EARLY_S, tx_config.FT8_START_IN_SLOT_S,
+                                    tx_config.FT8_LATE_START_MAX_S)
 
 
 def _new_over_stats() -> dict:
@@ -1219,6 +1315,11 @@ def _apply_tx_params(tb, mode: str, params: dict) -> None:
             tb.set_subtone("ctcss", float(ctcss))
         else:
             tb.set_subtone("off")
+    elif mode == "ft8":
+        # The message text is set when the series is armed (_arm_ft8): it is
+        # built from the station data, which can change after select_mode.
+        tb.set_ft8_tone_hz(params["offset_hz"])
+        tb.ft8_drift_comp_enabled = bool(params["drift_comp"])
     elif mode == "m17":
         if "src_callsign" in params:
             tb.set_m17_src_callsign(str(params["src_callsign"]).strip().upper())
@@ -1230,6 +1331,8 @@ def _tx_problem(tb, mode: str) -> str | None:
     """Refusals before any RF action, like pluto_cli's preflight checks."""
     if mode == "pocsag":
         return tb.pocsag_problem()
+    if mode == "ft8":
+        return tb.ft8_problem()
     if mode == "m17" and not tb.m17_src_callsign:
         return "source callsign is empty"
     if mode in ("rtty", "digitext") and not (tb.rtty_text if mode == "rtty" else tb.digitext_text).strip():

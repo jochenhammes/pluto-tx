@@ -353,6 +353,18 @@ die Stationsdaten stehen in `web-trx.env`.
 
 ### F2 — Sendeserie ohne Hardware
 
+> **Erledigt am 29.09.2026**, zusammen mit Schritt F3.1 (Code). Abweichungen
+> vom Plan:
+> - Statt die Zahl der Clients zu melden, gibt `snapshot()["tx"]` jetzt
+>   `ft8_armed` aus, und der „Kein Bediener“-Watchdog ruft
+>   `ptt(False, reason="no_operator")` auch für eine scharfe Serie. Das ist
+>   strenger als 30 s: Abbruch sofort, wenn der letzte Browser geht.
+> - Zusätzliches Event `ft8_done` nach der letzten Aussendung einer Serie.
+> - `ft8_armed` trägt zusätzlich `parity`, `keyed` bei FT8 den gesendeten
+>   `text` (landet so im TX-Log).
+> - Während eine Serie scharf ist, lehnt das Backend `select_mode` für TX
+>   ab. Parameter lassen sich also erst nach Abbruch oder Ende ändern.
+
 1. `web_trx/ft8_series.py` mit Tests (simulierte Uhr), siehe 6.
 2. `modes.py`: TX-Schema `ft8`.
 3. SimBackend-TX über die Serienlogik.
@@ -373,6 +385,9 @@ die Stationsdaten stehen in `web-trx.env`.
 Leistung, Aufbau.
 
 ### F3 — Senden auf Kurzstrecke
+
+> **Schritt 1 erledigt am 29.09.2026** (Code, ohne Aussendung). Schritte 2
+> und 3 brauchen die Freigabe des Betreibers.
 
 1. `GnuRadioBackend`-TX wie in 4.3.
 2. Test Pluto → RTL-SDR auf kurze Distanz, Pluto-Dämpfung −40 dB oder
