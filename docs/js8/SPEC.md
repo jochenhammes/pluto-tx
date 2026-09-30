@@ -426,3 +426,198 @@ aus Rahmen und Flags. Seine Ausgabe steht in den Referenzvektoren
   `tools/js8ref/mkwav.py`. `decodes.jsonl` enthält die Referenz-Decodes
   von `js8ref`.
 - Off-Air-Mitschnitte: keine, siehe `docs/js8/TESTS.md` (keine KW-Antenne).
+
+## 7. Automatik (J9): Antworten, Heartbeat, Relay, Inbox
+
+Quelle: `JS8_UI/mainwindow.cpp`, `JS8_Main/TxLoop.cpp`, `JS8_Main/Inbox.cpp`,
+`JS8_UI/Configuration.cpp`, jeweils am gepinnten Commit `f0f0d01b`.
+Die Zeilennummern beziehen sich auf diesen Stand.
+
+Die Compile-Schalter `JS8_HB_ACK_SNR_CONFIGURABLE`, `JS8_CUSTOMIZE_HB` und
+`STORE_RELAY_MSGS_TO_INBOX` sind im Quelltext nirgends definiert, also aus.
+Es gilt jeweils der `#else`- bzw. der ausgeschaltete Zweig.
+
+### 7.1 Empfang → Befehle
+
+**Heartbeat-Rahmen** (`mainwindow.cpp:4627-4683`):
+- `isAlt` → Befehl `from=<Rufzeichen>`, `to="@ALLCALL"`, `cmd=" CQ"`.
+- sonst → `to="@HB"`, `cmd=" HEARTBEAT"`.
+- Das Grid kommt jeweils aus `extra`.
+
+**Gerichtete Rahmen** (`:4701-4761`):
+- Die Teile `from`, `to`, `cmd`, `extra` kommen aus `directedMessage()`.
+- Gepuffert statt sofort verarbeitet wird ein Befehl, wenn
+  `isCommandBuffered(cmd)` gilt und der LAST-Bit fehlt, oder wenn ein
+  Rufzeichen `<....>` ist. Er öffnet dann einen Puffer auf seinem Offset.
+- Sonst geht der Befehl sofort in die Befehlswarteschlange.
+
+**Datenrahmen:**
+- Sie kommen in den Puffer, der innerhalb ±`rxThreshold` des Offsets liegt
+  (`:4583-4595`, `:4812-4840`).
+- Ein FIRST-Rahmen löscht einen bestehenden Puffer (`:4569-4581`).
+
+**Puffer schließen** (`processBufferedActivity`, `:9416-9505`):
+- Liegt die letzte Aktivität mehr als 60 s zurück, gilt der letzte Rahmen als
+  LAST. Nach mehr als 90 s wird der Puffer verworfen.
+- Vollständig ist der Puffer mit dem LAST-Rahmen. Dann wird der Text
+  zusammengesetzt und rechts gestutzt.
+- Befehle mit Prüfsumme: `lstrip`, dann die letzten 6 Zeichen (32 Bit) bzw.
+  3 Zeichen (16 Bit) als Prüfsumme, getrennt durch ein Leerzeichen.
+- Nur gültige Befehle kommen in die Warteschlange.
+
+### 7.2 Befehle verarbeiten (`processCommandActivity`, `:9510-10441`)
+
+Die Prüfungen laufen in dieser Reihenfolge:
+1. **Verwerfen:**
+   - Befehle mit `<....>` (`:9541`),
+   - nicht erlaubte Befehle (`isCommandAllowed`, `:9546`).
+2. **Einordnen:**
+   - `toMe`: `to` ist das eigene Rufzeichen oder dessen Basisrufzeichen
+     (`:9551`).
+   - `isAllCall`: `to` enthält `@ALLCALL` oder `@HB` (`:9066`).
+   - `isGroupCall`: `to` ist in den eigenen Gruppen (`:9070`); Standard ist
+     keine Gruppe.
+3. **Gehörte Stationen:** Rufzeichen, SNR und Zeit werden immer
+   festgehalten (`:9556-9569`).
+4. **Abbruchgründe:**
+   - `avoid_allcall` (Standard aus): @ALLCALL wird ignoriert, außer CQ und
+     HB (`:9668`).
+   - Nur Allcall, `toMe` oder Gruppe gehen weiter (`:9675`).
+   - Whitelist/Blacklist (Standard leer, `:9775-9792`).
+   - **Allcall-Sperre:** Wurde diesem Absender in den letzten 15 min schon
+     auf ein Allcall geantwortet, gibt es keine Antwort (`:9797`). Eingetragen
+     wird bei HB-ACK (`:10121`) und bei Allcall-Antworten (`:10427`).
+   - **Idle-Watchdog ausgelöst** → keine Antwort (`:9805`).
+5. **Relay-Pfad:** Bei Autoreply-Befehlen außer MSG/QUERY mit gesetztem
+   Relay-Pfad tritt der Pfad an die Stelle des Absenders (`:9813`).
+6. **Antworten**, jeweils nur ohne Allcall, wo nicht anders angegeben:
+
+| Befehl | Antwort | Beleg |
+|---|---|---|
+| ` SNR?` | `<FROM> SNR <snr>` (`formatSNR`) | `:9824` |
+| ` INFO?` | `<FROM> INFO <MyInfo>`, nur wenn MyInfo gesetzt | `:9831` |
+| ` STATUS?` | `<FROM> STATUS <MyStatus>`, Standard `IDLE <MYIDLE> VERSION <MYVERSION>` | `:9843`, `Configuration.cpp:1980` |
+| ` GRID?` | `<FROM> GRID <eigenes Grid>` | `:9855` |
+| ` HEARING?` | `<FROM> HEARING` + bis zu 4 zuletzt gehörte Stationen (neueste zuerst, ohne den Fragenden) | `:9865-9898` |
+| `>` Relay (Relay nicht aus) | siehe unten | `:9901-10012` |
+| ` MSG TO:` (Relay nicht aus) | Nachricht als STORE für das Basisrufzeichen ablegen, `<Pfad oder FROM> ACK` | `:10015-10056` |
+| ` AGN?` (auch nicht Gruppe) | die letzte eigene Aussendung erneut | `:10059` |
+| ` HB`/` HEARTBEAT` | siehe 7.4 | `:10068-10125` |
+| ` HEARTBEAT SNR`, ` CQ`, ` ACK`, ` CMD` | keine | `:10128-10193` |
+| ` MSG` | in die eigene Inbox (UNREAD), `<Pfad oder FROM> ACK` | `:10140-10174` |
+| ` QUERY` `MSG <id>` | gespeicherte Nachricht an den Anfragenden (bzw. letzten im Pfad): `<Pfad> MSG <Text> FROM <Absender> [NEXT MSG ID <n>]`, nach dem Senden DELIVERED | `:10196-10289` |
+| ` QUERY MSGS` (Autoreply an) | `<Pfad> YES MSG ID <n>`, ohne Allcall sonst `<Pfad> NO` | `:10292-10328` |
+| ` QUERY CALL` (Autoreply an) | `<Pfad> YES <snr> (<seit>)`, wenn gehört | `:10331-10380` |
+
+**Relay `>`:**
+- Beginnt der Text mit einem Rufzeichen und dahinter `>` oder Leerzeichen
+  (und ist es keine Gruppe), wird weitergeleitet: `<Text, erstes Trennzeichen
+  als '>'> *DE* <FROM>`.
+- Sonst, wenn der Text nicht mit `ACK` beginnt:
+  - Der Pfad wird gebildet aus FROM plus allen ` *DE* X`/` VIA X` im Text
+    (`parseRelayPathCallsigns`, `:10663`).
+  - Antwort `<Pfad> ACK`.
+  - Beginnt der weitergeleitete Text selbst mit einem Autoreply-Befehl, wird
+    dieser mit dem Pfad erneut verarbeitet.
+
+7. **Senden oder nicht:**
+   - Ohne Antwort passiert nichts.
+   - Eine Allcall-Antwort gibt es nur mit Autoreply an (`:10400`).
+   - Keine Antwort, solange Text im Sendefeld steht oder ein offener Puffer
+     an uns läuft (`:10413-10423`).
+   - Mit „Autoreply-Bestätigung“ (Standard an) wartet eine Rückfrage 90 s;
+     sonst geht die Antwort direkt in die Sende-Warteschlange (Priorität
+     Normal, Offset = eigener) (`:10435-10439`).
+
+### 7.3 Sende-Warteschlange (`processTxQueue`, `:10727-10792`)
+
+- Prioritäten: Low 10, Normal 100, High 1000 (`mainwindow.h:654`).
+- Die Nachrichten laufen eine nach der anderen. Voraussetzungen: gültiger
+  Offset, keine laufende Aussendung, leeres Sendefeld.
+- Priorität ≤ Low sendet nur, wenn die letzte Aussendung mehr als 30 s
+  zurückliegt.
+- **Automatisch gesendet** wird bei Priorität ≥ High, bei Text mit
+  ` HEARTBEAT `, ` HB ` oder ` ACK ` oder bei Autoreply an. Sonst steht die
+  Antwort nur im Sendefeld, und der Betreiber entscheidet.
+- Gesendet wird als ganz normale Nachricht, also mit denselben Rahmen wie
+  manuell eingegebener Text.
+
+### 7.4 Heartbeat
+
+- **Text:** `<MYCALL>: HEARTBEAT <GRID4>` (`sendHB`, `:6968-7000`).
+- **Offset:** Liegt der eigene Offset bei höchstens 1000 Hz, wird er
+  genommen. Sonst ein freier Platz in 500–1000 Hz, 50-Hz-Raster, zufällig
+  (`findFreeFreqOffset`, `:6271`). Frei heißt: in den letzten 30 s keine
+  Aktivität innerhalb ±50 Hz (`:6245`).
+- **Priorität:** Low + 1.
+- **Wiederholung:** 10, 15, 30 oder 60 min, oder frei 1–1440 min
+  (`:6891-6966`). Der nächste Termin ist jetzt + Intervall, aufgerundet auf
+  die Periode der Geschwindigkeit (`TxLoop.cpp:181-205`).
+- **Kein Heartbeat in Turbo** (`canCurrentModeSendHeartbeat`, `:6665`).
+- **HB-ACK:** `<FROM> HEARTBEAT SNR <snr> [MSG ID <n>]` auf einem freien Platz
+  in 500–1000 Hz, Priorität Low + 1 (`:7002-7029`, `#else`-Zweig). Nur mit
+  HB-Modus + Autoreply + HB-ACK an. Nicht, wenn:
+  - ein Nachrichtenpuffer offen ist,
+  - HB-QSO-Pause (Standard an) gilt und ein Rufzeichen gewählt ist,
+  - der Absender auf der HB-Blacklist steht.
+
+### 7.5 Idle-Watchdog
+
+- Standard: 60 min ohne Tastendruck oder Mausklick (`TxIdleWatchdog`,
+  `Configuration.cpp:2194`). Der Zähler steigt minütlich (`:2171`) und wird
+  bei Bedienung zurückgesetzt (`:3477`).
+- **Wird er ausgelöst** (`:12291-12340`):
+  - Aussendung stoppen,
+  - Autoreply, HB- und CQ-Schleife aus,
+  - Sende-Warteschlange leeren,
+  - Hinweis an den Betreiber. Erst nach dessen Bestätigung werden die
+    Schalter wiederhergestellt.
+
+### 7.6 Inbox (`Inbox.cpp`)
+
+- **SQLite-Tabellen:**
+  - `inbox_v1(id, blob)`; `blob` ist JSON
+    `{"type","value","params":{UTC,TO,FROM,PATH,TDRIFT,FREQ,DIAL,OFFSET,CMD,SNR,SUBMODE[,GRID][,EXTRA][,TEXT]}}`
+    (`:27-47`, `Message.cpp:184`, `mainwindow.cpp:10522-10558`),
+  - `inbox_group_recip_v1(msg_id, callsign)`.
+- **Typen:**
+  - UNREAD: an mich,
+  - STORE: für andere abgelegt,
+  - DELIVERED: abgeholt.
+- **Nächste Nachricht für ein Rufzeichen:** STORE mit `TO` = Rufzeichen oder
+  Basisrufzeichen und nicht leerem Text, kleinste ID zuerst (`:10560`).
+  „Lookahead“ ist die nächste ID danach (`Inbox.cpp:290`).
+- **Gruppennachrichten:** höchstens 48 h alt (`Inbox.cpp:530-560`).
+
+### 7.7 Standardwerte in JS8Call (`Configuration.cpp`)
+
+| Einstellung | Standard | Zeile |
+|---|---|---|
+| AutoreplyOnAtStartup | an | 2098 |
+| AutoreplyConfirmation | an | 2100 |
+| TxIdleWatchdog | 60 min | 2194 |
+| RelayOFF | aus (Relay also an) | 2104 |
+| HeartbeatQSOPause | an | 2102 |
+| BeaconAnywhere | aus | 2101 |
+| AvoidAllcall | aus | 2191 |
+| CallsignAging | 0 (keine Alterung) | 1973 |
+| MyInfo | leer | 1977 |
+| HB-Modus / HB-ACK (Menü) | aus | `mainwindow.cpp:2486-2489` |
+
+### 7.8 Umsetzung in pluto-tx: Abweichungen und zusätzliche Grenzen
+
+Nach Plan-Abschnitt 0/J9 ergänzt pluto-tx eigene Sicherheitsregeln. Sie
+stehen nicht in JS8Call, sind als solche gekennzeichnet und schränken nur ein:
+- **Alles startet aus**, auch Autoreply. Das weicht von JS8Calls Standard
+  „Autoreply an“ ab. Autoreply-Bestätigung ist wie bei JS8Call an.
+- **Anwesenheit:** Es gilt der Idle-Watchdog wie in JS8Call. Als Bedienung
+  zählen Aktionen im Browser. Ist kein Browser mehr verbunden, wird sofort
+  alles abgeschaltet.
+- **Harte Grenze für automatische Aussendungen** (Antworten, HB-ACKs,
+  Heartbeats) gegen Endlosschleifen zwischen Automaten: höchstens 20 pro
+  Stunde, gleitend gezählt.
+- Band, Leistungsdeckel, NOTAUS und die Abbruchregel gelten unverändert wie
+  bei manuellem Senden.
+- **Ort:** Automatik braucht Empfang und Senden im selben Prozess, also
+  nur Web-TRX. Die Qt-Apps (RX und TX getrennt) und `pluto-cli` bleiben
+  manuell.
