@@ -59,9 +59,31 @@ gepinnten JS8Call-Quelltext portiert und bitgenau gegen ihn geprüft (pluto-tx
   - Das ganze Signal (Dial + Offset … + 8 Töne) liegt in *einem*
     Amateurband.
   - Die Nachricht ist höchstens 20 Rahmen lang.
-- **Keine automatischen Antworten:** kein Heartbeat-Automat, kein Relay,
-  keine Inbox. Das wäre eine eigene Entscheidung des Betreibers
-  (Plan-Phase J9).
+- **Automatik (J9, Reiter „Automatik“ und „Inbox“ im JS8-Panel):** Antworten,
+  Heartbeat, Relay und Inbox wie in JS8Call. Das Regelwerk mit Zeilenbelegen
+  steht in pluto-tx `docs/js8/SPEC.md` 7.
+  - **Alles startet aus.** Bestätigung vor dem Senden (90 s) ist
+    voreingestellt.
+  - Ohne Autoreply wird eine Antwort auf eine an uns gerichtete Frage nur
+    vorgeschlagen („Ins Sendefeld“), wie in JS8Call.
+  - **Autoreply** beantwortet SNR?, GRID?, INFO? (nur mit INFO-Text),
+    STATUS?, HEARING? und AGN?.
+  - **Heartbeat:** HB-Modus plus Intervall 10/15/30/60 min. HB-ACK
+    beantwortet fremde Heartbeats im Unterband 500–1000 Hz. Beides nicht in
+    TURBO.
+  - **Relay** (`>`), **MSG TO:** (Speichern für andere), **QUERY MSGS/MSG**
+    (Abholen). Eine MSG an uns landet in der Inbox. Die Datenbank hat
+    JS8Calls Format (`WEB_TRX_JS8_INBOX_PATH`, Standard: neben den
+    Einstellungen `js8_inbox.db3`).
+  - Gesendet wird nur mit verbundenem TX im JS8-Modus (dessen Speed und
+    Offset), über dieselbe Kette wie von Hand.
+  - Perioden, in denen wir selbst senden, werden für die Automatik
+    ignoriert.
+  - **Sicherheit:**
+    - Idle-Watchdog (Standard 60 min ohne Bedienung im Browser).
+    - **Ist kein Browser mehr verbunden, geht sofort alles aus**, und die
+      Schalter bleiben aus.
+    - Höchstens 20 automatische Aussendungen pro Stunde.
 - **Freitext in Fast, Turbo und Slow** braucht das JSC-Wörterbuch aus
   `install-js8.sh`. Ohne das Wörterbuch nur Normal verwenden.
 - **TX-Log:** Jeder Rahmen erscheint mit dem Nachrichtentext und seiner
@@ -81,5 +103,10 @@ gepinnten JS8Call-Quelltext portiert und bitgenau gegen ihn geprüft (pluto-tx
 - Senden und Empfangen gibt es nur, wenn der JS8-Codec seinen Selbsttest
   besteht (`features.js8.tx`, JS8 in `rx_modes`): Er muss für einen
   Referenzrahmen JS8Calls Töne erzeugen.
+- **Automatik über Funk getestet (J9, 30.09.2026):** HackRF als Gegenstation
+  (DA2JH/P, DA2JH/M) auf 2 m.
+  - SNR?, MSG → Inbox + ACK, MSG TO: → QUERY MSGS → QUERY MSG,
+    HB → HB-ACK (FAST), Bestätigungsweg und Watchdog laufen alle.
+  - Protokoll in pluto-tx `docs/js8/TESTS.md`.
 - Offen: ein Test mit echten Gegenstationen auf KW. Dafür gibt es noch keine
   Antenne.

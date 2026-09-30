@@ -616,6 +616,13 @@ stehen nicht in JS8Call, sind als solche gekennzeichnet und schränken nur ein:
 - **Harte Grenze für automatische Aussendungen** (Antworten, HB-ACKs,
   Heartbeats) gegen Endlosschleifen zwischen Automaten: höchstens 20 pro
   Stunde, gleitend gezählt.
+- **Nach einem Watchdog** bleiben Autoreply und HB-Modus aus, bis der
+  Betreiber sie wieder einschaltet. JS8Call stellt die Schalter nach der
+  Bestätigung des Hinweises wieder her.
+- Web-TRX kennt weder JS8Calls „Sendefeld nicht leer“ noch „Rufzeichen
+  gewählt“. Die HB-QSO-Pause und die Sperre durch einen Entwurf greifen dort
+  deshalb nicht.
+- `<MYVERSION>` ist `PLUTO-TX`.
 - Band, Leistungsdeckel, NOTAUS und die Abbruchregel gelten unverändert wie
   bei manuellem Senden.
 - **Ort:** Automatik braucht Empfang und Senden im selben Prozess, also

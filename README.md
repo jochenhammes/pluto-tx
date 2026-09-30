@@ -341,7 +341,10 @@ CLI: `pluto-cli tx ft8 --call DA2JH --locator JO31` (CQ) bzw. `--kind report
     Abbruch oder NOTAUS verwirft den Rest der Nachricht.
   - Die ganze Signalbreite muss in einem Amateurband liegen. Die
     Pluto-Driftkompensation wird wie bei FT8 genutzt.
-  - Es gibt keine automatischen Antworten.
+  - Automatische Antworten, Heartbeat, Relay und Inbox gibt es nur in
+    Web-TRX (Reiter „Automatik“). Nur dort laufen Empfang und Senden in einem
+    Prozess. Alles startet aus, siehe [`web-trx/docs/JS8.md`](web-trx/docs/JS8.md).
+    TX-App, RX-App und `pluto-cli` bleiben manuell.
 - **RX:**
   - Eine Geschwindigkeit oder alle gleichzeitig.
   - Mehrrahmen-Nachrichten werden je Frequenz wie in JS8Call zusammengesetzt.

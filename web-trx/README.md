@@ -315,8 +315,10 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
   Rufzeichen. Senden: CQ, Heartbeat, @ALLCALL- und gerichteter Text, SNR?,
   SNR-Rapport, ACK, Freitext -- gebaut wie JS8Call selbst, Vorschau mit
   Rahmenzahl und Dauer; die Rahmen gehen in aufeinanderfolgenden Perioden
-  raus, jeder einzeln getastet. Keine automatischen Antworten. Im Funkbetrieb
-  getestet (2 m, Pluto+ → RTL-SDR, J7). Details: [`docs/JS8.md`](docs/JS8.md).
+  raus, jeder einzeln getastet. Automatik wie in JS8Call (Autoreply, Heartbeat,
+  Relay, Inbox), alles standardmäßig aus, mit Bestätigung, Idle-Watchdog und
+  Abschaltung, sobald kein Browser mehr verbunden ist. Im Funkbetrieb getestet
+  (2 m, J7/J9). Details: [`docs/JS8.md`](docs/JS8.md).
 - Stationsdaten (Rufzeichen, Locator) in der Kopfzeile, gespeichert; genutzt
   für FT8, JS8 und als M17-Vorbelegung. Startwert aus `WEB_TRX_STATION_CALL` /
   `WEB_TRX_STATION_LOCATOR` in `web-trx.env`.

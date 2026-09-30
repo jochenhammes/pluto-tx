@@ -302,7 +302,79 @@ Abweichung vom Plan: Es gibt keinen Test mit der JS8Call-GUI (WAV-Import bzw.
 Live-Empfang) und keinen Test mit einer echten Gegenstation. Ohne KW-Antenne
 gibt es keine Gegenstation, und die GUI verwendet denselben Decoder.
 
-## Empfang (J0, nur Empfang)
+## Automatik über Funk (J9, 30.09.2026)
+
+Freigabe des Betreibers für J9 am 30.09.2026.
+
+**Aufbau:**
+- Separater Web-TRX-Testserver (GnuRadioBackend, Port 8398, nicht die
+  Produktivinstanz).
+  - **Empfang:** RTL-SDR, JS8-Decoder `js8` (JS8Calls eigener).
+  - **Senden:** Pluto+ mit 40 dB Dämpfung, 144,178 MHz USB, Offset
+    1500 Hz (HB-ACK: freier Platz 500–1000 Hz).
+  - Die TX-Frequenz wurde gesetzt und per `tuned` bestätigt.
+- **Gegenstation:** HackRF über `pluto-cli tx js8`, 144,178 MHz + 1200 Hz,
+  **ohne RF-Verstärker**, VGA 10 bzw. 20 dB (weit unter 1 mW).
+  - Absender DA2JH/P bzw. DA2JH/M, jede Aussendung trägt also DA2JH.
+  - Locator JO31 (Test-Platzhalter wie im Web-TRX) ab 10:27.
+- Die Automatik antwortet selbstständig (Autoreply an, Bestätigung aus;
+  ein Schritt mit Bestätigung).
+- Nach jedem Schritt: Pluto −89,75 dB, LO aus (`iio_attr`).
+
+| UTC | Gerät | Inhalt | Ergebnis |
+|---|---|---|---|
+| 10:05:00 | HackRF VGA 10, −56 ppm | Probe: `DA2JH/P: @ALLCALL CQ CQ CQ` | nicht dekodiert: lag bei **144,1873 MHz** (IQ-Messung, s. u.), im 2-m-Band |
+| 10:07:06 | HackRF VGA 10, −56 ppm | derselbe CQ, zur IQ-Messung mit `rtl_sdr` | 144,1873 MHz ⇒ Korrektur falsch, HackRF liegt ohne Korrektur richtig |
+| 10:08:36 | HackRF VGA 10, 0 ppm | derselbe CQ | dekodiert, 1188 Hz, +4 dB |
+| 10:10:18 | HackRF | `DA2JH/P: DA2JH SNR?` (TURBO) | dekodiert +4 dB |
+| 10:10:36 | Pluto (Automatik) | `DA2JH: DA2JH/P SNR +04` | dekodiert +19 dB ✔ |
+| 10:10:54 | HackRF | `DA2JH/P: @HB HEARTBEAT` (TURBO) | dekodiert; **kein HB-ACK**, richtig: JS8Call beantwortet in TURBO keine Heartbeats |
+| 10:12:30–36 | HackRF | `DA2JH/P: DA2JH MSG J9 TEST MESSAGE` (2 Rahmen, Prüfsumme `VIE`) | dekodiert, Inbox UNREAD |
+| 10:12:54 | Pluto (Automatik) | `DA2JH: DA2JH/P ACK` | dekodiert +18 dB ✔ |
+| ≈10:13:18 | HackRF | `DA2JH/P: DA2JH MSG TO: DA2JH/M J9 STORED` (3 Rahmen) | Testlauf abgebrochen: der Server blockierte ≥ 20 s (s. u.), keine Antwort |
+| 10:15:48–10:16:00 | HackRF | derselbe MSG TO: | dekodiert, als STORE für DA2JH abgelegt |
+| 10:16:18 | Pluto (Automatik) | `DA2JH: DA2JH/P ACK` | dekodiert +17 dB ✔ |
+| 10:16:36 | HackRF VGA 10 | `DA2JH/M DA2JH QUERY MSGS` (ohne Locator) | nur Rahmen 1 dekodiert (+2 dB) ⇒ keine Antwort |
+| 10:22:00 | HackRF VGA 20 | derselbe, ohne Locator | beide Rahmen dekodiert; keine Antwort, genau wie JS8Call (s. u.) |
+| 10:27:18 | HackRF VGA 20 | `DA2JH/M: DA2JH QUERY MSGS` (mit Locator) | dekodiert +10/+8 dB |
+| 10:27:42–54 | Pluto (Automatik) | `DA2JH: DA2JH/M YES MSG ID 2` (3 Rahmen) | dekodiert +17…18 dB ✔ |
+| 10:28:18–30 | HackRF | `DA2JH/M: DA2JH QUERY MSG 2` | dekodiert |
+| 10:28:48–10:29:06 | Pluto (Automatik) | `DA2JH: DA2JH/M MSG J9 STORED FROM DA2JH/P` (4 Rahmen, Prüfsumme `SM1`) | dekodiert +17…18 dB; Inbox: DELIVERED ✔ |
+| 10:32:00 | HackRF (FAST) | `DA2JH/P: @HB HEARTBEAT JO31` (HB-Modus + HB-ACK an) | dekodiert +18 dB |
+| 10:32:20 | Pluto (Automatik) | `DA2JH: DA2JH/P HEARTBEAT SNR +18` auf **643 Hz** (HB-Unterband) | dekodiert +20 dB ✔ |
+| 10:32:50 | HackRF (FAST) | `DA2JH/P: DA2JH SNR?` (Bestätigung an) | dekodiert; Rückfrage `confirm`, „Ja“ per WebSocket |
+| 10:33:10 | Pluto (Automatik, bestätigt) | `DA2JH: DA2JH/P SNR +19` | dekodiert +21 dB ✔ |
+
+**Watchdog:** Browser (WebSocket) getrennt, während Autoreply und
+Heartbeat-Timer an waren. Beim Wiederverbinden war beides aus, der
+HB-Termin gelöscht, der Watchdog aufgehoben, die Schalter blieben aus. Es
+gab dabei keine Aussendung.
+
+**Befunde:**
+- **Frequenz des HackRF:** Die in einer älteren Notiz angenommene Abweichung
+  (−56 ppm) gilt für dieses Gerät nicht. Die IQ-Messung zeigte, dass es ohne
+  Korrektur auf 2 m richtig liegt. Die beiden Proben mit Korrektur lagen bei
+  144,1873 MHz, weiterhin im 2-m-Band.
+- **Compound-Absender ohne Locator** (JS8Call-Verhalten, bitgenau gegen
+  `js8ref vectors` geprüft):
+  - Ohne Locator packt JS8Call `DA2JH/M` in einen „Compound Directed“-Rahmen
+    statt in einen eigenen FrameCompound.
+  - Die Empfangslogik (`mainwindow.cpp:4611/4700`) nimmt ihn dann nicht in die
+    Compound-Liste. Der Befehl bleibt bei `<....>` und wird nach 90 s
+    verworfen.
+  - Mit Locator (der Normalfall) klappt es. Unser Port verhält sich genau
+    so.
+- **Einmalige Blockade des Testservers:** Bei ≈10:13:13 lief die
+  Ereignisschleife ≥ 20 s nicht (WebSocket-Keepalive-Timeout, danach
+  „no browser -- disconnecting“).
+  - Der Pluto blieb sicher, es gab keine Aussendung.
+  - Offline braucht derselbe MSG-TO:-Schritt < 1 ms in der Automatik.
+  - Mit `PYTHONASYNCIODEBUG=1` trat es in vier weiteren Läufen nicht mehr
+    auf (längste Blockade 0,67 s, beim Geräteöffnen).
+  - Die Ursache ist offen. Beobachtet wurden RX-Überläufe (`O`) im selben
+    Zeitraum, der RTL lief also im selben Prozess wie der Pluto-TX. Daher
+    **zu beobachten**.
+
 
 - **29.09.2026, 18:44–19:47 UTC:** HackRF, nur Empfang, je 30 min auf
   7,078 MHz und 14,078 MHz USB mit `tools/js8_record_slots.py`.
