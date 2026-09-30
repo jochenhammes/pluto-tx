@@ -70,5 +70,16 @@ gepinnten JS8Call-Quelltext portiert und bitgenau gegen ihn geprüft (pluto-tx
 ## Aktueller Stand
 
 - Software fertig (Phase J6): Backend-, Sim- und Browser-Smoke-Tests.
-- Funkbetrieb: Phase J7 in pluto-tx `docs/JS8_PLAN.md`. Das Protokoll aller
-  Aussendungen steht in pluto-tx `docs/js8/TESTS.md`.
+- **Funkbetrieb getestet (J7, 30.09.2026):** Pluto+ auf 2 m mit −40 dB
+  über Luft zum RTL-SDR, mit einem separaten Test-Server.
+  - FAST @ALLCALL (5 Rahmen) und SLOW CQ wurden von JS8Calls Decoder und vom
+    eigenen gelesen, DT 0,00/−0,02 s.
+  - NOTAUS und „Browser geschlossen“ mitten im Rahmen enden sicher (LO aus).
+  - Dabei behoben: Nach einem NOTAUS schlug das Neuverbinden mit `EBUSY`
+    fehl, weil eine beendete Serie noch am Flowgraph hing.
+  - Das Protokoll aller Aussendungen steht in pluto-tx `docs/js8/TESTS.md`.
+- Senden und Empfangen gibt es nur, wenn der JS8-Codec seinen Selbsttest
+  besteht (`features.js8.tx`, JS8 in `rx_modes`): Er muss für einen
+  Referenzrahmen JS8Calls Töne erzeugen.
+- Offen: ein Test mit echten Gegenstationen auf KW. Dafür gibt es noch keine
+  Antenne.

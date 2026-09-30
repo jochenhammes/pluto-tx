@@ -315,8 +315,8 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
   Rufzeichen. Senden: CQ, Heartbeat, @ALLCALL- und gerichteter Text, SNR?,
   SNR-Rapport, ACK, Freitext -- gebaut wie JS8Call selbst, Vorschau mit
   Rahmenzahl und Dauer; die Rahmen gehen in aufeinanderfolgenden Perioden
-  raus, jeder einzeln getastet. Keine automatischen Antworten. Details:
-  [`docs/JS8.md`](docs/JS8.md).
+  raus, jeder einzeln getastet. Keine automatischen Antworten. Im Funkbetrieb
+  getestet (2 m, Pluto+ → RTL-SDR, J7). Details: [`docs/JS8.md`](docs/JS8.md).
 - Stationsdaten (Rufzeichen, Locator) in der Kopfzeile, gespeichert; genutzt
   für FT8, JS8 und als M17-Vorbelegung. Startwert aus `WEB_TRX_STATION_CALL` /
   `WEB_TRX_STATION_LOCATOR` in `web-trx.env`.
@@ -349,7 +349,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 - Mehrgeräte-Betrieb, TLS-Reverse-Proxy.
 - FT8-Senden im Funkbetrieb testen (F3/F4 in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
-- JS8 im Funkbetrieb testen (J7 in pluto-tx `docs/JS8_PLAN.md`).
+- JS8 mit echten Gegenstationen auf KW (2 m über Luft ist getestet, J7).
 - Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
 
 ## Struktur

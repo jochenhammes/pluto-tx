@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, Meshtastic/LoRa, MeshCore/LoRa) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic/LoRa, MeshCore/LoRa) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -30,7 +30,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, JS8 (JS8Call-kompatibel, Normal/Fast/Turbo/Slow), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Fernbetrieb** | `web-trx` — Browser-Oberfläche (FastAPI + Svelte) auf derselben Codebasis, ein Betreiber, Login, HTTPS |
@@ -130,6 +130,25 @@ für RX) und installiert, falls noch nicht vorhanden, das apt-Paket `wsjtx`,
 dessen Decoder `jt9` die RX-App bevorzugt nutzt (findet rund 1,5-mal so viele
 Signale wie ft8_lib). Ohne das Skript ist FT8 in beiden Apps ausgegraut.
 
+### Optional: JS8
+
+```
+./install-js8.sh [--with-js8call]
+```
+
+Der JS8-Codec selbst ist reines Python und im Repo. Das Skript:
+- klont [JS8Call-improved](https://github.com/JS8Call-improved/JS8Call-improved)
+  am gepinnten Stand (v2.5.2, `f0f0d01b`) nach `js8call/`;
+- entnimmt daraus die JSC-Wortlisten (nötig für Freitext in Fast/Turbo/Slow)
+  und prüft, dass die eingecheckten Tabellen zum Quelltext passen;
+- baut `tools/js8ref`, JS8Calls eigenen Decoder als Kommandozeilenprogramm.
+  Die RX-App nutzt ihn bevorzugt, sonst den eigenen numpy-Decoder.
+- schließt mit einem Selbsttest ab.
+
+`--with-js8call` installiert zusätzlich das apt-Paket `js8call`, zum
+Gegenprüfen mit der echten JS8Call-Oberfläche. Ohne das Skript funktionieren
+JS8-TX, -RX und Freitext in Normal trotzdem.
+
 ### Optional: RADE V1
 
 ```
@@ -225,7 +244,7 @@ Ziel) direkt in der GUI einstellbar.
 Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
 gewählten primären Empfangsmodus (man kann z.B. FM hören und
 gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
-aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8 **oder** Meshtastic) kann
+aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8, JS8 **oder** Meshtastic) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
@@ -299,6 +318,46 @@ Gerät; abschaltbar per „Drift comp.“ bzw. `--no-drift-comp`.
 CLI: `pluto-cli tx ft8 --call DA2JH --locator JO31` (CQ) bzw. `--kind report
 --dx DL1ABC --report -12`, `--message "..."`, `--slot even|odd`, und
 `pluto-cli rx ssb --freq 14074000 --digimode ft8`.
+
+**JS8 (JS8Call).** Im Digimodes-Reiter beider Apps, in Web-TRX und in
+`pluto-cli`, in allen vier Geschwindigkeiten:
+
+| Speed | Periode | Tonabstand |
+|---|---|---|
+| Normal | 15 s | 6,25 Hz |
+| Fast | 10 s | 10 Hz |
+| Turbo | 6 s | 20 Hz |
+| Slow | 30 s | 3,125 Hz |
+
+- **Protokoll:** Nachrichten, Rahmen und Wellenform sind nach dem gepinnten
+  JS8Call-Quelltext nachgebaut und bitgenau gegen 176 Referenzfälle aus
+  JS8Call geprüft. Die Referenzen stehen in [`docs/js8/SPEC.md`](docs/js8/SPEC.md).
+- **TX:**
+  - Nachrichtenarten: CQ, Heartbeat, @ALLCALL, gerichtete Nachricht, SNR?,
+    SNR-Rapport, ACK, Freitext.
+  - Eine Nachricht geht in bis zu 20 aufeinanderfolgenden Perioden hinaus.
+    Jeder Rahmen wird einzeln getastet, dazwischen ist der Sender dunkel.
+  - Der erste Rahmen startet nie verspätet in eine laufende Periode. Ein
+    Abbruch oder NOTAUS verwirft den Rest der Nachricht.
+  - Die ganze Signalbreite muss in einem Amateurband liegen. Die
+    Pluto-Driftkompensation wird wie bei FT8 genutzt.
+  - Es gibt keine automatischen Antworten.
+- **RX:**
+  - Eine Geschwindigkeit oder alle gleichzeitig.
+  - Mehrrahmen-Nachrichten werden je Frequenz wie in JS8Call zusammengesetzt.
+  - Dekodiert wird mit JS8Calls eigenem Decoder (`js8ref`) oder dem eigenen
+    numpy-Decoder.
+- **Getestet (J7, 2026-09-30):** Pluto+ auf 2 m mit −40 dB → RTL-SDR über
+  Luft.
+  - Alle Geschwindigkeiten über CLI, TX-App und Web-TRX wurden von beiden
+    Decodern gelesen, DT ±0,02 s.
+  - Die Abbruchwege wurden mit `iio_attr` geprüft.
+  - Einen Test mit echten KW-Gegenstationen gibt es noch nicht (keine
+    KW-Antenne). Details in [`docs/js8/TESTS.md`](docs/js8/TESTS.md).
+- **CLI:**
+  - `pluto-cli tx js8 --mycall DA2JH --kind cq --submode normal`, bzw.
+    `--kind directed --to DL1ABC --text "..."`;
+  - `pluto-cli rx ssb --freq 7078000 --digimode js8 --js8-submode all`.
 
 **Meshtastic (LoRa).** Sendet und empfängt echte Meshtastic-Pakete
 (alle neun Modem-Presets LongFast … ShortTurbo, je EU433/EU868; Träger und
@@ -422,8 +481,8 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8 | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
-| **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8 (Audio + echtes serielles PTT) | — (kein RX-Backend) |
+| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 (Audio + echtes serielles PTT) | — (kein RX-Backend) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und
 Connect/Disconnect-Buttons. **Nur `pluto-tx`** hat zusätzlich ein
@@ -454,7 +513,7 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
 ## Struktur
 
 ```
-install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-web-trx.sh
+install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-js8.sh / install-web-trx.sh
 pluto_tx/                 # Sende-App
 ├── config.py                # geräteunabhängige Konstanten
 ├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard)
@@ -466,6 +525,7 @@ pluto_tx/                 # Sende-App
 ├── meshcore_codec.py / meshcore_identity.py  # MeshCore: Paketformat, Adverts (Ed25519), Gruppentext (AES-ECB+HMAC), Knotenidentität
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
 ├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib
+├── js8.py / js8_phy.py / js8_message.py / js8_source.py / js8_tables.py  # JS8: Wellenform + Slotplan, Rahmen (LDPC/CRC/Costas), Nachrichten (Varicode/JSC), Sequenzquelle, aus JS8Call extrahierte Tabellen
 ├── gui.py / app.py
 ├── webtrx_control.py / webtrx_widget.py  # Web-TRX starten/stoppen/abfragen (Qt-frei) + die Zeile in beiden Apps
 └── da2jh-test.wav              # Standard-Testaufnahme
@@ -473,7 +533,9 @@ pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
 ├── waterfall_widget.py         # eigenes pyqtgraph-Wasserfall-Widget
 ├── ft8_decoder.py / ft8_rx.py   # FT8: Slot-Decoder (jt9 oder ft8_lib), UTC-Slot-Empfänger
+├── js8_decoder.py / js8_rx.py / js8_assembly.py  # JS8: Slot-Decoder (js8ref oder eigener), Empfänger je Speed, Mehrrahmen-Zusammensetzung
 └── ...
+tools/js8ref/              # JS8Calls Decoder als Kommandozeilenprogramm (Referenz, von install-js8.sh gebaut)
 tests/                     # Unit-/Loopback-Tests: python3 -m unittest discover tests
 pluto_cli/                 # headless CLI, importiert die beiden Apps oben, siehe pluto_cli/README.md
 web-trx/                   # Browser-Oberfläche: backend/ (FastAPI), frontend/ (Svelte), scripts/, docs/ -- siehe web-trx/README.md
@@ -556,6 +618,9 @@ Die optionalen Abhängigkeiten `gr-m17` (GPLv2), `rade_c`/RADE
 (BSD-2-Clause) und `ft8_lib` (MIT) werden von `install-m17.sh`/`install-rade.sh`/
 `install-ft8.sh` separat aus ihren jeweiligen Quellen gebaut, nicht in diesem Repo
 vendort. WSJT-X (`jt9`, GPLv3) wird als eigenständiges Programm aufgerufen.
+`pluto_tx/js8_tables.py` ist aus dem JS8Call-Quelltext (GPLv3) abgeleitet;
+`install-js8.sh` klont JS8Call separat und baut `tools/js8ref` gegen die
+unveränderten Quellen.
 
 ## Danksagungen
 
@@ -563,4 +628,5 @@ vendort. WSJT-X (`jt9`, GPLv3) wird als eigenständiges Programm aufgerufen.
 - [freedv/rade_c](https://github.com/freedv/rade_c) — RADE (Radio Autoencoder)
 - [FreeDV](https://freedv.org/) / [codec2](https://github.com/drowe67/codec2) — HF-Digitalsprache
 - [kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) und [WSJT-X](https://wsjt.sourceforge.io/) — FT8
+- [JS8Call](http://js8call.com/) (KN4CRD) und [JS8Call-improved](https://github.com/JS8Call-improved/JS8Call-improved) — JS8
 - [GNU Radio](https://www.gnuradio.org/) — das Fundament, auf dem alles hier aufbaut
