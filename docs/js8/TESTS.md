@@ -74,6 +74,7 @@ Alle J7-Aussendungen am 30.09.2026 mit denselben Einstellungen:
 | 07:01:45–07:05:00 | CLI | H2 NORMAL erneut (nach dem Spätstart-Fix): CQ, HB, @ALLCALL 60, gerichtet, SNR? | 10 | alle 10 von beiden, DT −0,02 s, Drift +0,9…3,0 Hz |
 | 07:06:20–07:08:30 | CLI | H2 FAST erneut: dieselben 5 Nachrichten | 10 | alle 10 von beiden, DT 0,00 s, Drift +1,2…2,1 Hz |
 | 07:10:00–07:16:30 | CLI | H2 SLOW erneut: dieselben 5 Nachrichten | 10 | DT −0,02 s; beide 6, nur „own“ 2, keiner 2 (CQ, gerichtet 1/2, SNR? — Drift +2,3…4 Hz) |
+| 08:46:00–08:52:30 | CLI | H2 SLOW mit Drift-Sitzung über Prozessgrenzen (`6a5a8e3`): dieselben 5 Nachrichten | 10 | alle 10 von beiden, DT −0,02 s, Drift +0,5…2,1 Hz; Kompensation −0,377 (kalt) → −0,155 Hz/s |
 
 ## Decoder-Messung (J2, Software, 29.09.2026)
 
@@ -261,25 +262,36 @@ plus RTL-SDR.
 | CLI | NORMAL | 10 | 10 | −0,02 s | +0,9…3,0 Hz |
 | CLI | FAST | 10 | 10 | 0,00 s | +1,2…2,1 Hz |
 | CLI | TURBO (1. Lauf, pünktlich) | 11 | 11 | 0,00…+0,02 s | +0,9…1,3 Hz |
-| CLI | SLOW | 10 | 6 (+2 nur „own“) | −0,02 s | +2,3…4 Hz |
+| CLI | SLOW (vor dem Drift-Fix) | 10 | 6 (+2 nur „own“) | −0,02 s | +2,3…4 Hz |
+| CLI | SLOW (Drift-Sitzung über Läufe) | 10 | 10 | −0,02 s | +0,5…2,1 Hz |
 | TX-App | NORMAL | 5 | 5 | −0,02 s | +1,8…2,9 Hz |
 | TX-App | SLOW | 1 | 1 | −0,02 s | +2,4 Hz |
 | Web | FAST | 5 | 5 | 0,00 s | +0,2…0,7 Hz |
 | Web | SLOW | 1 | 1 | −0,02 s | +1,2 Hz |
 
 **Planziele H2:**
-- **„100 % dekodiert“ und „DT ±0,3 s“:** erfüllt für NORMAL, FAST und TURBO
-  über alle drei Wege. Außerdem erfüllt für SLOW über TX-App und Web.
-- **SLOW über die CLI:** 2 von 10 Rahmen verloren.
+- **„100 % dekodiert“ und „DT ±0,3 s“:** erfüllt für alle Geschwindigkeiten
+  über alle drei Wege.
+- SLOW über die CLI erst, seit die CLI den Driftzustand über Läufe hinweg
+  fortsetzt (Entscheidung des Betreibers, Befund 5).
 - **„Frequenzfehler < 1 Hz über den Rahmen“:** meist *nicht* erfüllt (0,2…4 Hz).
   - Gemessen wird Pluto plus RTL-SDR zusammen. Die Restdrift schwankt mit dem
     Wärmezustand des Pluto zwischen −0,5 und −2,5 ppb/s, die Vorkompensation
     trifft das nur auf ≈ ±1,5 ppb/s.
   - Für NORMAL/FAST/TURBO (Tonabstand 6,25–20 Hz) ist das unkritisch.
   - Für SLOW (3,125 Hz über 25 s) ist es grenzwertig.
-- **Offen, Entscheidung des Betreibers:** CLI-Driftmodell über Prozessgrenzen
-  (Zeitpunkt der letzten Aussendung merken), Neuanpassung des Modells für
-  2 m, oder SLOW in der CLI ohne Vorkompensation.
+
+**Befund 5, auf Entscheidung des Betreibers behoben:** Die CLI merkt sich pro
+Gerät Sitzungsbeginn und Ende der letzten JS8-Aussendung
+(`$XDG_STATE_HOME/pluto-tx/js8_drift.json`).
+- Ein Lauf innerhalb von 5 min danach setzt die Sitzung fort
+  (`PlutoTxFlowgraph.restore_drift_history()`, additiv).
+- Längere Pausen starten wieder kalt.
+- FT8 ist unverändert.
+- **Ergebnis:** SLOW über die CLI 10/10 von beiden Decodern, Drift von
+  +2,3…4 Hz auf +0,5…2,1 Hz gesunken.
+- Die Restdrift wächst in einer Serie weiter leicht an. Das Modell ist auf
+  1296/432 MHz angepasst; eine 2-m-Anpassung wäre ein eigener Schritt.
 
 ### H4 — Interoperabilität
 
