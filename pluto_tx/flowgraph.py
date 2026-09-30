@@ -1906,6 +1906,15 @@ class PlutoTxFlowgraph(gr.top_block):
         self._run_started = time.monotonic()
         return super().start(*args, **kwargs)
 
+    def restore_drift_history(self, running_s, since_last_tx_s):
+        """For a process that continues an earlier one's transmissions on the same device (pluto_cli runs
+        one process per JS8 message): the drift model (ft8_drift_hz_per_s()) then counts the device as
+        running for running_s and last transmitting since_last_tx_s ago, instead of cold. Call after
+        start()."""
+        now = time.monotonic()
+        self._run_started = now - max(0.0, float(running_s))
+        self._ft8_last_tx_end = now - max(0.0, float(since_last_tx_s))
+
     def ft8_drift_hz_per_s(self):
         """Predicted carrier drift (Hz/s) during the next FT8 transmission, from the measured
         per-device model (config.FT8_DRIFT_MODEL): a constant part while transmitting (the TX chain

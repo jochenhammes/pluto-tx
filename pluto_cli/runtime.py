@@ -272,6 +272,64 @@ def _run_ft8_series(tb, args, emitter: Emitter):
         emitter.emit("unkeyed", mode=PlutoTxFlowgraph.MODE_FT8)
 
 
+# JS8 drift pre-compensation across CLI runs: the drift model (PlutoTxFlowgraph.ft8_drift_hz_per_s()) counts
+# its warm-up from the flowgraph's start, but pluto_cli starts a fresh flowgraph for every message, so in a
+# series it always predicted a cold device and over-compensated (J7 on 2 m: SLOW frames lost). The last
+# transmission per device is kept here; a run within JS8_DRIFT_SESSION_GAP_S of it continues that session.
+JS8_DRIFT_STATE_PATH = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                                    "pluto-tx", "js8_drift.json")
+# Longer pauses start cold again (J7: the first frame after 8 min drifted like a freshly started device).
+JS8_DRIFT_SESSION_GAP_S = 300.0
+
+
+def _js8_drift_key(args):
+    from pluto_tx import devices as tx_devices
+    try:
+        connection = resolve_connection(tx_devices.DEVICE_REGISTRY[args.device], args.uri)
+    except Exception:
+        connection = getattr(args, "uri", None)
+    return f"{args.device}:{connection or ''}"
+
+
+def _js8_drift_load(path=None):
+    try:
+        with open(path or JS8_DRIFT_STATE_PATH) as f:
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def js8_drift_restore(tb, key, now=None, path=None):
+    """Before the first frame: continue the device's session if its last JS8 transmission (from an earlier
+    CLI run) ended at most JS8_DRIFT_SESSION_GAP_S ago. Returns the session start (wall clock) to save
+    afterwards."""
+    now = time.time() if now is None else now
+    entry = _js8_drift_load(path).get(key) or {}
+    try:
+        session_start, last_end = float(entry["session_start"]), float(entry["last_tx_end"])
+    except (KeyError, TypeError, ValueError):
+        return now
+    if not 0.0 <= now - last_end <= JS8_DRIFT_SESSION_GAP_S or session_start > last_end:
+        return now
+    tb.restore_drift_history(now - session_start, now - last_end)
+    return session_start
+
+
+def js8_drift_save(key, session_start, last_tx_end, path=None):
+    path = path or JS8_DRIFT_STATE_PATH
+    state = _js8_drift_load(path)
+    state[key] = {"session_start": session_start, "last_tx_end": last_tx_end}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass                    # only the drift estimate of the next run suffers
+
+
 def _run_js8_series(tb, args, emitter: Emitter):
     """JS8: the message's frames in consecutive periods of its speed (pluto_tx.js8.plan_frames(): the first
     frame keyed JS8_KEY_EARLY_S ahead -- one source swap --, every later one JS8_REKEY_EARLY_S ahead), each
@@ -289,13 +347,18 @@ def _run_js8_series(tb, args, emitter: Emitter):
     emitter.emit("js8_waiting", slot_utc=time.strftime("%H:%M:%S", time.gmtime(start // period * period)),
                  seconds=round(max(0.0, start - time.time()), 1), frames=n)
     tb.js8_start_at = start
+    drift_key = _js8_drift_key(args)
+    session_start = js8_drift_restore(tb, drift_key)
     sent = 0
+    keyed_any = False
     try:
         for i, (key_at, _) in enumerate(plan):
             while time.time() < key_at:
                 time.sleep(min(0.05, max(0.0, key_at - time.time())))
+            keyed_any = True
             tb.key_ptt()
-            emitter.emit("keyed", mode=PlutoTxFlowgraph.MODE_JS8, frame=i + 1, of=n)
+            emitter.emit("keyed", mode=PlutoTxFlowgraph.MODE_JS8, frame=i + 1, of=n,
+                         drift_comp_hz_s=round(tb.js8_last_drift_comp_hz_s, 4))
             time.sleep(tb.js8_hold_s)
             tb.unkey_ptt()
             emitter.emit("unkeyed", mode=PlutoTxFlowgraph.MODE_JS8, frame=i + 1, of=n)
@@ -306,6 +369,9 @@ def _run_js8_series(tb, args, emitter: Emitter):
         tb.js8_cancel()
         emitter.emit("js8_cancelled", sent=sent, of=n)
         raise
+    finally:
+        if keyed_any:
+            js8_drift_save(drift_key, session_start, time.time())
     emitter.emit("js8_done", frames=n)
 
 

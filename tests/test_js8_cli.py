@@ -49,6 +49,53 @@ class TxCliTests(unittest.TestCase):
         from tests import fakes
         fakes.register_tx()
 
+    def setUp(self):
+        import tempfile
+        from pluto_cli import runtime
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state_path = os.path.join(tmp.name, "js8_drift.json")
+        patcher = mock.patch.object(runtime, "JS8_DRIFT_STATE_PATH", self.state_path)  # never the user's file
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_drift_state_across_runs(self):
+        from pluto_cli import runtime
+
+        class Tb:
+            history = None
+
+            def restore_drift_history(self, running_s, since_last_tx_s):
+                self.history = (running_s, since_last_tx_s)
+
+        runtime.js8_drift_save("pluto:ip:x", 1000.0, 1100.0)
+        tb = Tb()
+        self.assertEqual(runtime.js8_drift_restore(tb, "pluto:ip:x", now=1160.0), 1000.0)   # continues
+        self.assertEqual(tb.history, (160.0, 60.0))
+        tb = Tb()
+        late = 1100.0 + runtime.JS8_DRIFT_SESSION_GAP_S + 1
+        self.assertEqual(runtime.js8_drift_restore(tb, "pluto:ip:x", now=late), late)          # cold again
+        self.assertIsNone(tb.history)
+        self.assertEqual(runtime.js8_drift_restore(tb, "hackrf:", now=1160.0), 1160.0)       # other device
+        with open(self.state_path, "w") as f:
+            f.write("{broken")
+        self.assertEqual(runtime.js8_drift_restore(tb, "pluto:ip:x", now=1160.0), 1160.0)
+        self.assertIsNone(tb.history)
+
+    def test_cli_runs_record_and_continue_the_session(self):
+        code, _events = run_cli(TX + ["--kind", "cq"])
+        self.assertEqual(code, 0)
+        with open(self.state_path) as f:
+            (first,) = json.load(f).values()
+        self.assertLessEqual(first["session_start"], first["last_tx_end"])
+        self.assertLess(time.time() - first["last_tx_end"], 5.0)
+        code, _events = run_cli(TX + ["--kind", "hb"])                     # restores into a real flowgraph
+        self.assertEqual(code, 0)
+        with open(self.state_path) as f:
+            (second,) = json.load(f).values()
+        self.assertEqual(second["session_start"], first["session_start"])   # the same session
+        self.assertGreater(second["last_tx_end"], first["last_tx_end"])
+
     def test_argument_checks(self):
         from pluto_cli import app
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
