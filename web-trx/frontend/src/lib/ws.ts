@@ -41,8 +41,9 @@ export class WebTrxClient {
   onAudio: (a: AudioChunk) => void = () => {};
   onOpen: () => void = () => {};
   /** wasOpen: false if the attempt never got through (server down, or the
-   * handshake was refused because the session is no longer valid). */
-  onClose: (wasOpen: boolean) => void = () => {};
+   * handshake was refused because the session is no longer valid). code:
+   * the WebSocket close code (4000: the server closed us as unresponsive). */
+  onClose: (wasOpen: boolean, code: number) => void = () => {};
 
   /** Connects and keeps the connection up: after a drop it reconnects with
    * backoff until close() is called. Each new connection starts with a
@@ -63,16 +64,23 @@ export class WebTrxClient {
       this.attempt = 0;
       this.onOpen();
     };
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       if (this.ws === ws) this.ws = null;
-      this.onClose(wasOpen);
+      this.onClose(wasOpen, ev.code);
       if (!this.wanted) return;
       const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt++, RECONNECT_DELAYS_MS.length - 1)];
       this.timer = setTimeout(() => this.open(), delay);
     };
     ws.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data === "string") {
-        this.onEvent(JSON.parse(ev.data) as ServerEvent);
+        const e = JSON.parse(ev.data) as ServerEvent;
+        if (e.event === "hb") {
+          // Server heartbeat (backend session.py): answered right here from the event loop -- the proof that
+          // this page is alive. No answer for 5 s ends any transmission on the server.
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ request: "hb_ack", seq: e.seq }));
+          return;
+        }
+        this.onEvent(e);
       } else {
         this.handleBinary(ev.data as ArrayBuffer);
       }

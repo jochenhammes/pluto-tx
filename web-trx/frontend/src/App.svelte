@@ -373,8 +373,11 @@
     wsLostNotified = false;
     log("WS verbunden");
   };
-  client.onClose = (wasOpen) => {
+  client.onClose = (wasOpen, code) => {
     wsConnected = false;
+    if (code === 4000) {
+      pushNotice("Verbindung getrennt: der Browser hat nicht mehr reagiert — eine laufende Aussendung wurde beendet");
+    }
     // The server's watchdog unkeys a voice over without mic audio anyway;
     // locally just stop sending and wait for the fresh 'hello'.
     pttHeld = false;
@@ -396,7 +399,7 @@
   };
   type DirSnapshot = { device_type: string | null; connection: string | null; mode: string | null;
     freq_hz: number; mode_params: Record<string, unknown>; power?: TxPower | null; settings?: TxSettings;
-    gains?: Record<string, number>; ft8_armed?: boolean; js8_armed?: boolean };
+    gains?: Record<string, number>; ft8_armed?: boolean; js8_armed?: boolean; keyed?: boolean };
 
   // Take over the server's actual state -- another tab or a script may have
   // changed it, and the server (not this page) is what actually transmits.
@@ -451,6 +454,9 @@
     if (tx.mode === "ft8") ft8Tx = { ...ft8Tx, ...(p as Partial<typeof ft8Tx>) };
     if (tx.mode === "js8") js8Tx = { ...js8Tx, ...(p as Partial<typeof js8Tx>) };
     js8Armed = tx.js8_armed ? (js8Armed ?? { start_at: 0, starts: [], frames: 0, slot_utc: "…" }) : null;
+    // Keyed or not is the server's word too: after a reconnect (e.g. the server ended a transmission while
+    // this page was frozen) a stale local "keyed" must not survive.
+    keyed = !!tx.keyed;
     // An armed series survives a page reload; its details come with the next ft8_armed.
     ft8Armed = tx.ft8_armed ? (ft8Armed ?? { start_at: 0, slot_utc: "…", parity: "", repetition: 0, of: 0 }) : null;
     txPower = tx.power ?? null;
@@ -532,6 +538,9 @@
     if (e.event === "js8_message") {
       const m = e as unknown as Js8Message;
       js8Messages = [...js8Messages.filter((x) => x.id !== m.id), m].slice(-300);
+    }
+    if (e.event === "tx_aborted" && e.reason === "client_unresponsive") {
+      pushNotice(`Aussendung beendet: kein Browser hat ${String(e.timeout_s)} s lang reagiert`);
     }
     if (e.event === "js8_auto") js8Auto = e as unknown as Js8AutoStatus;
     if (e.event === "js8_auto_event") {
@@ -887,7 +896,9 @@
   }
 </script>
 
-<svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} on:blur={stopAudioTx} />
+<!-- PTT must never stay held when the page loses focus, is hidden or left (a held space bar gets no keyup) -->
+<svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} on:blur={stopAudioTx} on:pagehide={stopAudioTx} />
+<svelte:document on:visibilitychange={() => document.visibilityState === "hidden" && stopAudioTx()} />
 
 {#if !authChecked}
   <div class="loading">Web-TRX &mdash; lade&hellip;</div>

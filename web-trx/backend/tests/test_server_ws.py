@@ -2,11 +2,13 @@
 FastAPI WebSocket layer, against SimBackend -- the second layer of the
 debugging strategy from docs/PROJECT_PLAN.md (no browser, no asyncio
 subtleties left to chance, still no GNU Radio/hardware required)."""
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from web_trx import protocol
+from web_trx import protocol, session
 from web_trx.auth import AuthManager
 from web_trx.server import create_app
 from web_trx.sim_backend import SimBackend
@@ -562,3 +564,125 @@ def test_js8_sim_loopback_reaches_the_browser_as_a_message():
             msg = next(e for e in events if e["event"] == "js8_message" and e["sender"] == "DA2JH")
             assert msg["text"] == text and msg["to"] == "DL1ABC" and msg["complete"]
 
+
+
+# --- browser responsiveness (session.py heartbeat, docs/BROWSER_AUDIO.md) -------------------------------------
+
+
+@pytest.fixture
+def fast_heartbeat(monkeypatch):
+    monkeypatch.setattr(session, "HB_INTERVAL_S", 0.1)
+    monkeypatch.setattr(session, "CLIENT_TIMEOUT_S", 0.6)
+
+
+def _fm_keyed(ws):
+    ws.receive_json()  # hello
+    ws.send_json({"request": "connect", "direction": "tx", "device_type": "sim"})
+    assert ws.receive_json()["event"] == "connected"
+    ws.send_json({"request": "select_mode", "direction": "tx", "mode": "fm", "params": {}})
+    assert ws.receive_json()["event"] == "mode"
+    ws.send_json({"request": "ptt_on"})
+
+
+def _answer_for(ws, seconds):
+    """Reads events for `seconds`, answering every heartbeat -> the events seen."""
+    seen = []
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        event = ws.receive_json()
+        seen.append(event)
+        if event["event"] == "hb":
+            ws.send_json({"request": "hb_ack", "seq": event["seq"]})
+    return seen
+
+
+def _closed_code(ws, max_events=500):
+    for _ in range(max_events):
+        try:
+            ws.receive_json()
+        except WebSocketDisconnect as e:
+            return e.code
+    return None
+
+
+def test_an_answering_browser_keeps_the_transmission(fast_heartbeat):
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            _fm_keyed(ws)
+            seen = _answer_for(ws, 1.5)
+            assert [e["seq"] for e in seen if e["event"] == "hb"] == sorted(e["seq"] for e in seen if e["event"] == "hb")
+            assert sum(e["event"] == "hb" for e in seen) >= 4           # checked every LIVENESS_CHECK_S
+            assert backend.keyed
+            ws.send_json({"request": "ptt_off"})
+            assert _wait_until(lambda: not backend.keyed)
+
+
+def test_a_silent_browser_ends_the_transmission_and_is_closed(fast_heartbeat):
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as ws:
+            _fm_keyed(ws)
+            assert _wait_until(lambda: backend.keyed)
+            t0 = time.monotonic()
+            assert _wait_until(lambda: not backend.keyed, timeout=3.0)      # nobody answers any more
+            assert time.monotonic() - t0 < 0.6 + session.LIVENESS_CHECK_S + 0.5
+            assert _closed_code(ws) == session.UNRESPONSIVE_CLOSE_CODE
+
+
+def test_a_second_answering_tab_keeps_the_transmission(fast_heartbeat):
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        with client.websocket_connect("/ws") as silent, client.websocket_connect("/ws") as ws:
+            silent.receive_json()                                           # hello, then never again
+            _fm_keyed(ws)
+            _answer_for(ws, 1.5)
+            assert backend.keyed                                            # one live browser is enough
+            assert _closed_code(silent) == session.UNRESPONSIVE_CLOSE_CODE
+            ws.send_json({"request": "ptt_off"})
+            assert _wait_until(lambda: not backend.keyed)
+
+
+def test_an_armed_js8_message_is_cancelled(fast_heartbeat, monkeypatch):
+    _fast_js8(monkeypatch, key_in_s=5.0)
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        events = []
+        manager = client.app.state.manager
+        orig_backend, orig_manager = backend._emit_event, manager._emit_event
+
+        def spy(orig):
+            async def emit(name, fields):
+                events.append((name, fields))
+                await orig(name, fields)
+            return emit
+        backend._emit_event = spy(orig_backend)        # js8_cancelled comes from the backend's series
+        manager._emit_event = spy(orig_manager)        # tx_aborted from the session
+        with client.websocket_connect("/ws") as ws:
+            _js8_tx_ready(ws)
+            ws.send_json({"request": "ptt_on"})
+            assert _wait_until(lambda: backend.snapshot()["tx"]["js8_armed"])
+            assert _wait_until(lambda: not backend.snapshot()["tx"]["js8_armed"], timeout=3.0)
+            assert not backend.keyed
+        cancelled = [f for n, f in events if n == "js8_cancelled"]
+        assert cancelled and cancelled[0]["reason"] == "client_unresponsive"
+        assert any(n == "tx_aborted" and f["reason"] == "client_unresponsive" for n, f in events)
+
+
+def test_hb_ack_is_not_operator_activity(fast_heartbeat, monkeypatch):
+    calls = []
+    with make_client() as client:
+        login(client)
+        backend = client.app.state.manager.backend
+        monkeypatch.setattr(backend, "operator_activity", lambda: calls.append(1))
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()                                               # hello
+            _answer_for(ws, 0.5)                                            # only heartbeats answered
+            assert calls == []                                              # the JS8 idle watchdog keeps counting
+            ws.send_json({"request": "tune", "direction": "rx", "freq_hz": 144_178_000})
+            _answer_for(ws, 0.3)
+            assert calls == [1]

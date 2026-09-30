@@ -35,6 +35,18 @@ logger = logging.getLogger("web_trx.session")
 NO_OPERATOR_GRACE_S = float(os.environ.get("WEB_TRX_NO_OPERATOR_S", "10"))
 STARTUP_GRACE_S = 60.0
 
+# Browser responsiveness (docs/BROWSER_AUDIO.md): every HB_INTERVAL_S each browser gets an 'hb' event and must
+# answer 'hb_ack' from its JavaScript event loop. If no connected browser answered for CLIENT_TIMEOUT_S while
+# a transmission is on or armed, it ends at once -- a hung tab (TCP still open) otherwise keeps a server-driven
+# transmission (FT8/JS8/POCSAG/..., the JS8 automation) going; uvicorn's own WebSocket pings only notice a dead
+# network after up to 20 s. Unresponsive sockets are closed with UNRESPONSIVE_CLOSE_CODE.
+HB_INTERVAL_S = float(os.environ.get("WEB_TRX_HB_INTERVAL_S", "1"))
+CLIENT_TIMEOUT_S = float(os.environ.get("WEB_TRX_CLIENT_TIMEOUT_S", "5"))
+LIVENESS_CHECK_S = 0.25
+HB_SEND_TIMEOUT_S = 1.0
+UNRESPONSIVE_CLOSE_CODE = 4000
+ABORT_TIMEOUT_S = 2.0
+
 Direction = str  # "tx" | "rx"
 
 
@@ -165,7 +177,7 @@ class SessionManager:
 
     REQUESTS = (
         "scan", "connect", "disconnect", "select_mode", "tune", "set_gain",
-        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto",
+        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "hb_ack",
     )
 
     def __init__(self, backend: SessionBackend, tx_log=None):
@@ -174,10 +186,91 @@ class SessionManager:
         self._clients: set[WebSocket] = set()
         self.tx_log = tx_log  # TxLog | None, see txlog.py
         self._no_operator_task: asyncio.Task | None = None
+        self._last_ack: dict[WebSocket, float] = {}   # browser -> monotonic time of its last hb_ack
+        self._hb_seq = 0
+        self._liveness_task: asyncio.Task | None = None
+        self._aborting = False
 
     def start(self) -> None:
         """Called once the event loop runs (server startup)."""
         self._schedule_no_operator(STARTUP_GRACE_S, stop_tx_now=False)
+        self._liveness_task = asyncio.create_task(self._liveness_loop())
+
+    async def stop(self) -> None:
+        task, self._liveness_task = self._liveness_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    # -- browser responsiveness ------------------------------------------------------------------------------
+    async def _liveness_loop(self) -> None:
+        last_hb = time.monotonic()
+        while True:
+            try:
+                await asyncio.sleep(LIVENESS_CHECK_S)
+                now = time.monotonic()
+                if now - last_hb >= HB_INTERVAL_S:
+                    last_hb = now
+                    self._hb_seq += 1
+                    await self._send_heartbeats(self._hb_seq)
+                await self._check_liveness(time.monotonic())
+            except asyncio.CancelledError:
+                return
+            except Exception:  # the watchdog itself must keep running
+                logger.exception("browser liveness check failed")
+
+    async def _send_heartbeats(self, seq: int) -> None:
+        payload = {"event": "hb", "seq": seq, "t": time.time()}
+
+        async def send(ws: WebSocket) -> None:
+            try:  # a hung browser with full TCP buffers must not hold up the others
+                await asyncio.wait_for(ws.send_json(payload), HB_SEND_TIMEOUT_S)
+            except Exception:  # judged by its (missing) hb_ack, not by this send
+                logger.debug("heartbeat to a browser not sent", exc_info=True)
+        await asyncio.gather(*(send(ws) for ws in list(self._clients)))
+
+    def _tx_active(self) -> bool:
+        tx = self.backend.snapshot().get("tx") or {}
+        return bool(tx.get("keyed") or tx.get("ft8_armed") or tx.get("js8_armed"))
+
+    async def _check_liveness(self, now: float) -> None:
+        stale = [ws for ws in list(self._clients) if now - self._last_ack.get(ws, now) > CLIENT_TIMEOUT_S]
+        responsive = any(ws not in stale for ws in self._clients)
+        if stale:
+            for ws in stale:
+                self._clients.discard(ws)
+                self._last_ack.pop(ws, None)
+                asyncio.create_task(self._close_unresponsive(ws))
+            logger.warning("%d browser(s) did not answer for %.0f s -- closed", len(stale), CLIENT_TIMEOUT_S)
+        if not responsive and not self._aborting and self._tx_active():
+            await self._end_transmission_unresponsive()
+
+    async def _close_unresponsive(self, ws: WebSocket) -> None:
+        try:
+            await asyncio.wait_for(ws.close(code=UNRESPONSIVE_CLOSE_CODE, reason="browser unresponsive"),
+                                   HB_SEND_TIMEOUT_S)
+        except Exception:  # a hung socket may not even close cleanly
+            logger.debug("closing an unresponsive browser failed", exc_info=True)
+
+    async def _end_transmission_unresponsive(self) -> None:
+        self._aborting = True
+        try:
+            logger.warning("browser unresponsive for %.0f s -- ending the transmission", CLIENT_TIMEOUT_S)
+            try:
+                self.backend.operator_gone()  # JS8 automation off at once
+            except Exception:
+                logger.exception("switching the JS8 automation off failed")
+            try:
+                await asyncio.wait_for(self.backend.ptt(False, reason="client_unresponsive"), ABORT_TIMEOUT_S)
+            except Exception:  # never leave the TX up: a stuck unkey becomes an E-STOP
+                logger.exception("ending the transmission failed, forcing E-STOP")
+                await self.backend.estop()
+            await self._emit_event("tx_aborted", {"reason": "client_unresponsive", "timeout_s": CLIENT_TIMEOUT_S})
+        finally:
+            self._aborting = False
 
     def _schedule_no_operator(self, grace_s: float, stop_tx_now: bool) -> None:
         if self._no_operator_task is not None:
@@ -219,6 +312,7 @@ class SessionManager:
     async def handle_connection(self, ws: WebSocket) -> None:
         await ws.accept()
         self._clients.add(ws)
+        self._last_ack[ws] = time.monotonic()
         if self._no_operator_task is not None:  # operator back in time: keep the devices
             self._no_operator_task.cancel()
             self._no_operator_task = None
@@ -238,13 +332,14 @@ class SessionManager:
                 text = message.get("text")
                 data = message.get("bytes")
                 if text is not None:
-                    await self._handle_text(text)
+                    await self._handle_text(text, ws)
                 elif data is not None:
                     await self._handle_binary(data)
         except WebSocketDisconnect:
             pass
         finally:
             self._clients.discard(ws)
+            self._last_ack.pop(ws, None)
             if not self._clients:
                 try:
                     self.backend.operator_gone()  # JS8 automation off at once, before any grace period
@@ -252,7 +347,7 @@ class SessionManager:
                     logger.exception("switching the JS8 automation off failed")
                 self._schedule_no_operator(NO_OPERATOR_GRACE_S, stop_tx_now=True)
 
-    async def _handle_text(self, text: str) -> None:
+    async def _handle_text(self, text: str, ws: WebSocket | None = None) -> None:
         import json
 
         try:
@@ -265,6 +360,10 @@ class SessionManager:
             await self._emit_event("error", {"message": f"unknown request '{request}'"})
             return
         params = {k: v for k, v in payload.items() if k != "request"}
+        if request == "hb_ack":  # automatic answer: proves the page is alive, NOT operator activity
+            if ws is not None and ws in self._clients:
+                self._last_ack[ws] = time.monotonic()
+            return
         try:
             self.backend.operator_activity()
             await self._dispatch(request, params)

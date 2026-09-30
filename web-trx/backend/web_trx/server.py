@@ -101,6 +101,7 @@ def create_app(
             start()
         manager.start()
         yield
+        await manager.stop()
         await manager.backend.shutdown()
         tx_log.close()
 
