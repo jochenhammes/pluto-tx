@@ -61,8 +61,14 @@ class PlanTests(unittest.TestCase):
         plan = js8.plan_frames(1000.2, P.NORMAL, 3)
         self.assertEqual([s for _, s in plan], [1005.5, 1020.5, 1035.5])
         self.assertEqual([s - k for k, s in plan], [3.0, 0.5, 0.5])        # one swap, then only re-keying
-        plan = js8.plan_frames(990.9, P.TURBO, 2, key_early_s=1.0)     # current period still usable
+        plan = js8.plan_frames(990.9, P.TURBO, 2, key_early_s=1.0, late_max_s=1.0)   # late start allowed
         self.assertEqual([s for _, s in plan], [990.9, 996.1])
+
+    def test_no_late_start_by_default(self):
+        # the current period only while the first frame can still be keyed key_early_s ahead (J7)
+        self.assertEqual(js8.plan_frames(1002.5, P.NORMAL, 1)[0], (1002.5, 1005.5))
+        self.assertEqual(js8.plan_frames(1002.6, P.NORMAL, 1)[0], (1017.5, 1020.5))
+        self.assertEqual(js8.plan_frames(990.9, P.TURBO, 2), [(993.1, 996.1), (1001.6, 1002.1)])
 
     def test_limits(self):
         with self.assertRaises(ValueError):

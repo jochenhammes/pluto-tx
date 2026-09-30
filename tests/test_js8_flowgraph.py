@@ -37,6 +37,48 @@ def decode_burst(iq, a, b, submode):
     return D.decode_own(audio, submode)
 
 
+class Js8SequenceSourceTests(unittest.TestCase):
+    """The source on its own, with a fake clock (work() called directly)."""
+
+    def run_source(self, t_first_call):
+        from pluto_tx.js8_source import Js8SequenceSource
+        rate = 1000
+        now = [t_first_call]
+        src = Js8SequenceSource([100.0, 106.0], 1000, rate, clock=lambda: now[0])
+        src.load_frame(0, np.full(1000, 1.0, np.complex64))
+        src.load_frame(1, np.full(1000, 2.0, np.complex64))
+        got = []
+        while True:
+            out = np.zeros(64, np.complex64)
+            k = src.work([], [out])
+            if k < 0:
+                break
+            got.append(out[:k].copy())
+            now[0] += k / rate
+        return src, np.concatenate(got)
+
+    def count(self, x, value):
+        return int(np.sum(np.abs(x - value) < 1e-6))
+
+    def test_on_time(self):
+        src, x = self.run_source(99.0)
+        self.assertLess(src.start_late_s, 0.01)
+        self.assertEqual((self.count(x, 1.0), self.count(x, 2.0)), (1000, 1000))
+
+    def test_late_first_sample_keeps_later_frames_on_time(self):
+        # the swap overran by 0.75 s: frame 0 loses what is already past, frame 1 still starts exactly 6 s
+        # after frame 0's nominal start (the stream ends at 107 s wall time, not 107.75 s)
+        src, x = self.run_source(100.75)
+        self.assertAlmostEqual(src.start_late_s, 0.75)
+        self.assertEqual((self.count(x, 1.0), self.count(x, 2.0)), (250, 1000))
+        self.assertEqual(len(x), 7000 - 750)
+        self.assertEqual(src.frames_sent, {0, 1})
+
+    def test_late_work_call_within_tolerance_is_not_skipped(self):
+        src, x = self.run_source(100.3)
+        self.assertEqual((self.count(x, 1.0), self.count(x, 2.0)), (1000, 1000))
+
+
 class Js8TxFlowgraphTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -55,10 +97,10 @@ class Js8TxFlowgraphTests(unittest.TestCase):
     def run_series(self, fg, submode, n, stop_after=None, on_frame=None):
         """Key/unkey like the CLI/GUI series will (js8.plan_frames). stop_after: cancel after that many
         frames. on_frame(i): called while frame i is keyed. Returns the plan."""
-        # always an on-time start (full key-early lead, no late start into a running period)
-        plan = js8.plan_frames(time.time() + config.JS8_KEY_EARLY_S + 0.3, submode, n,
-                               key_early_s=config.JS8_KEY_EARLY_S, late_max_s=0.0,
-                               rekey_early_s=config.JS8_REKEY_EARLY_S)
+        # like the apps: never a late start, the first frame always gets the full key-early lead
+        plan = js8.plan_frames(time.time(), submode, n, key_early_s=config.JS8_KEY_EARLY_S,
+                               late_max_s=config.JS8_LATE_START_MAX_S, rekey_early_s=config.JS8_REKEY_EARLY_S)
+        self.assertGreaterEqual(plan[0][1] - plan[0][0], config.JS8_KEY_EARLY_S)
         fg.js8_start_at = plan[0][1]
         for i, (key_at, start) in enumerate(plan):
             if stop_after is not None and i >= stop_after:

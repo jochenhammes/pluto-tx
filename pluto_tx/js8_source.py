@@ -10,7 +10,12 @@ lock), and between frames the RF path is dark.
 Timing: silence until the wall clock reaches the first start (minus lead_s, like Ft8TimedSource); from then
 on sample n is due at that moment + n / rate, so frame i begins exactly (start_i - start_0) * rate samples
 after frame 0 -- sample-exact spacing on a paced device. The source never runs more than WAIT_AHEAD_S
-ahead of the wall clock (an unpaced sink, e.g. the test fake, isn't flooded).
+ahead of the wall clock (an unpaced sink, e.g. the test fake, isn't flooded). If the source only gets to
+its first sample more than LATE_TOLERANCE_S after the first start (the swap took longer than the key-early
+lead), it skips what is already past instead of sending it late: the device consumes in real time, so a
+late start would otherwise shift every frame of the message by that much (J7 on the air: DT +2.6 s for
+all frames), and the RF key windows, which follow the wall clock, would clip each frame's tail. The first
+frame then loses its beginning; every later one is on time.
 
 A frame's samples are handed in by load_frame(i, iq) (the flowgraph does that when it keys frame i, so the
 drift pre-compensation can use the prediction for that moment and 20 SLOW frames need not sit in memory at
@@ -22,6 +27,10 @@ import numpy as np
 from gnuradio import gr
 
 WAIT_AHEAD_S = 0.2
+MIN_CHUNK_S = 0.01
+# Only a real overrun of the swap is skipped: a late work() call alone (scheduler under load) does not mean
+# the signal is late on the air -- the silence produced before is buffered ahead of the device.
+LATE_TOLERANCE_S = 0.5
 
 
 class Js8SequenceSource(gr.sync_block):
@@ -41,6 +50,7 @@ class Js8SequenceSource(gr.sync_block):
         self._t_first = None
         self._zeros = 0
         self.frame_started_at = {}                          # frame index -> wall time of its first sample
+        self.start_late_s = None                            # how late the first sample was (skipped if > tolerance)
         self.frames_sent = set()
 
     @property
@@ -62,12 +72,14 @@ class Js8SequenceSource(gr.sync_block):
         return self._cancelled
 
     def _pace(self, due_at, want):
-        """How many samples may be produced now (>= 1), the next one being due at wall time due_at."""
+        """How many samples may be produced now (>= 1), the next one being due at wall time due_at. Waits
+        for at least a MIN_CHUNK_S block: one sample per call would cost a scheduler round trip each."""
+        need = max(1, min(want, int(MIN_CHUNK_S * self._rate)))
         while True:
             ahead = int((self._clock() + WAIT_AHEAD_S - due_at) * self._rate)
-            if ahead >= 1 or self._cancelled:
+            if ahead >= need or self._cancelled:
                 return max(1, min(want, ahead))
-            time.sleep(min(0.05, (1 - ahead) / self._rate + 0.002))
+            time.sleep(min(0.05, (need - ahead) / self._rate + 0.002))
 
     def work(self, input_items, output_items):
         out = output_items[0]
@@ -78,15 +90,19 @@ class Js8SequenceSource(gr.sync_block):
             if now < self._t0:
                 if self._t_first is None:
                     self._t_first = now
+                to_t0 = int((self._t0 - now) * self._rate) + 1
+                need = max(1, min(len(out), int(MIN_CHUNK_S * self._rate), to_t0))
                 allowed = int((now - self._t_first + WAIT_AHEAD_S) * self._rate) - self._zeros
-                if allowed < 1:
-                    time.sleep((1 - allowed) / self._rate + 0.002)
-                    allowed = 1
-                k = max(1, min(len(out), allowed, int((self._t0 - now) * self._rate) + 1))
+                if allowed < need:
+                    time.sleep((need - allowed) / self._rate + 0.002)
+                    allowed = need
+                k = max(1, min(len(out), allowed, to_t0))
                 out[:k] = 0
                 self._zeros += k
                 return k
-            self._n = 0
+            late = now - self._t0
+            self.start_late_s = late
+            self._n = int(late * self._rate) if late > LATE_TOLERANCE_S else 0
         end = self._offsets[-1] + self._frame_samples
         if self._n >= end:
             return -1

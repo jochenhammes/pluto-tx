@@ -749,7 +749,10 @@ JS8_AUTO_UNKEY_WATCHDOG_S = FT8_AUTO_UNKEY_WATCHDOG_S
 # later frame only needs the RF path keyed again (no graph lock), JS8_REKEY_EARLY_S ahead.
 JS8_KEY_EARLY_S = FT8_KEY_EARLY_S
 JS8_REKEY_EARLY_S = 0.5
-JS8_LATE_START_MAX_S = FT8_LATE_START_MAX_S
+# No late start into a running period (unlike FT8): None = the first period that starts at least
+# JS8_KEY_EARLY_S from now (js8.plan_frames(); J7 on the air: a late first frame plus the source swap gave
+# DT +2.6 s for the whole message).
+JS8_LATE_START_MAX_S = None
 JS8_TX_LATENCY_S = FT8_TX_LATENCY_S
 # An unkey this long (or more) before a frame's scheduled end counts as an abort of the whole message.
 JS8_ABORT_MARGIN_S = 0.05

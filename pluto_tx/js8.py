@@ -8,6 +8,8 @@ Timing: a message of N frames goes out in N consecutive periods of its speed (SP
 starting start_delay_ms after the UTC-aligned period boundary (SPEC 1.3). Every frame is its own key-up /
 key-down: the transmitter is keyed only while a frame is actually sent (no carrier between frames), so
 plan_frames() returns one (key_at, start_at) pair per frame."""
+import math
+
 import numpy as np
 
 from . import ft8, js8_message, js8_phy
@@ -54,20 +56,27 @@ def transmission_time_s(n_frames, submode):
     return (n_frames - 1) * info["period_s"] + info["start_delay_ms"] / 1000 + info["data_duration_s"]
 
 
-def plan_frames(now, submode, n_frames, key_early_s=3.0, late_max_s=1.0, rekey_early_s=0.5):
+def plan_frames(now, submode, n_frames, key_early_s=3.0, late_max_s=None, rekey_early_s=0.5):
     """-> [(key_at, start_at)] for n_frames in consecutive periods. The first period is the current one if
     its nominal start (period + start delay) is at most late_max_s ago, else the next one. The first frame
     is keyed key_early_s ahead (covers the flowgraph's one source swap), every later one rekey_early_s
-    ahead (only the RF path is keyed again, see PlutoTxFlowgraph)."""
+    ahead (only the RF path is keyed again, see PlutoTxFlowgraph).
+
+    late_max_s=None (the default): no late start -- the first period whose start is at least key_early_s
+    away, so the first frame always gets the full lead. A late first frame would put the receiver's DT off for it, and the
+    swap time on top of the lateness easily exceeds the decoders' DT window (J7: +2.6 s, JS8Call's
+    decoder lost those frames)."""
     if not 1 <= n_frames <= MAX_FRAMES:
         raise ValueError(f"a JS8 transmission has 1..{MAX_FRAMES} frames, not {n_frames}")
     info = speed_info(submode)
     period = info["period_s"]
-    _, first = ft8.plan_transmission(now, "any", key_early_s=key_early_s,
-                                     start_in_slot_s=info["start_delay_ms"] / 1000, late_max_s=late_max_s,
-                                     slot_s=period)
-    slot0 = ft8.current_slot_start(first, period)
     delay = info["start_delay_ms"] / 1000
+    if late_max_s is None:      # the first period that starts at least key_early_s from now
+        first = math.ceil((now + key_early_s - delay) / period - 1e-9) * period + delay
+    else:
+        _, first = ft8.plan_transmission(now, "any", key_early_s=key_early_s, start_in_slot_s=delay,
+                                         late_max_s=late_max_s, slot_s=period)
+    slot0 = ft8.current_slot_start(first, period)
     plan = []
     for i in range(n_frames):
         start = first if i == 0 else slot0 + i * period + delay     # later frames on time even if the first was late
