@@ -6,6 +6,7 @@
 #   targets: ubuntu26.04 deb13 (default: both, native architecture)
 #   --version  upstream version (default: 0.9.0~dev<date>.g<commit>)
 #   --out      where the .deb files go (default: packaging/out)
+#   JOBS=n     parallel compile jobs (default: all cores; e.g. JOBS=2 on a 2 GB Raspberry Pi)
 #
 # Steps: build the Web-TRX frontend once (Node.js on the host, or a node
 # container), then per target: a source tree of the working tree (the files
@@ -91,10 +92,10 @@ EOF
     cache="$HERE/.cache/$target"
     mkdir -p "$cache"
     # shellcheck disable=SC2016  # expanded inside the container
-    if ! "$ENGINE" run --rm -v "$WORK/$target:/build:Z" -v "$cache:/cache:Z" -e COMPONENTS_CACHE=/cache \
+    if ! "$ENGINE" run --rm -v "$WORK/$target:/build:Z" -v "$cache:/cache:Z" -e COMPONENTS_CACHE=/cache -e JOBS="${JOBS:-$(nproc)}" \
         -w "/build/pluto-tx-$VERSION" "$image" bash -c '
             set -e
-            dpkg-buildpackage -b -us -uc -j"$(nproc)"
+            dpkg-buildpackage -b -us -uc -j"$JOBS"
             cd /build
             echo "== lintian =="
             lintian --info --display-info --pedantic --profile "$( . /etc/os-release; echo "$ID")" ./*.changes || true
