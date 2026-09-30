@@ -9,13 +9,29 @@
 #   3. builds the reference decoder tools/js8ref (links the unmodified JS8Call sources; the RX side's
 #      preferred JS8 decoder) into js8call/build-js8ref/js8ref -- needs qt6-base-dev, libfftw3-dev,
 #      libboost-dev (installed via apt if missing)
+#   4. self-test: the Python codec reproduces JS8Call's tones for a reference frame, and pluto_tx /
+#      pluto_advanced_rx import with JS8 available
+#   5. optional (--with-js8call): the distribution's JS8Call program (apt package js8call), e.g. to check
+#      your transmissions with the real JS8Call GUI -- not needed by pluto-tx itself
 #
 # Usage:
 #   ./install.sh        # first, if you haven't already
-#   ./install-js8.sh
+#   ./install-js8.sh [--with-js8call]
+#
+# Without qt6-base-dev installed system-wide (no root), point the build at unpacked headers instead:
+#   QT6_INCLUDE=<dir>/usr/include/<multiarch>/qt6 [QT6_MOC=...] ./install-js8.sh   (see tools/js8ref/build.sh)
 #
 # Safe to re-run.
 set -euo pipefail
+
+WITH_JS8CALL=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-js8call) WITH_JS8CALL=1 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        *) echo "Unbekannte Option: $arg (erlaubt: --with-js8call)" >&2; exit 1 ;;
+    esac
+done
 
 if [ "$(id -u)" = "0" ]; then
     echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
@@ -43,7 +59,7 @@ MISSING=()
 command -v git >/dev/null 2>&1 || MISSING+=(git)
 command -v g++ >/dev/null 2>&1 || MISSING+=(build-essential)
 [ -f "${QT6_INCLUDE:-/usr/include/$MA/qt6}/QtCore/QString" ] || MISSING+=(qt6-base-dev)
-[ -x /usr/lib/qt6/libexec/moc ] || MISSING+=(qt6-base-dev-tools)
+[ -x "${QT6_MOC:-/usr/lib/qt6/libexec/moc}" ] || MISSING+=(qt6-base-dev-tools)
 [ -f /usr/include/fftw3.h ] || MISSING+=(libfftw3-dev)
 [ -f /usr/include/boost/crc.hpp ] || MISSING+=(libboost-dev)
 if [ ${#MISSING[@]} -gt 0 ]; then
@@ -87,11 +103,47 @@ echo "Building the reference decoder js8ref (about 15 s)..."
 
 echo
 echo "Verifying: decoding tests/data/js8/wav/cq_sm0_f0.wav..."
-if "$JS8_DIR/build-js8ref/js8ref" decode "$SCRIPT_DIR/tests/data/js8/wav/cq_sm0_f0.wav" 1 | grep -q "@ALLCALL CQ CQ CQ"; then
+# output captured first: with pipefail, `js8ref | grep -q` fails when grep exits early (SIGPIPE to js8ref)
+REF_OUT="$("$JS8_DIR/build-js8ref/js8ref" decode "$SCRIPT_DIR/tests/data/js8/wav/cq_sm0_f0.wav" 1 || true)"
+if grep -q "@ALLCALL CQ CQ CQ" <<<"$REF_OUT"; then
     echo "js8ref decodes the reference slot."
 else
     echo "FEHLER: js8ref dekodiert den Referenz-Slot nicht." >&2
     exit 1
+fi
+
+echo
+echo "Self-test: Python codec and imports..."
+if (cd "$SCRIPT_DIR" && python3 - <<'EOF'
+import sys
+from pluto_tx import js8, js8_message
+from pluto_advanced_rx import js8_decoder
+if not js8.codec_self_test():
+    sys.exit("codec does not reproduce JS8Call's reference tones")
+if not js8_message.jsc_available():
+    sys.exit("JSC word lists not found (js8call/jsc.json)")
+backends = js8_decoder.available_backends()
+if "js8" not in backends:
+    sys.exit(f"js8ref not found by pluto_advanced_rx (backends: {backends})")
+frames = js8_message.build_frames("DA2JH", "", "@ALLCALL JS8 SELF TEST", js8.FAST)
+print(f"codec OK, JSC OK, RX decoders: {', '.join(backends)}; test message -> {len(frames)} frame(s)")
+EOF
+); then
+    :
+else
+    echo "FEHLER: Selbsttest fehlgeschlagen (siehe oben)." >&2
+    exit 1
+fi
+
+if [ "$WITH_JS8CALL" = "1" ]; then
+    echo
+    if command -v js8call >/dev/null 2>&1; then
+        echo "JS8Call already installed: $(command -v js8call)"
+    else
+        echo "Installing the distribution's JS8Call (apt package js8call)..."
+        export NEEDRESTART_MODE=a
+        sudo apt-get install -y js8call
+    fi
 fi
 
 echo
