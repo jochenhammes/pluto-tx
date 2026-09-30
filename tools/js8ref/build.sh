@@ -48,5 +48,5 @@ for s in "${srcs[@]}"; do
   objs+=("$o")
 done
 for p in "${pids[@]}"; do wait "$p"; done
-g++ -o "$OUT/js8ref" "${objs[@]}" "$QTCORE" -lfftw3f -lfftw3f_threads -lpthread
+g++ ${LDFLAGS:-} -o "$OUT/js8ref" "${objs[@]}" "$QTCORE" -lfftw3f -lfftw3f_threads -lpthread
 echo "built $OUT/js8ref"

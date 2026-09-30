@@ -1,0 +1,34 @@
+Source: pluto-tx
+Section: hamradio
+Priority: optional
+Maintainer: Jochen Hammes <hammesj@me.com>
+Build-Depends: debhelper-compat (= 13), dh-python, python3, patchelf,
+ cmake, git, wget, ca-certificates, unzip, autoconf, automake, libtool, pkgconf | pkg-config,
+ gnuradio-dev, libvolk-dev, libboost-all-dev, libuhd-dev, pybind11-dev, python3-dev,
+ python3-numpy, libspdlog-dev, libfmt-dev, libgmp-dev,
+ qt6-base-dev, qt6-base-dev-tools, libfftw3-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/jochenhammes/pluto-tx
+Vcs-Git: https://github.com/jochenhammes/pluto-tx.git
+Rules-Requires-Root: no
+
+Package: pluto-tx
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}, ${gnuradio:Depends},
+ python3 (>= 3.11), python3-pyqt5, python3-pyqtgraph, python3-numpy,
+ python3-libiio, libiio-utils, avahi-daemon,
+ soapysdr-module-hackrf, soapysdr-module-rtlsdr, python3-soapysdr, hackrf, rtl-sdr,
+ python3-pil, fonts-dejavu-mono, python3-serial, python3-cryptography, python3-meshtastic,
+ python3-fastapi, python3-uvicorn, python3-websockets, python3-pydantic, openssl
+Recommends: wsjtx
+Suggests: js8call
+Description: SDR transceiver apps for PlutoSDR, HackRF and RTL-SDR (GNU Radio)
+ pluto-tx (transmitter), pluto-advanced-rx (receiver with waterfall),
+ pluto-cli (headless) and Web-TRX (browser interface) for amateur radio
+ on the ADALM-Pluto, HackRF One and RTL-SDR.
+ .
+ Modes: FM, SSB, FreeDV/RADE, M17, FT8, JS8, PSK31, RTTY, POCSAG,
+ LoRa (Meshtastic, MeshCore), Digitext and file broadcast.
+ .
+ This package includes prebuilt copies of gr-m17, gr-lora_sdr, rade_c,
+ ft8_lib and JS8Call's decoder (js8ref), kept private in /usr/lib/pluto-tx.

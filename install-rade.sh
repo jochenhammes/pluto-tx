@@ -53,6 +53,10 @@ RADE_C_DIR="$SCRIPT_DIR/rade_c"
 # understandable decoded speech, real-time factor ~0.03. rade_c's README
 # only documents building against its own HEAD; pin rather than float.
 RADE_C_COMMIT="0d5c5f7c27e650e3ca8d9e0f7d4781f2e73ee2b0"
+# packaging/components.lock is the one place for the pinned version(s) (also used
+# by the .deb build); the value above is the fallback if that file is missing.
+LOCK="$SCRIPT_DIR/packaging/components.lock"
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^RADE_C_COMMIT=//p' "$LOCK")"; [ -n "$v" ] && RADE_C_COMMIT="$v"; fi
 
 echo "== rade_c (RADE V1 digital voice) installer =="
 echo "Repo directory: $RADE_C_DIR"

@@ -1,0 +1,86 @@
+#!/usr/bin/make -f
+# pluto-tx: Python code in /usr/share/pluto-tx (private), native components
+# built by packaging/build-components.sh into /usr/lib/pluto-tx (private,
+# RPATH), the prebuilt Web-TRX frontend (web-trx/frontend/dist must exist:
+# packaging/build-deb.sh builds it once, the target needs no Node.js).
+export DH_VERBOSE = 1
+export PYBUILD_NAME = pluto-tx
+
+PKG := debian/pluto-tx
+SHARE := $(PKG)/usr/share/pluto-tx
+COMPONENTS_STAGE := debian/components
+COMPONENTS_CACHE ?= $(CURDIR)/debian/.cache
+VERSION := $(shell dpkg-parsechangelog -S Version)
+GR_UPSTREAM := $(shell dpkg-query -W -f='$${Version}' gnuradio-dev | sed 's/-[^-]*$$//; s/^[0-9]*://')
+PY_DEFAULT := $(shell py3versions -dv)
+PY_NEXT := $(shell echo $(PY_DEFAULT) | awk -F. '{printf "%d.%d", $$1, $$2 + 1}')
+GR_NEXT := $(shell echo $(GR_UPSTREAM) | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3 + 1}')
+
+%:
+	dh $@ --with python3
+
+override_dh_auto_configure:
+	test -f web-trx/frontend/dist/index.html || { echo "web-trx/frontend/dist missing (packaging/build-deb.sh builds it)"; exit 1; }
+
+override_dh_auto_build:
+	packaging/build-components.sh $(COMPONENTS_STAGE) $(COMPONENTS_CACHE)
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	# native components
+	mkdir -p $(PKG)
+	cp -a $(COMPONENTS_STAGE)/usr $(PKG)/
+	# Python code, as in a checkout (web-trx/ next to pluto_tx/)
+	mkdir -p $(SHARE)/web-trx/scripts $(SHARE)/web-trx/backend $(SHARE)/web-trx/frontend
+	cp -a pluto_tx pluto_advanced_rx pluto_cli $(SHARE)/
+	rm -f $(SHARE)/pluto_tx/tx-stdin.py $(SHARE)/pluto_cli/README.md
+	printf 'VERSION = "%s"\n' "$(VERSION)" > $(SHARE)/pluto_tx/_version.py
+	touch $(SHARE)/.pluto-tx-package
+	install -m 755 web-trx/scripts/start.sh web-trx/scripts/stop.sh web-trx/scripts/status.sh $(SHARE)/web-trx/scripts/
+	cp -a web-trx/backend/web_trx $(SHARE)/web-trx/backend/
+	cp -a web-trx/frontend/dist $(SHARE)/web-trx/frontend/
+	find $(SHARE) -name __pycache__ -prune -exec rm -rf {} +
+	find $(SHARE) -name '*.py' -exec chmod 644 {} +
+	# launchers and system integration
+	install -D -m 755 packaging/debian/extra/pluto-tx.sh $(PKG)/usr/bin/pluto-tx
+	install -D -m 755 packaging/debian/extra/pluto-advanced-rx.sh $(PKG)/usr/bin/pluto-advanced-rx
+	install -D -m 755 packaging/debian/extra/pluto-cli.sh $(PKG)/usr/bin/pluto-cli
+	install -D -m 755 packaging/debian/extra/web-trx.sh $(PKG)/usr/bin/web-trx
+	install -D -m 755 packaging/debian/extra/pluto-tx-doctor.sh $(PKG)/usr/bin/pluto-tx-doctor
+	install -D -m 644 packaging/debian/extra/60-pluto-tx.rules $(PKG)/usr/lib/udev/rules.d/60-pluto-tx.rules
+	install -D -m 644 packaging/debian/extra/pluto-tx-blacklist-rtl.conf $(PKG)/usr/lib/modprobe.d/pluto-tx-blacklist-rtl.conf
+	install -D -m 644 packaging/debian/extra/web-trx@.service $(PKG)/usr/lib/systemd/system/web-trx@.service
+	for app in pluto-tx pluto-advanced-rx web-trx; do \
+	  install -D -m 644 packaging/debian/extra/$$app.desktop $(PKG)/usr/share/applications/$$app.desktop; \
+	  install -D -m 644 packaging/debian/extra/$$app.svg $(PKG)/usr/share/icons/hicolor/scalable/apps/$$app.svg; \
+	done
+	install -D -m 644 packaging/debian/extra/io.github.jochenhammes.pluto_tx.metainfo.xml \
+	  $(PKG)/usr/share/metainfo/io.github.jochenhammes.pluto_tx.metainfo.xml
+	install -D -m 644 README.md $(PKG)/usr/share/doc/pluto-tx/README.md
+	install -D -m 644 pluto_cli/README.md $(PKG)/usr/share/doc/pluto-tx/README.pluto-cli.md
+	install -D -m 644 web-trx/README.md $(PKG)/usr/share/doc/pluto-tx/README.web-trx.md
+
+override_dh_installman:
+	dh_installman packaging/debian/extra/man/*.1
+
+override_dh_python3:
+	dh_python3 /usr/share/pluto-tx
+	dh_python3 --no-ext-rename /usr/lib/pluto-tx/python
+
+override_dh_installsystemd:
+	# web-trx@.service stays disabled: `web-trx service enable` is a deliberate step
+
+override_dh_makeshlibs:
+	dh_makeshlibs -Xusr/lib/pluto-tx
+
+override_dh_shlibdeps:
+	dh_shlibdeps -l$(CURDIR)/$(PKG)/usr/lib/pluto-tx/lib
+	# the OOT modules are built against exactly this GNU Radio release
+	# ... and their pybind11 modules against exactly this Python version
+	echo 'gnuradio:Depends=gnuradio (>= $(GR_UPSTREAM)), gnuradio (<< $(GR_NEXT)), python3 (>= $(PY_DEFAULT)~), python3 (<< $(PY_NEXT))' >> $(PKG).substvars
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+override_dh_dwz:

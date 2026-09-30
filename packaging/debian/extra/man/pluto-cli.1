@@ -1,0 +1,34 @@
+.TH PLUTO-CLI 1 "2026" "pluto-tx" "User Commands"
+.SH NAME
+pluto-cli \- headless command line for pluto-tx and pluto-advanced-rx
+.SH SYNOPSIS
+.B pluto-cli
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B pluto-cli
+transmits (\fBtx\fR), receives (\fBrx\fR) and lists devices (\fBdevices\fR) without a GUI, using the same flowgraphs as the apps. See /usr/share/doc/pluto-tx/README.pluto-cli.md.
+.PP
+Run
+.B pluto-cli \-\-help
+for all options.
+.SH FILES
+.TP
+.I /usr/share/pluto-tx
+program code
+.TP
+.I /usr/lib/pluto-tx
+bundled native components (gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref)
+.TP
+.I ~/.config/pluto-tx/web-trx.env
+Web-TRX settings (password, port, TLS)
+.TP
+.I ~/.local/state/web-trx/
+Web-TRX runtime data (log, PID, TLS certificate, sessions, TX log)
+.SH SEE ALSO
+.BR pluto-tx (1),
+.BR pluto-advanced-rx (1),
+.BR pluto-cli (1),
+.BR web-trx (1),
+.BR pluto-tx-doctor (1)
+.PP
+/usr/share/doc/pluto-tx/

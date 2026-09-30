@@ -1,0 +1,20 @@
+# Pinned third-party components -- the one place for their versions.
+# Read by the install-*.sh scripts (git installation) and by
+# packaging/build-components.sh (the .deb). Shell syntax: KEY=value, no spaces.
+# tests/test_components_lock.py checks that the installers agree.
+
+GR_M17_REPO=https://github.com/M17-Project/gr-m17.git
+GR_M17_COMMIT=36267b114b41920b3b62d9545afe7d7c854801bf
+
+GR_LORA_SDR_REPO=https://github.com/tapparelj/gr-lora_sdr.git
+GR_LORA_SDR_COMMIT=862746dd1cf635c9c8a4bfbaa2c3a0ec3a5306c9
+
+RADE_C_REPO=https://github.com/freedv/rade_c.git
+RADE_C_COMMIT=0d5c5f7c27e650e3ca8d9e0f7d4781f2e73ee2b0
+
+FT8_LIB_REPO=https://github.com/kgoba/ft8_lib.git
+FT8_LIB_COMMIT=9fec6ca39886edbf96f4f5e71edc76da5074e871
+
+JS8_REPO=https://github.com/JS8Call-improved/JS8Call-improved.git
+JS8_TAG=v2.5.2
+JS8_COMMIT=f0f0d01b357c8eb8786aee687e8b5c787c787159

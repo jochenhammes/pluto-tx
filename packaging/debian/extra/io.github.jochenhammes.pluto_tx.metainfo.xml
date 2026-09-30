@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jochenhammes.pluto_tx</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>pluto-tx</name>
+  <summary>SDR transceiver for PlutoSDR, HackRF and RTL-SDR</summary>
+  <description>
+    <p>Transmitter, receiver with waterfall, headless CLI and a browser interface (Web-TRX)
+    for amateur radio with the ADALM-Pluto, HackRF One and RTL-SDR, built on GNU Radio.</p>
+    <p>Modes: FM, SSB, FreeDV/RADE, M17, FT8, JS8, PSK31, RTTY, POCSAG, LoRa (Meshtastic, MeshCore),
+    Digitext and file broadcast.</p>
+  </description>
+  <launchable type="desktop-id">pluto-tx.desktop</launchable>
+  <url type="homepage">https://github.com/jochenhammes/pluto-tx</url>
+  <developer id="io.github.jochenhammes">
+    <name>Jochen Hammes</name>
+  </developer>
+  <categories>
+    <category>HamRadio</category>
+  </categories>
+  <provides>
+    <binary>pluto-tx</binary>
+    <binary>pluto-advanced-rx</binary>
+    <binary>pluto-cli</binary>
+    <binary>web-trx</binary>
+    <modalias>usb:v1D50p6089d*</modalias>
+    <modalias>usb:v1D50p604Bd*</modalias>
+    <modalias>usb:v1D50pCC15d*</modalias>
+    <modalias>usb:v1FC9p000Cd*</modalias>
+    <modalias>usb:v0BDAp2838d*</modalias>
+    <modalias>usb:v0BDAp2832d*</modalias>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

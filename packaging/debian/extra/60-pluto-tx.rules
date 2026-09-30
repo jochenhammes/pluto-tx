@@ -1,0 +1,14 @@
+# pluto-tx: HackRF and RTL-SDR for the logged-in user (uaccess), no group
+# membership and no new login needed. PlutoSDR's own rule comes with libiio.
+# Before 73-seat-late.rules, which applies the uaccess tag.
+SUBSYSTEM!="usb", GOTO="pluto_tx_end"
+ACTION!="add|change", GOTO="pluto_tx_end"
+# HackRF One, HackRF Jawbreaker, rad1o, HackRF in DFU mode
+ATTR{idVendor}=="1d50", ATTR{idProduct}=="6089", TAG+="uaccess"
+ATTR{idVendor}=="1d50", ATTR{idProduct}=="604b", TAG+="uaccess"
+ATTR{idVendor}=="1d50", ATTR{idProduct}=="cc15", TAG+="uaccess"
+ATTR{idVendor}=="1fc9", ATTR{idProduct}=="000c", TAG+="uaccess"
+# RTL2832U dongles (RTL-SDR Blog, generic DVB-T sticks)
+ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", TAG+="uaccess"
+ATTR{idVendor}=="0bda", ATTR{idProduct}=="2832", TAG+="uaccess"
+LABEL="pluto_tx_end"

@@ -1,0 +1,37 @@
+.TH WEB-TRX 1 "2026" "pluto-tx" "User Commands"
+.SH NAME
+web-trx \- start, stop and query the Web-TRX browser interface
+.SH SYNOPSIS
+.B web-trx
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B web-trx
+\fBstart\fR|\fBstop\fR|\fBrestart\fR|\fBstatus\fR|\fBopen\fR|\fBlog\fR|\fBservice enable\fR|\fBservice disable\fR
+.PP
+controls the Web-TRX server (default https://<host>:8321). The login password is generated on the first start and kept in ~/.config/pluto-tx/web-trx.env.
+\fBservice enable\fR sets it up as a system service for headless operation (starts at boot without login) \- a deliberate step, as the station can then transmit without anybody logged in.
+.PP
+Run
+.B web-trx \-\-help
+for all options.
+.SH FILES
+.TP
+.I /usr/share/pluto-tx
+program code
+.TP
+.I /usr/lib/pluto-tx
+bundled native components (gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref)
+.TP
+.I ~/.config/pluto-tx/web-trx.env
+Web-TRX settings (password, port, TLS)
+.TP
+.I ~/.local/state/web-trx/
+Web-TRX runtime data (log, PID, TLS certificate, sessions, TX log)
+.SH SEE ALSO
+.BR pluto-tx (1),
+.BR pluto-advanced-rx (1),
+.BR pluto-cli (1),
+.BR web-trx (1),
+.BR pluto-tx-doctor (1)
+.PP
+/usr/share/doc/pluto-tx/

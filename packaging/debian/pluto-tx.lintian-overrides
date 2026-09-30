@@ -1,0 +1,11 @@
+# The package layout of docs/RELEASE_PLAN.md: private native components in
+# /usr/lib/pluto-tx/{lib,bin,python}.
+pluto-tx: repeated-path-segment lib [usr/lib/pluto-tx/lib/]
+# The bundled components' own license texts must ship with their binaries
+# (debian/copyright refers to them).
+pluto-tx: extra-license-file [usr/share/doc/pluto-tx/licenses/*]
+# The built Web-TRX frontend, not documentation.
+pluto-tx: package-contains-documentation-outside-usr-share-doc [usr/share/pluto-tx/web-trx/frontend/dist/index.html]
+# One package per target is the plan's choice (one-click install); the
+# architecture-independent part is Python code and the web frontend.
+pluto-tx: arch-dep-package-has-big-usr-share *
