@@ -103,7 +103,8 @@ class Js8Series:
         self._cancelled = True
         self._skip_unkey = device_safe
         try:
-            await self._abort()
+            if self._abort is not None:
+                await self._abort()
         except Exception:  # the flowgraph may already be gone (E-STOP, disconnect)
             logger.exception("JS8 abort failed")
         if not self._keying:
@@ -162,3 +163,7 @@ class Js8Series:
                 self.keyed = False
                 await self._unkey()
             self.keyed = False
+            # Drop the injected actions: their closures hold the flowgraph (and refer back to this series,
+            # a reference cycle) -- kept alive, the stopped Pluto flowgraph would keep its TX buffer and
+            # the next connect fails with EBUSY until the garbage collector happens to run.
+            self._plan = self._key = self._unkey = self._abort = None

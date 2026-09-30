@@ -217,3 +217,20 @@ def test_build_message_like_js8call():
         js8_series.build_message({"call": "", "locator": ""}, {"kind": "cq", "submode": "normal"})
     with pytest.raises(ValueError, match="no message"):
         js8_series.build_message({"call": "DA2JH", "locator": ""}, {"kind": "ack", "to": "", "submode": "normal"})
+
+
+async def test_actions_are_released_when_the_series_ends():
+    """The key/abort closures hold the flowgraph; a finished series must not keep them (reference cycle
+    series <-> closure kept a stopped Pluto flowgraph and its TX buffer alive -> EBUSY on reconnect)."""
+    clock, _radio, series = make(1)
+    series.start()
+    await run_to_end(clock, series)
+    assert series._key is None and series._abort is None and series._unkey is None
+    clock, _radio, series = make(3)
+    series.start()
+    await clock.step()
+    assert await series.cancel("estop", device_safe=True)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert series._key is None and series._abort is None
+
