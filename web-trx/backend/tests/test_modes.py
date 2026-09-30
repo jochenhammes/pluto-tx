@@ -219,8 +219,14 @@ def test_js8_tables_match_pluto_tx():
     from web_trx import js8_series, pluto_path
 
     pluto_path.ensure_importable()
-    from pluto_advanced_rx import config as rx_config
     from pluto_tx import config, js8, js8_message, js8_phy
+
+    # pluto_advanced_rx/config.py needs GNU Radio (not in CI): read as text, like the FT8 test above
+    rx_cfg = PLUTO_RX_CONFIG.read_text()
+
+    def rx_value(name):
+        expr = re.search(rf"^{name} = (.+?)(\s+#.*)?$", rx_cfg, re.MULTILINE).group(1)
+        return rx_value(expr) if re.fullmatch(r"[A-Z0-9_]+", expr) else ast.literal_eval(expr)
 
     assert modes.JS8_MESSAGE_KINDS == tuple(kind for kind, _label in js8_message.MESSAGE_KINDS)
     assert modes.JS8_SUBMODES == tuple(js8.SPEEDS)
@@ -231,8 +237,8 @@ def test_js8_tables_match_pluto_tx():
     assert modes.JS8_TONE_RANGE_HZ == tuple(config.JS8_TONE_RANGE_HZ)
     assert modes.JS8_TONE_DEFAULT_HZ == config.JS8_DEFAULT_TONE_HZ
     assert modes.JS8_MAX_FRAMES == js8.MAX_FRAMES == js8_series.JS8_MAX_FRAMES
-    assert modes.JS8_DECODER_DEFAULT == rx_config.JS8_DECODER_BACKEND
-    assert modes.JS8_BAND_HZ == tuple(rx_config.JS8_BAND_HZ)
+    assert modes.JS8_DECODER_DEFAULT == rx_value("JS8_DECODER_BACKEND")
+    assert modes.JS8_BAND_HZ == tuple(rx_value("JS8_BAND_HZ"))
     cli = (PLUTO_TX_CONFIG.parents[1] / "pluto_cli" / "rx.py").read_text()
     choices = re.search(r'"--js8-decoder", choices=(\(.*?\))', cli).group(1)
     assert ast.literal_eval(choices) == modes.JS8_DECODERS
