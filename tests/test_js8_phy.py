@@ -47,6 +47,20 @@ class EncodeTests(unittest.TestCase):
                 n += 1
         self.assertGreater(n, 250)
 
+    def test_codec_self_test(self):
+        # pluto_tx.js8.codec_self_test() gates JS8 in Web-TRX (features.js8.tx): its vector is JS8Call's
+        from unittest import mock
+        from pluto_tx import js8
+        frame, flags, submode, tones = js8._SELF_TEST
+        case = next(c for c in load_vectors() if c["case"] == "cq_sm0")
+        self.assertEqual((case["frames"][0]["frame"], case["frames"][0]["bits"], case["submode"],
+                          case["frames"][0]["tones"]), (frame, flags, submode, tones))
+        self.assertTrue(js8.codec_self_test())
+        with mock.patch.object(P, "encode", side_effect=lambda *a: np.zeros(79, int)):
+            self.assertFalse(js8.codec_self_test())
+        with mock.patch.object(P, "encode", side_effect=KeyError("table")):
+            self.assertFalse(js8.codec_self_test())
+
     def test_codewords_satisfy_parity_checks(self):
         h = P.check_matrix()
         rng = np.random.default_rng(3)

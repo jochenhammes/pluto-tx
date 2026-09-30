@@ -261,6 +261,19 @@ async def test_direct_sampling_only_for_rtl_sdr():
     assert b.features()["rx_direct_sampling"] == ["rtlsdr"]
 
 
+async def test_js8_features_follow_the_codec_self_test(monkeypatch):
+    b, *_ = make_backend()
+    features = b.features()
+    assert features["js8"]["tx"] and "js8" in features["tx_modes"] and "js8" in features["rx_modes"]
+    assert "own" in features["js8"]["rx_backends"]
+    monkeypatch.setattr(radio_backend, "JS8_AVAILABLE", False)  # e.g. a broken js8_tables.py
+    features = b.features()
+    assert not features["js8"]["tx"] and features["js8"]["rx_backends"] == []
+    assert "js8" not in features["tx_modes"] and "js8" not in features["rx_modes"]
+    with pytest.raises(SessionError):
+        await b.select_mode("tx", "js8", {"kind": "cq", "submode": "normal"})
+
+
 async def test_ft8_decodes_become_one_slot_event_with_sender():
     from pluto_advanced_rx.ft8_decoder import Ft8Decode
 

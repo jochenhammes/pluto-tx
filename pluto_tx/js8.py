@@ -18,6 +18,21 @@ from .js8_phy import FAST, NORMAL, SLOW, TURBO  # noqa: F401  (re-exported)
 SPEEDS = {"normal": NORMAL, "fast": FAST, "turbo": TURBO, "slow": SLOW}
 MAX_FRAMES = 20          # docs/JS8_PLAN.md section 0: at most 20 transmissions in a row
 
+# A bit-exact reference vector from JS8Call v2.5.2 (tests/data/js8/vectors.jsonl, case cq_sm0): frame, flags,
+# speed and the 79 tones JS8Call sends for it.
+_SELF_TEST = ("1evxkMBjPUWe", 3, NORMAL,
+              "4256130753003477525154750242047457744256130015071735626135531364050376664256130")
+
+
+def codec_self_test():
+    """True if this codec still produces JS8Call's tones for the reference frame (a broken or mismatched
+    js8_tables.py makes JS8 unavailable instead of sending frames nobody can decode)."""
+    frame, flags, submode, tones = _SELF_TEST
+    try:
+        return "".join(str(int(t)) for t in js8_phy.encode(frame, flags, submode)) == tones
+    except Exception:
+        return False
+
 
 def submode_from_name(name):
     try:

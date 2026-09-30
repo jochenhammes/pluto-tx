@@ -59,6 +59,10 @@ from pluto_tx.flowgraph import M17_AVAILABLE as TX_M17_AVAILABLE
 from pluto_tx.flowgraph import RADE_AVAILABLE as TX_RADE_AVAILABLE
 from pluto_tx.flowgraph import PlutoTxFlowgraph
 
+# The JS8 codec is pure Python in pluto_tx; it counts as available when it still reproduces JS8Call's tones
+# for a reference frame (a broken js8_tables.py must not send frames nobody can decode).
+JS8_AVAILABLE = tx_js8.codec_self_test()
+
 logger = logging.getLogger("web_trx.radio_backend")
 
 SPECTRUM_POLL_HZ = 25.0
@@ -305,7 +309,7 @@ class GnuRadioBackend(SessionBackend):
                 "rx_direct_sampling": [t for t in RX_DEVICE_TYPES if _supports_direct_sampling(t)],
                 "ft8": {"tx": _tx_mode_available("ft8"), "rx_backends": ft8_rx_backends(),
                         "clock_synced": clock.ntp_synchronized()},
-                "js8": {"tx": _tx_mode_available("js8"), "rx_backends": js8_rx_backends(),
+                "js8": {"tx": _tx_mode_available("js8"), "rx_backends": js8_rx_backends() if JS8_AVAILABLE else [],
                         "submodes": list(tx_js8.SPEEDS), "jsc": tx_js8_message.jsc_available(),
                         "clock_synced": clock.ntp_synchronized()},
                 "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)]}
@@ -1288,11 +1292,14 @@ def _supports_direct_sampling(device_type: str | None) -> bool:
 def _rx_mode_available(mode: str) -> bool:
     if mode == "ft8":
         return bool(ft8_rx_backends())
+    if mode == "js8":
+        return JS8_AVAILABLE and bool(js8_rx_backends())
     return {"m17": RX_M17_AVAILABLE, "rade": RX_RADE_AVAILABLE}.get(mode, True)
 
 
 def _tx_mode_available(mode: str) -> bool:
-    return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE, "ft8": TX_FT8_AVAILABLE}.get(mode, True)
+    return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE, "ft8": TX_FT8_AVAILABLE,
+            "js8": JS8_AVAILABLE}.get(mode, True)
 
 
 def _js8_rx_submodes(name: str) -> tuple:
