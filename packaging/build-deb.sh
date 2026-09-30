@@ -6,6 +6,9 @@
 #   targets: ubuntu26.04 deb13 (default: both, native architecture)
 #   --version  upstream version (default: 0.9.0~dev<date>.g<commit>)
 #   --out      where the .deb files go (default: packaging/out)
+#   --frontend DIR  a built Web-TRX frontend (its dist/ directory) instead of
+#              building it here -- it is architecture-independent, e.g. built
+#              once on a PC and copied to a Raspberry Pi
 #   JOBS=n     parallel compile jobs (default: all cores; e.g. JOBS=2 on a 2 GB Raspberry Pi)
 #
 # Steps: build the Web-TRX frontend once (Node.js on the host, or a node
@@ -21,11 +24,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 OUT="$HERE/out"
 VERSION=""
+FRONTEND=""
 TARGETS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) VERSION="${2:?}"; shift 2 ;;
         --out) OUT="${2:?}"; shift 2 ;;
+        --frontend) FRONTEND="$(cd "${2:?}" && pwd)"; shift 2 ;;
         -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
         ubuntu26.04|deb13) TARGETS+=("$1"); shift ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
@@ -58,7 +63,10 @@ trap 'rm -rf "$WORK"' EXIT
 # --- frontend, once for all targets ------------------------------------------------
 echo "== Web-TRX frontend =="
 export_tree "$WORK" web-trx/frontend
-if command -v npm >/dev/null 2>&1; then
+if [[ -n "$FRONTEND" ]]; then
+    test -f "$FRONTEND/index.html" || { echo "$FRONTEND/index.html missing" >&2; exit 1; }
+    cp -a "$FRONTEND" "$WORK/web-trx/frontend/dist"
+elif command -v npm >/dev/null 2>&1; then
     (cd "$WORK/web-trx/frontend" && npm ci --silent && npm run build --silent)
 else
     "$ENGINE" run --rm -v "$WORK/web-trx/frontend:/f:Z" -w /f docker.io/library/node:22 \
