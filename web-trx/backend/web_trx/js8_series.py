@@ -49,6 +49,26 @@ def build_message(station: dict, params: dict) -> tuple[list, str]:
     return frames, js8_message.frames_text(frames, submode).strip()
 
 
+def build_text(station: dict, text: str, speed: str) -> tuple[list, str]:
+    """-> (frames, text as a receiver shows it) for a message typed as text, the way JS8Call sends what is in
+    its message box (the JS8 automation's replies and heartbeats, pluto_tx.js8_auto)."""
+    from . import pluto_path
+
+    pluto_path.ensure_importable()
+    from pluto_tx import js8, js8_message
+
+    call = station.get("call", "")
+    if not call:
+        raise ValueError("no station callsign set")
+    submode = js8.submode_from_name(speed)
+    frames = js8_message.build_frames(call, station.get("locator", ""), text, submode)
+    if not frames:
+        raise ValueError("nothing to send")
+    if len(frames) > JS8_MAX_FRAMES:
+        raise ValueError(f"message too long: {len(frames)} frames (max {JS8_MAX_FRAMES})")
+    return frames, js8_message.frames_text(frames, submode).strip()
+
+
 def transmission_time_s(n_frames: int, speed: str) -> float:
     """From the first frame's period start to the end of the last frame (pluto_tx.js8.transmission_time_s)."""
     from . import pluto_path

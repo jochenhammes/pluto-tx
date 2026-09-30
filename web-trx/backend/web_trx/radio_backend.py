@@ -271,6 +271,7 @@ class GnuRadioBackend(SessionBackend):
         self._js8_series: js8_series.Js8Series | None = None
         self._js8_lock = threading.Lock()
         self._js8_assembler = Js8Assembler()
+        self._js8_auto = None  # web_trx/js8_automation.py, created with the event loop
         self._mic_buffer = JitterBuffer(tx_config.AUDIO_RATE)
         self._keying = False
         self._over_stats = _new_over_stats()
@@ -604,6 +605,9 @@ class GnuRadioBackend(SessionBackend):
             self._aux_task.cancel()
             self._squelch_task.cancel()
             self._spectrum_task = None
+        if self._js8_auto is not None:
+            auto, self._js8_auto = self._js8_auto, None
+            await auto.stop()
         await self._cancel_ft8("shutdown", device_safe=True)  # the flowgraph stops safely just below
         await self._cancel_js8("shutdown", device_safe=True)
         self._cancel_tx_tasks()
@@ -619,6 +623,12 @@ class GnuRadioBackend(SessionBackend):
 
     def start_background_tasks(self) -> None:
         self._loop = asyncio.get_running_loop()
+        if self._js8_auto is None and JS8_AVAILABLE:
+            from .js8_automation import Js8Automation
+
+            self._js8_auto = Js8Automation(emit=self._emit_event, send=self._js8_auto_send,
+                                           tx_state=self._js8_tx_state, station=lambda: self.station)
+            self._js8_auto.start()
         if self._spectrum_task is None:
             self._spectrum_task = asyncio.create_task(self._spectrum_loop())
             self._aux_task = asyncio.create_task(self._rx_aux_loop())
@@ -899,6 +909,9 @@ class GnuRadioBackend(SessionBackend):
         }))
         for m in messages:
             self._from_gr_thread(self._emit_event("js8_message", m))
+        auto = self._js8_auto
+        if auto is not None and self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(auto.on_decodes, slot_start, submode, decodes)
 
     def _on_m17_fields(self, fields: dict) -> None:
         self._from_gr_thread(self._emit_event("m17_fields", _json_safe(fields)))
@@ -1111,19 +1124,56 @@ class GnuRadioBackend(SessionBackend):
             await series.cancel(reason, device_safe=device_safe)
 
     async def _arm_js8(self) -> None:
+        """PTT in JS8: the message of the TX mode parameters."""
+        params = dict(self.tx.mode_params or {})
+        try:
+            frames, text = await asyncio.to_thread(js8_series.build_message, self.station, params)
+        except (ValueError, KeyError) as e:
+            raise SessionError(f"js8: {e}") from e
+        if await self._arm_js8_frames(params, frames, text, auto=False) and self._js8_auto is not None:
+            self._js8_auto.note_manual_tx(text)
+
+    async def _js8_auto_send(self, text: str, offset_hz: float) -> None:
+        """JS8 automation (J9): send this text like a typed message, on the TX mode's device and speed."""
+        params = dict(self.tx.mode_params or {})
+        params["offset_hz"] = float(offset_hz)
+        try:
+            frames, shown = await asyncio.to_thread(js8_series.build_text, self.station, text, params["submode"])
+        except (ValueError, KeyError) as e:
+            raise SessionError(f"js8: {e}") from e
+        if not await self._arm_js8_frames(params, frames, shown, auto=True):
+            raise SessionError("js8: transmitter busy")
+
+    def _js8_tx_state(self) -> dict:
+        params = self.tx.mode_params or {}
+        ready = self.tx.tb is not None and self.tx.mode == "js8"
+        return {"ready": ready, "busy": self.keyed or self._keying or self._js8_armed(),
+                "offset_hz": float(params.get("offset_hz", 1500.0)),
+                "submode": tx_js8.submode_from_name(params["submode"]) if ready and "submode" in params else None}
+
+    async def js8_automation_request(self, action: str, params: dict) -> None:
+        if self._js8_auto is None:
+            raise SessionError("JS8 automation is not available")
+        await self._js8_auto.request(action, params)
+
+    def operator_activity(self) -> None:
+        if self._js8_auto is not None:
+            self._js8_auto.operator_active()
+
+    def operator_gone(self) -> None:
+        if self._js8_auto is not None:
+            self._js8_auto.operator_gone()
+
+    async def _arm_js8_frames(self, params: dict, frames: list, text: str, auto: bool) -> bool:
+        """Arm one JS8 message (its frames in consecutive periods) -> False if one is already armed."""
         if self._js8_armed():
-            return  # at most one message at a time
+            return False  # at most one message at a time
         async with self._tx_lock:
             tb = self.tx.tb
             if tb is None or self.tx.mode != "js8":
                 raise SessionError("tx: not connected or no mode selected")
             if self.keyed:
-                return
-            params = dict(self.tx.mode_params)
-            try:
-                frames, text = await asyncio.to_thread(js8_series.build_message, self.station, params)
-            except ValueError as e:
-                raise SessionError(f"js8: {e}") from e
+                return False
             submode = tx_js8.submode_from_name(params["submode"])
             await asyncio.to_thread(tb.set_js8_message, frames, submode, params["offset_hz"])
             tb.ft8_drift_comp_enabled = bool(params["drift_comp"])
@@ -1145,6 +1195,8 @@ class GnuRadioBackend(SessionBackend):
                     raise SessionError("tx: flowgraph was rebuilt, message ends")
                 if i == 0:
                     tb.js8_start_at = start_at  # the flowgraph places every later frame from here
+                if self._js8_auto is not None:  # half duplex: the automation ignores what we hear meanwhile
+                    self._js8_auto.note_own_frame(start_at, submode)
                 try:
                     await asyncio.to_thread(tb.key_ptt)
                 except ValueError as e:  # a refusal from the flowgraph, before any RF
@@ -1172,9 +1224,10 @@ class GnuRadioBackend(SessionBackend):
 
         series = js8_series.Js8Series(
             plan=plan, key=key, unkey=self._unkey, abort=abort, emit=self._emit_event, count=len(frames),
-            info={"text": text, "speed": params["submode"], "offset_hz": params["offset_hz"]})
+            info={"text": text, "speed": params["submode"], "offset_hz": params["offset_hz"], "auto": auto})
         self._js8_series = series
         series.start()
+        return True
 
     async def _auto_unkey_after(self, seconds: float) -> None:
         """Same self-cancellation trap as SimBackend._auto_unkey_after (see

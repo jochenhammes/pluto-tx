@@ -9,6 +9,7 @@ pipes carry data correctly, it does not model real RF propagation.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -103,6 +104,8 @@ class SimBackend(SessionBackend):
         self._js8_sent: list[tuple[float, int, str, int]] = []   # (period start, submode, frame, flags)
         self._js8_assembler = None
         self._js8_periods = 0
+        self._js8_auto = None                      # web_trx/js8_automation.py, created with the event loop
+        self._js8_injected: list[list] = []        # [freq, [(frame, flags), ...]] one frame per period
         self._audio_phase = 0.0
         self.tx_audio_frames_received = 0  # test/diagnostic hook, see submit_tx_audio()
 
@@ -251,13 +254,55 @@ class SimBackend(SessionBackend):
             await series.cancel(reason, device_safe=device_safe)
 
     async def _arm_js8(self) -> None:
-        if self._js8_armed():
-            return
         params = self.tx.mode_params
         try:
             frames, text = js8_series.build_message(self.station, params)
         except ValueError as e:
             raise SessionError(f"js8: {e}") from e
+        if self._arm_js8_frames(params, frames, text, auto=False) and self._js8_auto is not None:
+            self._js8_auto.note_manual_tx(text)
+
+    async def _js8_auto_send(self, text: str, offset_hz: float) -> None:
+        params = {**(self.tx.mode_params or {}), "offset_hz": float(offset_hz)}
+        try:
+            frames, shown = js8_series.build_text(self.station, text, params["submode"])
+        except (ValueError, KeyError) as e:
+            raise SessionError(f"js8: {e}") from e
+        if not self._arm_js8_frames(params, frames, shown, auto=True):
+            raise SessionError("js8: transmitter busy")
+
+    def _js8_tx_state(self) -> dict:
+        js8, _msg = _js8_modules()
+        params = self.tx.mode_params or {}
+        ready = self.tx.connection is not None and self.tx.mode == "js8"
+        return {"ready": ready, "busy": self.keyed or self._js8_armed(),
+                "offset_hz": float(params.get("offset_hz", 1500.0)),
+                "submode": js8.submode_from_name(params["submode"]) if ready and "submode" in params else None}
+
+    async def js8_automation_request(self, action: str, params: dict) -> None:
+        if self._js8_auto is None:
+            raise SessionError("JS8 automation is not available")
+        await self._js8_auto.request(action, params)
+
+    def operator_activity(self) -> None:
+        if self._js8_auto is not None:
+            self._js8_auto.operator_active()
+
+    def operator_gone(self) -> None:
+        if self._js8_auto is not None:
+            self._js8_auto.operator_gone()
+
+    def inject_js8(self, call: str, grid: str, text: str, freq_hz: float = 1300.0) -> int:
+        """Test hook: a simulated station sends `text` -- its frames arrive in the next decoded periods of the
+        RX speed. -> number of frames."""
+        _js8, msg = _js8_modules()
+        frames = msg.build_frames(call, grid, text, self._js8_rx_submode())
+        self._js8_injected.append([float(freq_hz), list(frames)])
+        return len(frames)
+
+    def _arm_js8_frames(self, params: dict, frames: list, text: str, auto: bool) -> bool:
+        if self._js8_armed():
+            return False
         js8, _msg = _js8_modules()
         submode = js8.submode_from_name(params["submode"])
         info = js8.speed_info(submode)
@@ -274,6 +319,8 @@ class SimBackend(SessionBackend):
                                                    "duration_s": round(js8.transmission_time_s(len(frames), submode), 2)})
             period = info["period_s"]
             self._js8_sent.append((start_at // period * period, submode, *frames[i]))
+            if self._js8_auto is not None:
+                self._js8_auto.note_own_frame(start_at, submode)
             return max(0.0, start_at - time.time()) + frame_s
 
         async def unkey() -> None:
@@ -286,8 +333,10 @@ class SimBackend(SessionBackend):
 
         self._js8_series = js8_series.Js8Series(
             plan=plan, key=key, unkey=unkey, abort=abort, emit=self._emit_event, count=len(frames),
-            info={"text": text, "speed": params["submode"], "offset_hz": params.get("offset_hz", 1500.0)})
+            info={"text": text, "speed": params["submode"], "offset_hz": params.get("offset_hz", 1500.0),
+                  "auto": auto})
         self._js8_series.start()
+        return True
 
     async def _auto_unkey_after(self, seconds: float) -> None:
         """Runs as self._pocsag_unkey_task. Must clear that reference
@@ -333,6 +382,9 @@ class SimBackend(SessionBackend):
         }
 
     async def shutdown(self) -> None:
+        if self._js8_auto is not None:
+            auto, self._js8_auto = self._js8_auto, None
+            await auto.stop()
         await self._cancel_ft8("shutdown", device_safe=True)
         await self._cancel_js8("shutdown", device_safe=True)
         if self._js8_task is not None:
@@ -362,6 +414,13 @@ class SimBackend(SessionBackend):
             self._ft8_task = asyncio.create_task(self._ft8_loop())
         if self._js8_task is None:
             self._js8_task = asyncio.create_task(self._js8_loop())
+        if self._js8_auto is None:
+            from .js8_automation import Js8Automation
+
+            self._js8_auto = Js8Automation(
+                emit=self._emit_event, send=self._js8_auto_send, tx_state=self._js8_tx_state,
+                station=lambda: self.station, inbox_path=os.environ.get("WEB_TRX_JS8_INBOX_PATH", ":memory:"))
+            self._js8_auto.start()
 
     def _js8_rx_submode(self) -> int:
         js8, _msg = _js8_modules()
@@ -408,6 +467,10 @@ class SimBackend(SessionBackend):
             my_call = self.station.get("call") or ""
             if my_call:
                 texts.append((1600.0, msg.build_frames(call, grid, f"{my_call} SNR -07", submode)[0]))
+        for item in list(self._js8_injected):              # test hook: one frame of each per period
+            texts.append((item[0], item[1].pop(0)))
+            if not item[1]:
+                self._js8_injected.remove(item)
         mine = [(sm, f, b) for s, sm, f, b in self._js8_sent if s == slot_start and sm == submode]
         self._js8_sent = [e for e in self._js8_sent if e[0] > slot_start]
         offset = float((self.tx.mode_params or {}).get("offset_hz", 1500.0))
@@ -425,6 +488,8 @@ class SimBackend(SessionBackend):
         })]
         changed = self._js8_assembler.feed(slot_start, submode, decodes)
         changed += self._js8_assembler.expire(slot_start + js8.speed_info(submode)["period_s"])
+        if self._js8_auto is not None:
+            self._js8_auto.on_decodes(slot_start, submode, decodes)
         for m in changed:
             events.append(("js8_message", {
                 "id": m.id, "speed": speed, "utc": time.strftime("%H%M%S", time.gmtime(m.first_slot)),

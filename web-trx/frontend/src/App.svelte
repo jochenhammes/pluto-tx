@@ -5,7 +5,8 @@
   import RxDecoder, {
     type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status, type Ft8Decode,
   } from "./lib/RxDecoder.svelte";
-  import Js8Panel, { type Js8Message, type Js8Period, type Js8Status } from "./lib/Js8Panel.svelte";
+  import Js8Panel, { type Js8Message, type Js8Period, type Js8Status, type Js8AutoStatus, type Js8AutoEvent,
+                    type Js8InboxMsg } from "./lib/Js8Panel.svelte";
   import Login from "./lib/Login.svelte";
   import { WebTrxClient, type ServerEvent, type SpectrumRow, type AudioChunk } from "./lib/ws";
   import { AudioPlayer, MicCapture, type PlayerStats } from "./lib/audio";
@@ -85,6 +86,10 @@
   let js8Periods: Js8Period[] = [];
   let js8Messages: Js8Message[] = [];
   let js8Status: Js8Status | null = null;
+  // JS8 automation (backend js8_auto / js8_auto_event / js8_inbox, pluto-tx J9)
+  let js8Auto: Js8AutoStatus | null = null;
+  let js8AutoEvents: Js8AutoEvent[] = [];
+  let js8Inbox: Js8InboxMsg[] = [];
   let clockSynced = true;
   // Slot clock: the server's time decides; serverOffsetS = server - browser.
   let serverOffsetS = 0;
@@ -458,6 +463,7 @@
     if (e.event === "hello") {
       backendName = String(e.backend);
       features = (e.features as typeof features) ?? {};
+      if (features.js8?.tx) client.request("js8_auto", { action: "status" });
       if (typeof e.server_time === "number") serverOffsetS = e.server_time - Date.now() / 1000;
       clockSynced = features.ft8?.clock_synced ?? true;
       if (fmOptions === null) {
@@ -527,6 +533,16 @@
       const m = e as unknown as Js8Message;
       js8Messages = [...js8Messages.filter((x) => x.id !== m.id), m].slice(-300);
     }
+    if (e.event === "js8_auto") js8Auto = e as unknown as Js8AutoStatus;
+    if (e.event === "js8_auto_event") {
+      const ae = e as unknown as Js8AutoEvent;
+      js8AutoEvents = [...js8AutoEvents, ae].slice(-50);
+      if (ae.type === "confirm") pushNotice(`JS8-Automatik: senden? „${ae.text}“ (Reiter Automatik)`, "info");
+      if (ae.type === "watchdog") pushNotice(`JS8-Automatik abgeschaltet: ${String(ae.reason)}`, "info");
+      if (ae.type === "not_sent") pushNotice(`JS8-Automatik: nicht gesendet — ${String(ae.reason)}`);
+      if (ae.type === "inbox") client.request("js8_auto", { action: "inbox" });
+    }
+    if (e.event === "js8_inbox") js8Inbox = (e.messages as Js8InboxMsg[]) ?? [];
     if (e.event === "js8_status") {
       js8Status = e as unknown as Js8Status;
       if (typeof js8Status.clock_synced === "boolean") clockSynced = js8Status.clock_synced;
@@ -834,6 +850,16 @@
     client.request("ptt_on");
   }
   // Click on a JS8 station/message: its callsign becomes the "To" field (text to that station).
+  function js8AutoRequest(action: string, params: Record<string, unknown> = {}): void {
+    client.request("js8_auto", { action, ...params });
+  }
+  // An automation reply the operator wants to send by hand: into the JS8 TX message as free text.
+  function useJs8Text(text: string): void {
+    if (js8Armed) return;
+    js8Tx.kind = "free";
+    js8Tx.text = text;
+    if (txMode === "js8" && txConnected) selectTxMode();
+  }
   function pickJs8(call: string): void {
     if (js8Armed) return;
     js8Tx.to = call;
@@ -1044,7 +1070,7 @@
           <div class="slot-label">{utcNow} UTC · Periode {js8Period} s</div>
           <div class="slot-bar"><div class="slot-fill" style="width: {(js8PeriodPos / js8Period) * 100}%"></div></div>
         </div>
-        <span class="dim">USB, 7,078 / 14,078 / 144,178 MHz · keine automatischen Antworten</span>
+        <span class="dim">USB, 7,078 / 14,078 / 144,178 MHz · automatische Antworten: Reiter „Automatik“ unten (aus, bis eingeschaltet)</span>
       </div>
       {#if !clockSynced}
         <div class="mic-error">Server-Uhr ist nicht per NTP synchronisiert — JS8 braucht ±1 s Genauigkeit.</div>
@@ -1545,7 +1571,9 @@
   <div class="tab-body" class:hidden={bottomTab !== "rx"}>
     {#if rxMode === "js8" && rxConnected}
       <Js8Panel messages={js8Messages} periods={js8Periods} status={js8Status} myCall={stationCall}
-        onPick={features.js8?.tx ? pickJs8 : null} />
+        onPick={features.js8?.tx ? pickJs8 : null}
+        auto={features.js8?.tx ? js8Auto : null} autoEvents={js8AutoEvents} inbox={js8Inbox}
+        txReady={txConnected && txMode === "js8"} onAuto={js8AutoRequest} onUseText={useJs8Text} />
     {:else}
       <RxDecoder mode={rxMode} connected={rxConnected} rttyText={rttyRxText} {pocsagCalls} {m17Caller} {radeStatus}
         {ft8Slots} {ft8Status} myCall={stationCall}

@@ -90,6 +90,16 @@ class SessionBackend(abc.ABC):
         """value is already validated by station.normalize()."""
         self.station = dict(value)
 
+    # JS8 automation (pluto-tx J9, web_trx/js8_automation.py) -- optional; backends that have it override these.
+    async def js8_automation_request(self, action: str, params: dict) -> None:
+        raise SessionError("JS8 automation is not available")
+
+    def operator_activity(self) -> None:
+        """Any request from a browser: the operator is there (JS8 idle watchdog)."""
+
+    def operator_gone(self) -> None:
+        """No browser connected any more: automation switches itself off at once."""
+
     def features(self) -> dict:
         """Optional capabilities for the frontend, sent with 'hello'. E.g.
         {"fft_zoom_max": 64}: the backend zooms the spectrum itself
@@ -155,7 +165,7 @@ class SessionManager:
 
     REQUESTS = (
         "scan", "connect", "disconnect", "select_mode", "tune", "set_gain",
-        "ptt_on", "ptt_off", "estop", "set_station",
+        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto",
     )
 
     def __init__(self, backend: SessionBackend, tx_log=None):
@@ -236,6 +246,10 @@ class SessionManager:
         finally:
             self._clients.discard(ws)
             if not self._clients:
+                try:
+                    self.backend.operator_gone()  # JS8 automation off at once, before any grace period
+                except Exception:
+                    logger.exception("switching the JS8 automation off failed")
                 self._schedule_no_operator(NO_OPERATOR_GRACE_S, stop_tx_now=True)
 
     async def _handle_text(self, text: str) -> None:
@@ -252,6 +266,7 @@ class SessionManager:
             return
         params = {k: v for k, v in payload.items() if k != "request"}
         try:
+            self.backend.operator_activity()
             await self._dispatch(request, params)
         except SessionError as e:
             await self._emit_event("error", {"message": str(e), "request": request,
@@ -291,6 +306,8 @@ class SessionManager:
             await b.ptt(False)
         elif request == "estop":
             await b.estop()
+        elif request == "js8_auto":
+            await b.js8_automation_request(str(params.get("action", "")), params)
         elif request == "set_station":
             try:
                 value = station.normalize(params.get("call", ""), params.get("locator", ""))
