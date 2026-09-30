@@ -105,9 +105,9 @@ step "full pluto-tx test suite against the installed code"
 run_as 'rm -rf /tmp/t && mkdir -p /tmp/t/web-trx && cp -r /src/tests /tmp/t/ && \
     ln -s /usr/share/pluto-tx/web-trx/scripts /tmp/t/web-trx/scripts && cd /tmp/t && \
     PYTHONPATH=/usr/share/pluto-tx:/usr/lib/pluto-tx/python QT_QPA_PLATFORM=offscreen \
-    GR_CONF_AUDIO_ALSA_DEFAULT_OUTPUT_DEVICE=null GR_CONF_AUDIO_ALSA_DEFAULT_INPUT_DEVICE=null \
-    timeout 3000 python3 -P -m unittest discover -s tests -t . > /tmp/unittest-full.log 2>&1; \
-    grep -E "^(FAIL|ERROR): " /tmp/unittest-full.log; tail -n 4 /tmp/unittest-full.log' | tee /tmp/unittest.log
+    GR_CONF_AUDIO_ALSA_DEFAULT_OUTPUT_DEVICE=null GR_CONF_AUDIO_ALSA_DEFAULT_INPUT_DEVICE=null PYTHONFAULTHANDLER=1 \
+    timeout 3000 python3 -P -m unittest discover -v -s tests -t . > /tmp/unittest-full.log 2>&1; \
+    grep -E "^(FAIL|ERROR): " /tmp/unittest-full.log; grep -A40 "Fatal Python error" /tmp/unittest-full.log | head -60; tail -n 4 /tmp/unittest-full.log' | tee /tmp/unittest.log
 grep -qE '^OK' /tmp/unittest.log || fail "unit tests"
 
 step "nothing written below /usr"

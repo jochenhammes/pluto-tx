@@ -9,6 +9,10 @@
 #   --frontend DIR  a built Web-TRX frontend (its dist/ directory) instead of
 #              building it here -- it is architecture-independent, e.g. built
 #              once on a PC and copied to a Raspberry Pi
+#   --no-image install the build dependencies inside the build container
+#              instead of building an image first (needs about half the disk
+#              space -- committing an image copies its layer once more; for a
+#              Raspberry Pi's SD card)
 #   JOBS=n     parallel compile jobs (default: all cores; e.g. JOBS=2 on a 2 GB Raspberry Pi)
 #
 # Steps: build the Web-TRX frontend once (Node.js on the host, or a node
@@ -25,11 +29,13 @@ REPO="$(cd "$HERE/.." && pwd)"
 OUT="$HERE/out"
 VERSION=""
 FRONTEND=""
+NO_IMAGE=""
 TARGETS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) VERSION="${2:?}"; shift 2 ;;
         --out) OUT="${2:?}"; shift 2 ;;
+        --no-image) NO_IMAGE=1; shift ;;
         --frontend) FRONTEND="$(cd "${2:?}" && pwd)"; shift 2 ;;
         -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
         ubuntu26.04|deb13) TARGETS+=("$1"); shift ;;
@@ -83,7 +89,13 @@ for target in "${TARGETS[@]}"; do
     image="pluto-tx-build:$target"
     echo
     echo "== $target: pluto-tx $debver ($ARCH) =="
-    "$ENGINE" build -q --build-arg BASE="$base" -t "$image" -f "$HERE/container/Containerfile.build" "$HERE/container" >/dev/null
+    prepare="true"
+    if [[ -n "$NO_IMAGE" ]]; then
+        image="docker.io/library/$base"
+        prepare="export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && xargs -a /build/build-deps.txt apt-get install -y -qq --no-install-recommends >/dev/null"
+    else
+        "$ENGINE" build -q --build-arg BASE="$base" -t "$image" -f "$HERE/container/Containerfile.build" "$HERE/container" >/dev/null
+    fi
 
     src="$WORK/$target/pluto-tx-$VERSION"
     mkdir -p "$src"
@@ -97,12 +109,16 @@ pluto-tx ($debver) $dist; urgency=medium
 
  -- Jochen Hammes <hammesj@me.com>  $(date -R)
 EOF
+    if [[ -n "$NO_IMAGE" ]]; then
+        cp "$HERE/container/build-deps.txt" "$WORK/$target/build-deps.txt"
+    fi
     cache="$HERE/.cache/$target"
     mkdir -p "$cache"
     # shellcheck disable=SC2016  # expanded inside the container
-    if ! "$ENGINE" run --rm -v "$WORK/$target:/build:Z" -v "$cache:/cache:Z" -e COMPONENTS_CACHE=/cache -e JOBS="${JOBS:-$(nproc)}" \
+    if ! "$ENGINE" run --rm -v "$WORK/$target:/build:Z" -v "$cache:/cache:Z" -e COMPONENTS_CACHE=/cache -e JOBS="${JOBS:-$(nproc)}" -e PREPARE="$prepare" \
         -w "/build/pluto-tx-$VERSION" "$image" bash -c '
             set -e
+            eval "$PREPARE"
             dpkg-buildpackage -b -us -uc -j"$JOBS"
             cd /build
             echo "== lintian =="

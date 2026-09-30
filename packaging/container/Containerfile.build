@@ -1,13 +1,10 @@
 # Build environment for the pluto-tx .deb: one image per target distribution.
 #   podman build --build-arg BASE=ubuntu:26.04 -t pluto-tx-build:ubuntu26.04 -f Containerfile.build .
 #   podman build --build-arg BASE=debian:trixie -t pluto-tx-build:deb13 -f Containerfile.build .
+# The package list is build-deps.txt (also used by build-deb.sh --no-image).
 ARG BASE=ubuntu:26.04
 FROM docker.io/library/${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git wget ca-certificates unzip autoconf automake libtool pkg-config \
-        gnuradio-dev libvolk-dev libboost-dev pybind11-dev python3-dev python3-numpy \
-        libspdlog-dev libfmt-dev libgmp-dev \
-        qt6-base-dev qt6-base-dev-tools libfftw3-dev \
-        debhelper dh-python lintian patchelf fakeroot file \
+COPY build-deps.txt /tmp/build-deps.txt
+RUN apt-get update && xargs -a /tmp/build-deps.txt apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
