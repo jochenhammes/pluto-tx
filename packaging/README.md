@@ -21,6 +21,7 @@ The build takes the working tree (uncommitted changes mark the version with
 | `build-components.sh` | builds gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref + jsc.json into a staging tree (RPATH `/usr/lib/pluto-tx/lib`) |
 | `build-deb.sh` | frontend once, then per target `dpkg-buildpackage -b` + lintian in `container/Containerfile.build` |
 | `test-install.sh` | install test in a fresh container: apt resolves the dependencies from the distribution alone, smoke tests, Web-TRX, the full unittest suite against the installed code, remove/purge |
+| `make-sources.sh` | `sources-<version>.tar.xz`: pluto-tx and every bundled component at its pinned commit (GPL corresponding source for a release) |
 | `debian/` | debhelper packaging; `extra/` holds launchers, udev rule, modprobe blacklist, `web-trx@.service`, desktop files, icons, man pages, AppStream metainfo |
 
 Downloads and clones are cached in `packaging/.cache/<target>/` (the
