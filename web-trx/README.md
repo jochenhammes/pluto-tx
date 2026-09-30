@@ -15,9 +15,18 @@ und Stoppen geht per `web-trx start|stop`, mit den Skripten unter
 **Stand:**
 - **Empfang:** FM, SSB (USB/LSB) und M17 mit Audio im Browser. POCSAG wird dekodiert.
 - **Wasserfall:** echtes Zoom-FFT, Mittelung, automatischer Pegel.
-- **Senden:** FM, SSB (USB/LSB) und M17 über das Browser-Mikrofon, mit Audio-Aufbereitung und Leistungsregler.
+- **Senden:** FM, SSB (USB/LSB) und M17 mit Audio aus dem Browser, mit Audio-Aufbereitung und Leistungsregler.
+  - **Quelle wählbar:** jeder Eingang des Browser-Rechners (Mikrofon, Line-in, USB-Soundkarte, virtuelles Kabel;
+    Sprachverarbeitung des Browsers abschaltbar) oder eine Audiodatei, die am Ende von selbst enttastet.
+  - Details: [`docs/BROWSER_AUDIO.md`](docs/BROWSER_AUDIO.md).
 - **POCSAG senden:** eine Nachricht an eine RIC.
-- **Sicherheit:** NOTAUS, automatisches Abtasten wenn das Mikrofon-Audio abreißt, Sende-Zeitbegrenzung, TX-Log.
+- **Sicherheit:**
+  - NOTAUS;
+  - automatisches Enttasten, wenn das Browser-Audio abreißt;
+  - **Server-Watchdog:** Antwortet der Browser 5 s lang nicht auf den Herzschlag, endet jede Aussendung, auch
+    FT8/JS8/POCSAG und die JS8-Automatik;
+  - PTT wird frei, wenn die Seite den Fokus verliert;
+  - Sende-Zeitbegrenzung, TX-Log.
 
 Projektplan (Architektur, Betriebsarten, Meilensteine, aktueller Stand):
 [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
