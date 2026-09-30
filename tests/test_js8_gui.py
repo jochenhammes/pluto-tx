@@ -70,6 +70,22 @@ class Js8GuiTests(unittest.TestCase):
         self.assertIn("DA2JH: DL1ABC SNR?", w.js8_sent_log.toPlainText())
         self.assertIn("sent (1 frame)", w.status_label.text())
 
+    def test_early_timer_does_not_cut_a_frame(self):
+        # J7: Qt's coarse timers may fire up to 5 % early, and an early unkey aborts the whole message
+        w = self.tx_window()
+        w.js8_kind_combo.setCurrentIndex(w.js8_kind_combo.findData("allcall"))
+        w.js8_text_edit.setText("JS8 SEQUENCE TEST DE DA2JH")
+        w.ptt_button.setChecked(True)
+        n = len(w._js8_plan)
+        self.assertGreaterEqual(n, 2)
+        self.pump(12, until=lambda: w.tb.keyed)
+        w._js8_frame_done(0, w.tb, w._js8_epoch)                               # "fires" long before the end
+        self.assertTrue(w.tb.keyed)
+        self.assertEqual(w._js8_next, 0)
+        self.pump(w._js8_plan[-1][1] - time.time() + 8, until=lambda: not w._js8_active)
+        self.assertEqual(w.tb.js8_source.frames_sent, set(range(n)))
+        self.assertIn(f"sent ({n} frames)", w.status_label.text())
+
     def test_stop_after_first_frame_sends_no_more(self):
         w = self.tx_window()
         w.js8_kind_combo.setCurrentIndex(w.js8_kind_combo.findData("allcall"))

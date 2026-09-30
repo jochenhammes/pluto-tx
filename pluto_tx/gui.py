@@ -128,6 +128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._js8_active = False
         self._js8_plan = []
         self._js8_next = 0
+        self._js8_frame_end_at = 0.0
         self._js8_tick_timer = QtCore.QTimer(self)
         self._js8_tick_timer.setInterval(500)
         self._js8_tick_timer.timeout.connect(self._js8_tick)
@@ -2282,8 +2283,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._js8_tick()
 
     def _js8_schedule(self, i, token, epoch):
+        # PreciseTimer throughout: Qt's default CoarseTimer may fire up to 5 % of the interval EARLY, and an
+        # unkey before a frame's end aborts the whole message (J7 on the Pluto: 0.64 s early after 14.7 s)
         key_at = self._js8_plan[i][0]
-        QtCore.QTimer.singleShot(max(0, int((key_at - time.time()) * 1000)),
+        QtCore.QTimer.singleShot(max(0, int((key_at - time.time()) * 1000)), QtCore.Qt.PreciseTimer,
                                  lambda: self._js8_fire(i, token, epoch))
 
     def _js8_stale(self, token, epoch):
@@ -2312,12 +2315,19 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{time.strftime('%H%M%S', time.gmtime(slot))}  {self.js8_offset_spin.value():4d} Hz  "
             f"{i + 1}/{len(self._js8_plan)}  {js8_message.decode_frame(frame, flags, self.tb.js8_submode)['message']}")
         hold_s = self.tb.js8_hold_s
-        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._js8_frame_done(i, token, epoch))
-        QtCore.QTimer.singleShot(int((hold_s + config.JS8_AUTO_UNKEY_WATCHDOG_S) * 1000),
+        self._js8_frame_end_at = time.time() + hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), QtCore.Qt.PreciseTimer,
+                                 lambda: self._js8_frame_done(i, token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.JS8_AUTO_UNKEY_WATCHDOG_S) * 1000), QtCore.Qt.PreciseTimer,
                                  lambda: self._js8_frame_done(i, token, epoch))
 
     def _js8_frame_done(self, i, token, epoch):
         if self._js8_stale(token, epoch) or self._js8_next != i:
+            return
+        early_s = self._js8_frame_end_at - time.time()
+        if early_s > 0.005:                         # a timer fired early: never cut the frame short
+            QtCore.QTimer.singleShot(int(early_s * 1000) + 1, QtCore.Qt.PreciseTimer,
+                                     lambda: self._js8_frame_done(i, token, epoch))
             return
         self._js8_next = i + 1
         if self.tb.keyed:
