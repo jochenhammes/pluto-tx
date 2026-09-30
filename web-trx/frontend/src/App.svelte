@@ -9,7 +9,9 @@
                     type Js8InboxMsg } from "./lib/Js8Panel.svelte";
   import Login from "./lib/Login.svelte";
   import { WebTrxClient, type ServerEvent, type SpectrumRow, type AudioChunk } from "./lib/ws";
-  import { AudioPlayer, MicCapture, type PlayerStats } from "./lib/audio";
+  import { AudioPlayer, TxAudioInput, listAudioInputs, grantAudioInputs, decodeAudioFile, type TxSource,
+           type PlayerStats } from "./lib/audio";
+  import TxAudioSource from "./lib/TxAudioSource.svelte";
   import { checkSession, checkSessionOrNull, logout as apiLogout, fetchTxLog, type TxLogEntry } from "./lib/auth";
 
   // Filled from the backend's "hello" event (SessionBackend.device_types()):
@@ -35,7 +37,7 @@
   let waterfall: Waterfall;
   const client = new WebTrxClient();
   const audioPlayer = new AudioPlayer();
-  const mic = new MicCapture();
+  const mic = new TxAudioInput();
 
   let authChecked = false;
   let authenticated = false;
@@ -333,6 +335,32 @@
   let txSettings: TxSettings | null = null;
   let micLevelDb = -90;
   let micMonitor = false; // mic open without keying, to set levels
+  // TX audio source (docs/BROWSER_AUDIO.md): an input device of this computer or an audio file. The choice is
+  // remembered in this browser (localStorage), a file is not.
+  const SRC_KEY = "webtrx.txAudioSource";
+  let srcKind: "device" | "file" = "device";
+  let srcDevices: { deviceId: string; label: string }[] = [];
+  let srcDeviceId = "";
+  let srcProcessing = true;
+  let srcProcessingById: Record<string, boolean> = {};
+  let srcGainDb = 0;
+  let srcLoop = false;
+  let srcFile: AudioBuffer | null = null;
+  let srcFileName = "";
+  let srcFileError = "";
+  let txSource: TxSource | null = null;      // the object TxAudioInput has open (same object = same source)
+  try {
+    const saved = JSON.parse(localStorage.getItem(SRC_KEY) || "{}");
+    if (saved.kind === "device" || saved.kind === "file") srcKind = saved.kind;
+    if (typeof saved.deviceId === "string") srcDeviceId = saved.deviceId;
+    if (saved.processingById && typeof saved.processingById === "object") srcProcessingById = saved.processingById;
+    if (typeof saved.gainDb === "number") srcGainDb = saved.gainDb;
+    if (typeof saved.loop === "boolean") srcLoop = saved.loop;
+  } catch {
+    /* no storage (private window) or garbage: defaults */
+  }
+  srcProcessing = srcProcessingById[srcDeviceId] ?? true;
+  mic.setGainDb(srcGainDb);
   let compressorGrDb: number | null = null;
   // After E-STOP the TX side stays dark until the operator re-arms it.
   let txNeedsRearm = false;
@@ -667,7 +695,88 @@
     location.reload(); // simplest full reset of all client-side session state
   }
 
+  async function refreshAudioInputs(): Promise<void> {
+    try {
+      srcDevices = await listAudioInputs();
+    } catch {
+      srcDevices = [];
+    }
+    // the chosen input went away while it is in use: PTT off, never keep transmitting on another input
+    if (srcKind === "device" && srcDeviceId && mic.isActive && !srcDevices.some((d) => d.deviceId === srcDeviceId)) {
+      audioSourceGone();
+    }
+  }
+  function audioSourceGone(): void {
+    const wasHeld = pttHeld;
+    stopAudioTx();
+    mic.stop();
+    micMonitor = false;
+    micLevelDb = -90;
+    txSource = null;
+    if (wasHeld) pushNotice("Audio-Eingang nicht mehr verfügbar — PTT freigegeben");
+  }
+  mic.onSourceEnded = (why) => {
+    if (why === "file_end") stopAudioTx();
+    else audioSourceGone();
+  };
+  /** The source for TxAudioInput: the same object while nothing changed, so an open input stays open. */
+  function currentSource(): TxSource | null {
+    if (srcKind === "file") {
+      if (!srcFile) return null;
+      if (txSource?.kind !== "file" || txSource.buffer !== srcFile || txSource.loop !== srcLoop)
+        txSource = { kind: "file", buffer: srcFile, loop: srcLoop };
+    } else if (txSource?.kind !== "device" || txSource.deviceId !== srcDeviceId || txSource.processing !== srcProcessing) {
+      txSource = { kind: "device", deviceId: srcDeviceId, processing: srcProcessing };
+    }
+    return txSource;
+  }
+  function onSourceChange(): void {
+    if (srcKind === "device") srcProcessingById = { ...srcProcessingById, [srcDeviceId]: srcProcessing };
+    mic.setGainDb(srcGainDb);
+    try {
+      localStorage.setItem(SRC_KEY, JSON.stringify({ kind: srcKind, deviceId: srcDeviceId,
+        processingById: srcProcessingById, gainDb: srcGainDb, loop: srcLoop }));
+    } catch {
+      /* no storage: the choice lasts for this page only */
+    }
+    const before = txSource;
+    if (currentSource() !== before && mic.isActive && !pttHeld) {
+      mic.stop();                                 // reopened with the new source on the next PTT / level view
+      const wasMonitoring = micMonitor;
+      micMonitor = false;
+      micLevelDb = -90;
+      if (wasMonitoring && srcKind === "device") void toggleMicMonitor();
+    }
+  }
+  function onDeviceSelect(): void {
+    srcProcessing = srcProcessingById[srcDeviceId] ?? true;
+    onSourceChange();
+  }
+  async function grantInputs(): Promise<void> {
+    try {
+      await grantAudioInputs();
+      micError = "";
+    } catch (err) {
+      micError = `Audioquelle: ${(err as Error).message}`;
+    }
+    await refreshAudioInputs();
+  }
+  async function chooseFile(f: File): Promise<void> {
+    srcFileError = "";
+    try {
+      srcFile = await decodeAudioFile(f);
+      srcFileName = f.name;
+    } catch (err) {
+      srcFile = null;
+      srcFileName = "";
+      srcFileError = (err as Error).message || "Datei kann nicht gelesen werden";
+    }
+    onSourceChange();
+  }
+
   onMount(() => {
+    void refreshAudioInputs();
+    navigator.mediaDevices?.addEventListener?.("devicechange", refreshAudioInputs);
     void (async () => {
       authenticated = await checkSession();
       authChecked = true;
@@ -676,7 +785,10 @@
         await refreshTxLog();
       }
     })();
-    return () => client.close();
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.("devicechange", refreshAudioInputs);
+      client.close();
+    };
   });
 
   // -- RX actions --
@@ -774,12 +886,15 @@
       micLevelDb = -90;
       return;
     }
+    const src = currentSource();
+    if (!src || src.kind !== "device") return;
     try {
-      await mic.start();
+      await mic.start(src);
       micMonitor = true;
       micError = "";
+      void refreshAudioInputs();                 // names appear once recording was allowed
     } catch (err) {
-      micError = `Mikrofon: ${(err as Error).message}`;
+      micError = `Audioquelle: ${(err as Error).message}`;
     }
   }
   function estop(): void {
@@ -800,21 +915,32 @@
     if (!isAudioMode(txMode) || pttHeld || !txConnected) return;
     pttHeld = true;
     pttRequestedAt = performance.now();
+    const src = currentSource();
+    if (!src) {
+      pttHeld = false;
+      micError = "Audioquelle: keine Datei gewählt";
+      return;
+    }
     pttStartCtxTime = mic.isActive ? mic.currentTime - 0.05 : 0;
     commitPendingTxParams();
     client.request("ptt_on");
     try {
-      // The mic stays open after the first PTT (permission prompt, device
+      // The input stays open after the first PTT (permission prompt, device
       // start-up) -- chunks are only sent while pttHeld, see mic.onChunk.
-      await mic.start();
+      await mic.start(src);
       micError = "";
+      if (src.kind === "file" && pttHeld) {
+        pttStartCtxTime = mic.currentTime - 0.05;   // a file plays from its start, from now on
+        mic.playFromStart();
+      }
     } catch (err) {
-      micError = `Mikrofon: ${(err as Error).message}`;
-      log(`error mic: ${(err as Error).message}`);
+      micError = `Audioquelle: ${(err as Error).message}`;
+      log(`error audio source: ${(err as Error).message}`);
       stopAudioTx();
     }
   }
   function stopAudioTx(): void {
+    mic.stopPlayback();
     if (!pttHeld) return;
     pttHeld = false;
     client.request("ptt_off");
@@ -1445,16 +1571,12 @@
     {/if}
 
     {#if isAudioMode(txMode)}
-      <div class="subpanel">
-        <div class="subpanel-title">
-          Mikrofon
-          <button class="small" on:click={toggleMicMonitor}>{micMonitor ? "Pegel aus" : "Pegel anzeigen"}</button>
-        </div>
-        <div class="meter" title="Mikrofon-Spitzenpegel (dBFS)">
-          <div class="meter-fill" class:hot={micLevelDb > -3} style="width: {Math.max(0, Math.min(100, (micLevelDb + 60) / 60 * 100))}%"></div>
-        </div>
-        <div class="dim">{micLevelDb > -90 ? `${micLevelDb.toFixed(1)} dBFS` : "—"}</div>
-      </div>
+      <TxAudioSource bind:kind={srcKind} devices={srcDevices} bind:deviceId={srcDeviceId}
+        bind:processing={srcProcessing} bind:gainDb={srcGainDb} bind:loop={srcLoop} fileName={srcFileName}
+        fileDurationS={srcFile?.duration ?? 0} fileError={srcFileError} levelDb={micLevelDb} monitor={micMonitor}
+        locked={pttHeld} onGrant={grantInputs} onFile={chooseFile}
+        onChange={onSourceChange} onDeviceChange={onDeviceSelect}
+        onToggleMonitor={toggleMicMonitor} />
     {/if}
 
     {#if txSettings && isVoiceMode(txMode)}
