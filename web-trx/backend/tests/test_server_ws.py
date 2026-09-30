@@ -42,7 +42,9 @@ def test_health():
     with make_client() as client:
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "backend": "SimBackend"}
+        body = resp.json()
+        assert body.pop("version")  # pluto-tx version (web_trx/version.py), any non-empty string
+        assert body == {"status": "ok", "backend": "SimBackend"}
 
 
 def test_health_reports_devices_to_loopback_only():

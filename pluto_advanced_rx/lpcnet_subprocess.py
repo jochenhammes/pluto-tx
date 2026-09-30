@@ -31,6 +31,8 @@ import subprocess
 
 import numpy as np
 
+from pluto_tx import paths
+
 # lpcnet_demo.c writes every frame via plain fwrite(), with no fflush()/
 # setvbuf() anywhere in its source (confirmed by reading it) -- glibc's
 # stdio defaults to fully-buffered (several KB) when stdout isn't a TTY, so
@@ -58,7 +60,7 @@ PRIMING_FRAMES = 5
 
 
 def lpcnet_demo_available() -> bool:
-    return shutil.which("lpcnet_demo") is not None
+    return paths.program("lpcnet_demo") is not None
 
 
 class LpcnetDemoProcess:
@@ -75,7 +77,7 @@ class LpcnetDemoProcess:
     def __init__(self, mode: str):
         if mode not in (MODE_FEATURES, MODE_FARGAN_SYNTHESIS):
             raise ValueError(f"unknown mode {mode!r}")
-        exe = shutil.which("lpcnet_demo")
+        exe = paths.program("lpcnet_demo")
         if exe is None:
             raise RuntimeError("lpcnet_demo not found on PATH -- run install-rade.sh")
         if shutil.which("stdbuf") is None:

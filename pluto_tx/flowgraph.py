@@ -44,6 +44,7 @@ from .ft8_source import Ft8TimedSource
 from . import js8, js8_phy
 from .js8_source import Js8SequenceSource
 from . import lora_airtime
+from . import paths
 
 FT8_AVAILABLE = ft8.ft8_ctypes.FT8_AVAILABLE  # needs libft8wrap.so (install-ft8.sh)
 
@@ -100,13 +101,17 @@ from . import rade_ctypes as _rade_ctypes
 from .rade import RadeEncoder
 RADE_AVAILABLE = _rade_ctypes.RADE_AVAILABLE
 
-_PLACEHOLDER_WAV = os.path.join(os.path.dirname(__file__), "_silence.wav")
+# Next to the code in a checkout (as always); the package's code directory is
+# read-only, so there it goes to the user's cache directory.
+_PLACEHOLDER_WAV = (str(paths.user_dir("cache") / "_silence.wav") if paths.is_package()
+                    else os.path.join(os.path.dirname(__file__), "_silence.wav"))
 _DEFAULT_WAV = os.path.join(os.path.dirname(__file__), "da2jh-test.wav")
 
 
 def _ensure_placeholder_wav(path=_PLACEHOLDER_WAV, seconds=1.0, rate=config.AUDIO_RATE):
     """A valid-but-silent mono WAV, used only if the real default file is missing."""
     if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         n = int(seconds * rate)
         with wave.open(path, "wb") as w:
             w.setnchannels(1)

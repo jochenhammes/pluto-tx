@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from . import config
+from pluto_tx.version import version
 from .flowgraph import AdvancedRxFlowgraph
 
 MODES = {"fm": AdvancedRxFlowgraph.MODE_FM, "ssb": AdvancedRxFlowgraph.MODE_SSB,
@@ -17,7 +18,8 @@ MODES = {"fm": AdvancedRxFlowgraph.MODE_FM, "ssb": AdvancedRxFlowgraph.MODE_SSB,
 
 
 def build_argparser():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(prog="pluto-advanced-rx", description=__doc__)
+    p.add_argument("--version", action="version", version=f"%(prog)s {version()}")
     p.add_argument("--uri", default=config.DEFAULT_URI)
     p.add_argument("--freq", type=float, default=config.DEFAULT_FREQUENCY, help="Hz")
     p.add_argument("--mode", choices=["fm", "ssb", "lsb"], default="fm")

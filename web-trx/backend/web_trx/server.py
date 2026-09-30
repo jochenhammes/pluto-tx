@@ -21,6 +21,7 @@ from . import auth as auth_module
 from .session import SessionBackend, SessionManager
 from .sim_backend import SimBackend
 from .txlog import TxLog
+from .version import pluto_tx_version
 
 
 def backend_for_name(name: str) -> SessionBackend:
@@ -113,7 +114,7 @@ def create_app(
 
     @app.get("/health")
     async def health(request: Request) -> dict:
-        out = {"status": "ok", "backend": manager.backend_name}
+        out = {"status": "ok", "backend": manager.backend_name, "version": pluto_tx_version()}
         # Which SDRs the server holds: only for the local TX/RX apps, which must
         # never open a device Web-TRX has open (pluto_tx/webtrx_control.py) --
         # not something to tell the network without a login.

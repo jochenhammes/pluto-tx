@@ -252,6 +252,102 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(processes_under(self.inst.dir), [])
 
 
+class PackageInstallation:
+    """The installed-package layout: <share>/.pluto-tx-package, <share>/web-trx
+    read-only in spirit (nothing may be written below it), no venv -- start.sh
+    runs `python3 -m uvicorn` (here a stand-in package on PYTHONPATH), and the
+    runtime data goes to the XDG directories."""
+
+    def __init__(self):
+        self.tmp = tempfile.mkdtemp(prefix="webtrx-pkg-test-")
+        root = Path(self.tmp)
+        self.share = root / "share"
+        self.dir = self.share / "web-trx"
+        (self.dir / "scripts").mkdir(parents=True)
+        for name in ("start.sh", "stop.sh"):
+            shutil.copy2(REAL_SCRIPTS / name, self.dir / "scripts" / name)
+        (self.share / ".pluto-tx-package").write_text("")
+        (self.dir / "backend" / "web_trx").mkdir(parents=True)
+        (self.dir / "backend" / "web_trx" / "server.py").write_text("")
+        (self.dir / "frontend" / "dist").mkdir(parents=True)
+        (self.dir / "frontend" / "dist" / "index.html").write_text("<html></html>")
+        fake_py = root / "fakepy" / "uvicorn"
+        fake_py.mkdir(parents=True)
+        (fake_py / "__init__.py").write_text("")
+        (fake_py / "__main__.py").write_text(FAKE_UVICORN)
+        self.pythonpath = str(root / "fakepy")
+        self.state = root / "state"
+        self.config = root / "config"
+        self.port = free_port()
+        env_file = self.config / "pluto-tx" / "web-trx.env"
+        env_file.parent.mkdir(parents=True)
+        env_file.write_text(f"WEB_TRX_PORT={self.port}\nWEB_TRX_HOST=127.0.0.1\nWEB_TRX_TLS=false\n"
+                            "WEB_TRX_BACKEND=sim\nWEB_TRX_PASSWORD=test\n")
+
+    def cleanup(self):
+        pid_file = self.state / "web-trx" / "web-trx.pid"
+        try:
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+@unittest.skipUnless((REAL_SCRIPTS / "start.sh").exists(), "web-trx/ not in this checkout")
+@unittest.skipUnless(shutil.which("flock") and Path("/proc/self/cmdline").exists(), "needs Linux + flock")
+class PackageLayoutTests(unittest.TestCase):
+    def setUp(self):
+        self.inst = PackageInstallation()
+        self.addCleanup(self.inst.cleanup)
+        patcher = mock.patch.dict(os.environ, clean_environ(
+            XDG_STATE_HOME=str(self.inst.state), XDG_CONFIG_HOME=str(self.inst.config),
+            PYTHONPATH=self.inst.pythonpath), clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.ctl = wc.WebTrxControl(self.inst.dir)
+
+    def test_paths_follow_xdg(self):
+        self.assertTrue(self.ctl.package)
+        self.assertEqual(self.ctl.run_dir, self.inst.state / "web-trx")
+        self.assertEqual(self.ctl.env_file, self.inst.config / "pluto-tx" / "web-trx.env")
+        self.assertEqual(self.ctl.port(), self.inst.port)
+        self.assertEqual(self.ctl.installed(), (True, ""))
+
+    def test_start_status_stop_cycle_writes_nothing_below_the_program_dir(self):
+        before = sorted(p for p in self.inst.share.rglob("*"))
+        self.assertEqual(self.ctl.status().state, wc.STOPPED)
+        result = self.ctl.start()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        st = self.ctl.status()
+        self.assertEqual(st.state, wc.RUNNING)
+        self.assertEqual(st.backend, "FakeBackend")
+        self.assertTrue((self.inst.state / "web-trx" / "web-trx.pid").exists())
+        self.assertTrue((self.inst.state / "web-trx" / "web-trx.log").exists())
+        self.assertEqual(self.ctl.start().returncode, 3)
+        result = self.ctl.stop()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.ctl.status().state, wc.STOPPED)
+        after = sorted(p for p in self.inst.share.rglob("*") if "__pycache__" not in p.parts)
+        self.assertEqual(after, before)
+
+    def test_generated_password_goes_to_the_config_dir(self):
+        env_file = self.inst.config / "pluto-tx" / "web-trx.env"
+        env_file.write_text(env_file.read_text().replace("WEB_TRX_PASSWORD=test\n", ""))
+        self.assertEqual(self.ctl.start().returncode, 0)
+        self.addCleanup(self.ctl.stop)
+        self.assertIn("WEB_TRX_PASSWORD=", env_file.read_text())
+        self.assertEqual(oct(env_file.stat().st_mode & 0o777), "0o600")
+
+    def test_run_dir_variable_overrides(self):
+        other = Path(self.inst.tmp) / "elsewhere"
+        with mock.patch.dict(os.environ, {"WEB_TRX_RUN_DIR": str(other)}):
+            ctl = wc.WebTrxControl(self.inst.dir)
+            self.assertEqual(ctl.run_dir, other)
+            self.assertEqual(ctl.start().returncode, 0)
+            self.assertTrue((other / "web-trx.pid").exists())
+            self.assertEqual(ctl.stop().returncode, 0)
+
+
 class StatusTests(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.dict(os.environ, clean_environ(), clear=True)

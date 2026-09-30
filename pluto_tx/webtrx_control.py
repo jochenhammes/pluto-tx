@@ -10,10 +10,14 @@ file); this module only calls them and reads what they leave behind:
 
   web-trx/web-trx.env      operator settings, read exactly like start.sh does
                            (bash `set -a; . file`), only WEB_TRX_* keys used
+                           (installed package: ~/.config/pluto-tx/web-trx.env)
   web-trx/run/web-trx.pid  PID of the uvicorn process -- trusted only while
                            that process is alive AND its /proc cmdline names
                            uvicorn + web_trx.server (a stale PID file after a
                            reboot can point at any unrelated process)
+                           (installed package: ~/.local/state/web-trx/)
+                           WEB_TRX_RUN_DIR / WEB_TRX_ENV_FILE override both,
+                           same as in start.sh
   GET /health              answered by the server itself; for requests from
                            127.0.0.1 it also says which SDR the server holds
 
@@ -43,6 +47,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import paths
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_TRX_DIR = REPO_ROOT / "web-trx"
@@ -120,9 +126,14 @@ class WebTrxControl:
 
     def __init__(self, web_trx_dir: Path | str = WEB_TRX_DIR):
         self.dir = Path(web_trx_dir)
-        self.run_dir = self.dir / "run"
+        # Same choice as start.sh/stop.sh: the installed package keeps its
+        # data per user (XDG), a checkout inside web-trx/.
+        self.package = (self.dir.parent / paths.PACKAGE_MARKER).exists()
+        run_default = paths.user_dir("state", "web-trx") if self.package else self.dir / "run"
+        env_default = paths.user_dir("config") / "web-trx.env" if self.package else self.dir / "web-trx.env"
+        self.run_dir = Path(os.environ.get("WEB_TRX_RUN_DIR") or run_default)
         self.pid_file = self.run_dir / "web-trx.pid"
-        self.env_file = self.dir / "web-trx.env"
+        self.env_file = Path(os.environ.get("WEB_TRX_ENV_FILE") or env_default)
         self._lock = threading.Lock()
         self._env_cache: tuple[tuple, dict] | None = None
         self._last_idle_health = 0.0
@@ -176,10 +187,14 @@ class WebTrxControl:
         return f"{'https' if self.tls() else 'http'}://{host}:{self.port()}/health"
 
     def installed(self) -> tuple[bool, str]:
-        missing = [p for p in ("scripts/start.sh", "scripts/stop.sh", "backend/.venv/bin/uvicorn",
+        # The package runs the backend with the distribution's Uvicorn, a
+        # checkout with the venv from install-web-trx.sh.
+        backend = "backend/web_trx/server.py" if self.package else "backend/.venv/bin/uvicorn"
+        missing = [p for p in ("scripts/start.sh", "scripts/stop.sh", backend,
                                "frontend/dist/index.html") if not (self.dir / p).exists()]
         if missing:
-            return False, "missing: " + ", ".join(missing) + " (run ./install-web-trx.sh)"
+            hint = "reinstall the pluto-tx package" if self.package else "run ./install-web-trx.sh"
+            return False, "missing: " + ", ".join(missing) + f" ({hint})"
         return True, ""
 
     # -- process -------------------------------------------------------

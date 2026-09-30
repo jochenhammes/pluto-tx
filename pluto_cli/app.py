@@ -9,6 +9,8 @@ the complete guide (installation, recipes, JSON schema, safety model).
 import argparse
 import sys
 
+from pluto_tx.version import version
+
 from . import devices_cmd, rx, tx
 
 
@@ -20,6 +22,7 @@ def build_parser():
                      "pluto_cli/README.md), runs as its own process so it never interferes "
                      "with either GUI app.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     tx_parser = subparsers.add_parser("tx", help="Transmit (pluto_tx.flowgraph.PlutoTxFlowgraph)")
