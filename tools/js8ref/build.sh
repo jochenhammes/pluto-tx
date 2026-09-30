@@ -39,14 +39,22 @@ srcs=(
   "$OUT/moc_varicode.cpp"
 )
 objs=()
-pids=()
+# At most JOBS compilers at once (default: all cores) -- each C++20/Qt
+# translation unit needs a few hundred MB, too much x11 for a 2 GB Raspberry Pi.
+jobs_max="${JOBS:-$(nproc)}"
 for s in "${srcs[@]}"; do
   o="$OUT/$(basename "${s%.cpp}").o"
   if [[ ! -f "$o" || "$s" -nt "$o" ]]; then
-    g++ "${CXXFLAGS[@]}" -c "$s" -o "$o" & pids+=($!)
+    rm -f "$o"
+    while (( $(jobs -rp | wc -l) >= jobs_max )); do wait -n || true; done
+    g++ "${CXXFLAGS[@]}" -c "$s" -o "$o" &
   fi
   objs+=("$o")
 done
-for p in "${pids[@]}"; do wait "$p"; done
+wait
+# g++ leaves no object file behind when it fails
+for o in "${objs[@]}"; do
+  [[ -f "$o" ]] || { echo "compile failed: $o" >&2; exit 1; }
+done
 g++ ${LDFLAGS:-} -o "$OUT/js8ref" "${objs[@]}" "$QTCORE" -lfftw3f -lfftw3f_threads -lpthread
 echo "built $OUT/js8ref"
