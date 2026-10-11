@@ -2598,6 +2598,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "e.g. plughw:CARD=AllInOneCable,DEV=0. Use Scan to auto-detect an "
                 "attached AIOC -- fills this AND the Serial Port field below."
             )
+        elif device_cls.device_type == "espdr":
+            self.device_label.setText("ESP32-S3 (blank = find the board):")
+            self.uri_combo.setToolTip(
+                "Leave blank to find the ESP32-S3 board by its USB ports. Otherwise the board's own USB "
+                "port, optionally followed by its USB-UART port that loads the firmware: "
+                "/dev/ttyACM1,/dev/ttyACM0. Use Scan to list attached boards. The firmware is loaded "
+                "into the board's RAM when needed (nothing is written to its flash)."
+            )
         else:
             self.device_label.setText("HackRF Serial (blank = auto):")
             self.uri_combo.setToolTip(
@@ -2734,6 +2742,38 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE))
             else:
                 self.mode_tab_widget.setCurrentIndex(1)
+        self._apply_device_mode_support(device_cls)
+
+    # Modes whose enabled state _sync_mode_combo_availability computes itself on every call (module availability, LoRa): not restored here.
+    _MODES_SYNCED_ELSEWHERE = (
+        PlutoTxFlowgraph.MODE_SSB, PlutoTxFlowgraph.MODE_LSB, PlutoTxFlowgraph.MODE_M17, PlutoTxFlowgraph.MODE_FREEDV,
+        PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE,
+    )
+
+    def _apply_device_mode_support(self, device_cls):
+        """Greys out every mode the selected device cannot carry (TxDevice.supported_modes; the ESP32-S3 sends only the frequency of a
+        constant-envelope signal) and brings back, when the device changes again, what this method had greyed out. Forces a switch to FM
+        when the current mode just became impossible."""
+        was_enabled = self.__dict__.setdefault("_device_mode_disabled", {})     # (combo name, index) -> enabled state before this method
+        for name, combo in (("mode", self.mode_combo), ("digimode", self.digimode_combo)):
+            model = combo.model()
+            for idx in range(combo.count()):
+                mode = combo.itemData(idx)
+                item = model.item(idx)
+                key = (name, idx)
+                if not device_cls.supports_mode(PlutoTxFlowgraph.MODE_NAMES.get(mode, "")):
+                    was_enabled.setdefault(key, item.isEnabled())
+                    item.setEnabled(False)
+                    item.setToolTip(f"{device_cls.display_name} cannot send this: it carries only "
+                                    f"{', '.join(sorted(device_cls.supported_modes)).upper()} (the frequency of a constant-envelope signal)")
+                elif key in was_enabled:
+                    before = was_enabled.pop(key)
+                    item.setToolTip("")
+                    if mode not in self._MODES_SYNCED_ELSEWHERE:
+                        item.setEnabled(before)
+        if not device_cls.supports_mode(PlutoTxFlowgraph.MODE_NAMES.get(self._current_mode, "")):
+            self.mode_tab_widget.setCurrentIndex(0)
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_FM))
 
     def _set_indicator_idle(self):
         self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")

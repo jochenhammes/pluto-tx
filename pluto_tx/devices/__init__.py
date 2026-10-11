@@ -23,6 +23,16 @@ except ImportError:
     AIOC_AVAILABLE = False
 
 
+# The ESP32-S3 needs the espdr package (shipped in this repository as ./espdr: numpy, pyserial) -- same posture as AIOC above: without it the
+# device just does not appear. Loading its firmware also needs esptool 5 or newer, which is only checked when the board is first used.
+try:
+    from .espdr import EspdrDevice
+    DEVICE_REGISTRY["espdr"] = EspdrDevice
+    ESPDR_AVAILABLE = True
+except ImportError:
+    ESPDR_AVAILABLE = False
+
+
 def primary_power_stage(device_type):
     """The PowerStage with is_primary=True for a device type, without
     needing an actual device instance -- power_stages is a class attribute."""

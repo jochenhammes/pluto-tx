@@ -87,6 +87,15 @@ class TxDevice(abc.ABC):
     # (and, for a Soundcard-kind device, the audio-only device itself) completely
     # untouched on purpose -- see those branches' docstrings.
     needs_ptt_control: bool = False
+    # The modes this device can carry, as the names the CLI uses ("fm", "m17", ...; see pluto_cli/tx.py MODES), or None for every mode the
+    # device's kind can carry at all (RF: everything, audio-only: see is_audio_only()). A device that can only play signals of a certain kind
+    # (the ESP32-S3 sends the FREQUENCY of a constant-envelope signal and nothing else) lists them here; flowgraph.py falls back to FM for
+    # any other, pluto_cli refuses them with a message and the GUI greys them out.
+    supported_modes: Optional[frozenset] = None
+
+    @classmethod
+    def supports_mode(cls, mode_name: str) -> bool:
+        return cls.supported_modes is None or mode_name in cls.supported_modes
 
     def __init__(self, connection: str, frequency_hz: float, sample_rate_hz: float,
                  bandwidth_hz: Optional[float]):
