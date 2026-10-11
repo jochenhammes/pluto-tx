@@ -33,7 +33,8 @@ def add_common_args(parser):
     parser.add_argument(
         "--uri", default=None,
         help="Device connection string (libiio URI for pluto, serial for hackrf, blank for "
-             "soundcard's system default). Omit to use that backend's own default.",
+             "soundcard's system default, for espdr blank to find the ESP32-S3 board or NATIVE_PORT[,BRIDGE_PORT]). "
+             "Omit to use that backend's own default.",
     )
     parser.add_argument(
         "--freq", type=float, default=tx_config.DEFAULT_FREQUENCY,
@@ -122,6 +123,11 @@ def _build(args, mode, connection, **mode_kwargs):
 
 def _run(args, mode, emitter, post_construct=None, **mode_kwargs):
     device_cls = tx_devices.DEVICE_REGISTRY[args.device]
+    mode_name = PlutoTxFlowgraph.MODE_NAMES.get(mode, "")
+    if not device_cls.supports_mode(mode_name):
+        emitter.error(f"the {device_cls.display_name} device cannot send {mode_name}: it carries only {', '.join(sorted(device_cls.supported_modes))} "
+                      f"(it sends the frequency of a constant-envelope signal and nothing else)")
+        return 1
     connection = runtime.resolve_connection(device_cls, args.uri)
     runtime.probe_or_exit(device_cls, connection, emitter)
     tb = runtime.build_or_exit(lambda: _build(args, mode, connection, **mode_kwargs), device_cls, connection, emitter)

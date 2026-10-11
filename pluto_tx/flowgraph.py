@@ -139,6 +139,9 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_MESHCORE = 13
     MODE_FT8 = 14
     MODE_JS8 = 15
+    # The names the CLI and TxDevice.supported_modes use for the modes.
+    MODE_NAMES = {0: "fm", 1: "ssb", 2: "m17", 3: "freedv", 4: "rade", 5: "digitext", 6: "filebroadcast", 7: "psk31", 8: "baseband",
+                  9: "rtty", 10: "meshtastic", 11: "lsb", 12: "pocsag", 13: "meshcore", 14: "ft8", 15: "js8"}
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -165,6 +168,9 @@ class PlutoTxFlowgraph(gr.top_block):
         super().__init__("PlutoTxFlowgraph")
 
         device_cls = devices.DEVICE_REGISTRY[device_type]
+        # The LoRa encoder branch only for a device that can carry LoRa at all: its resampler filter cannot even be designed for a device
+        # that runs at a few tens of kHz (the ESP32-S3 at 80 kHz), and it would be dead weight there.
+        self._lora_tx_branch = _LORA_TX_BRANCH and device_cls.supports_mode("meshtastic")
         if power_ceiling is None:
             power_ceiling = device_cls.default_power_ceiling
 
@@ -197,6 +203,8 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode == self.MODE_MESHTASTIC and (not LORA_AVAILABLE or device_cls.is_audio_only()):
             # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
+        if not device_cls.supports_mode(self.MODE_NAMES.get(mode, "")):
+            mode = self.MODE_FM  # a device that carries only some modes (the ESP32-S3: constant-envelope ones)
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
         # "FM" regardless of what mode the flowgraph was actually built with.
@@ -784,7 +792,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._meshcore_duty = lora_airtime.DutyCycleLimiter(None)
         self._lora_rf_bandwidth_active = False
         self._lora_phy = None
-        if _LORA_TX_BRANCH:
+        if self._lora_tx_branch:
             lp = (config.MESHCORE_PRESETS[self.meshcore_preset_index] if mode == self.MODE_MESHCORE
                   else config.MESHTASTIC_PRESETS[self.meshtastic_preset_index])
             self._lora_phy = self._meshtastic_phy(lp)
@@ -865,10 +873,15 @@ class PlutoTxFlowgraph(gr.top_block):
         # transition at working_rate*0.3).
         g_fb = math.gcd(quad_rate, int(config.FILEBROADCAST_WORKING_RATE_HZ))
         fb_interp, fb_decim = quad_rate // g_fb, int(config.FILEBROADCAST_WORKING_RATE_HZ) // g_fb
-        fb_taps = firdes.low_pass(
-            fb_interp, quad_rate, config.FILEBROADCAST_WORKING_RATE_HZ / 2 * 0.9,
-            config.FILEBROADCAST_WORKING_RATE_HZ * 0.3, window.WIN_HAMMING,
-        )
+        if device_cls.supports_mode("filebroadcast"):
+            fb_taps = firdes.low_pass(
+                fb_interp, quad_rate, config.FILEBROADCAST_WORKING_RATE_HZ / 2 * 0.9,
+                config.FILEBROADCAST_WORKING_RATE_HZ * 0.3, window.WIN_HAMMING,
+            )
+        else:
+            # a device that cannot carry this wideband mode (the ESP32-S3 at 80 kHz): the filter cannot even be designed at its rate. The
+            # branch stays built (see "always built" below) but is never selected: the constructor falls back to FM for this mode.
+            fb_taps = [1.0]
         self.filebroadcast_tx_resampler = filter.rational_resampler_ccf(
             interpolation=fb_interp, decimation=fb_decim, taps=fb_taps,
         )
@@ -1001,7 +1014,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_digitext = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Digitext branch above
         self._null_sink_psk31 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see PSK31 branch above
         self._null_sink_rtty = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see RTTY branch above
-        if _LORA_TX_BRANCH:
+        if self._lora_tx_branch:
             self._null_sink_lora = blocks.null_sink(gr.sizeof_gr_complex)
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
@@ -1226,7 +1239,7 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_DIGITEXT] = self.digitext_ssb_resampler  # always available, see its branch above
         producers[self.MODE_PSK31] = self.psk31_ssb_resampler  # always available, see its branch above
         producers[self.MODE_RTTY] = self.rtty_ssb_resampler  # always available, see its branch above
-        if _LORA_TX_BRANCH:
+        if self._lora_tx_branch:
             producers[self.MODE_MESHTASTIC] = self.lora_tx_resampler
             producers[self.MODE_MESHCORE] = self.lora_tx_resampler
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
@@ -1251,7 +1264,7 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_psk31
         if producer is self.rtty_ssb_resampler:
             return self._null_sink_rtty
-        if _LORA_TX_BRANCH and producer is self.lora_tx_resampler:
+        if self._lora_tx_branch and producer is self.lora_tx_resampler:
             return self._null_sink_lora
         if producer is self.filebroadcast_tx_resampler:
             return self._null_sink_filebroadcast

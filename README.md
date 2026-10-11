@@ -31,7 +31,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
 | **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, JS8 (JS8Call-kompatibel, Normal/Fast/Turbo/Slow), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
-| **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX) |
+| **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX), ESP32-S3-Board (TX, nur 13 cm, nur FM und M17, experimentell) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Fernbetrieb** | `web-trx` — Browser-Oberfläche (FastAPI + Svelte) auf derselben Codebasis, ein Betreiber, Login, HTTPS |
 | **Sicherheit** | NOTAUS, von GNU Radio unabhängige Abschalt-Logik, Live-Hardware-Readout |
@@ -117,6 +117,37 @@ RF-Hardware und sind mit diesem Gerätetyp nicht wählbar. Das
 eigenständige Skript `pluto_tx/tx-stdin.py` (Audio von stdin senden,
 z. B. für eine TTS-Pipe ohne die GUI) nutzt dieselbe PTT-Logik
 (`pluto_tx/aioc_ptt.py`) und funktioniert unabhängig von der App weiter.
+
+### Optional: ESP32-S3 als 13-cm-Sender (FM und M17, experimentell)
+
+Der Gerätetyp "ESP32-S3 (13 cm)" sendet mit einem ESP32-S3-Entwicklungsboard (mit **zwei** USB-Ports) im 13-cm-Band (2320–2450 MHz). Das Board hat
+keinen I/Q-Ausgang: Es steuert den Testton seines WLAN-Funkteils in Frequenz (und ein wenig in der Amplitude), 40 000-mal pro Sekunde. Das genügt
+für Signale mit **konstanter Hüllkurve**: `pluto-tx` rechnet das Basisband des Flowgraphs in die Momentanfrequenz um, und nur diese geht zum Chip. Deshalb
+sind **nur FM und M17** wählbar; alles mit Amplitudenmodulation (SSB, PSK31, FT8, FreeDV, RADE, ...) und LoRa ist bei diesem Gerät gesperrt
+(GUI: ausgegraut mit Hinweis, `pluto-cli`: Fehlermeldung, Flowgraph: Rückfall auf FM).
+
+```
+./install.sh            # zuerst
+./install-espdr.sh      # esptool 5 (pipx), udev-Regel für das Board; --dry-run zeigt nur, was passieren würde
+```
+
+Der Code für das Board (`espdr/`, einschließlich der Firmware-Images) gehört zu diesem Repository: Er ist eine Kopie aus
+[esp32-sdr-trx](https://github.com/jochenhammes/esp32-sdr-trx) (Zero-Clause-BSD-Lizenz, Stand in `espdr/UPSTREAM`), die `tools/sync-espdr.sh`
+aktualisiert. **`espdr/` hier nicht ändern**, sondern in esp32-sdr-trx. Es wird nichts nachgeladen; die Firmware kommt bei Bedarf ins **RAM**
+des Boards (der Flash bleibt unberührt). Verbindungsfeld: leer (Board an den USB-Ports finden) oder `NATIVER_PORT[,UART_PORT]`, z. B. `/dev/ttyACM1,/dev/ttyACM0`.
+
+Vor der ersten Sendung einmal den Lizenzhinweis bestätigen (das sendet nichts):
+`python3 -m espdr.cli_tx -f 2345 --test-tone 1000 --dry-run --accept-licence`. Dann z. B. `pluto-cli tx m17 --device espdr --freq 2345000000 --src-callsign <Rufzeichen>`.
+
+**Was du wissen musst** (gemessen mit einem Board und einem PlutoSDR als Empfänger, Einzelheiten in
+[`espdr/` → docs/research/PLAN-M17.md in esp32-sdr-trx](https://github.com/jochenhammes/esp32-sdr-trx/blob/feature/m17/docs/research/PLAN-M17.md), Abschnitt 10):
+- Die M17-Kette von `pluto-tx` dekodiert das Signal (Rufzeichen und Sprache), auch noch am Ende einer 120-s-Sendung.
+- **Außerhalb des Kanals ist der Sender nicht sauber**: die Nachbarfenster (9 kHz) liegen 37 dB (±12,5 kHz) und 46 dB (±25 kHz) unter der Kanalleistung,
+  weiter draußen etwa −55 dBc bis ±200 kHz. Oberwellen sind **nicht gemessen**, die Leistung ist **nicht kalibriert** (Standardobergrenze −12 dB gegen den stärksten Wert).
+- Die Trägerfrequenz **weicht ab** (der Quarz des Boards, einige kHz, je nach Temperatur) und **driftet** (1,5 kHz in 106 s, gemessen mit aktivem Thermalmodell des Boards und ohne ppm-Korrektur);
+  M17-Empfänger folgen dem. Bei etwa 10 % der Frequenzen liegt das Signal wegen der Einstellmöglichkeiten des Chips ein paar kHz neben dem Wunsch (die Warnung nennt die tatsächliche Frequenz).
+- Die Latenz von PTT bis Träger beträgt mindestens 100 ms, das Ende des Trägers kommt etwa 125 ms nach dem Loslassen; die Frequenz lässt sich während der Sendung nicht ändern.
+- Eine Sendung braucht eine **Amateurfunklizenz**, und du bist für das verantwortlich, was du sendest. Nur 2320–2450 MHz.
 
 ### Optional: FT8
 
@@ -486,10 +517,11 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
 | **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
 | **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 (Audio + echtes serielles PTT) | — (kein RX-Backend) |
+| **ESP32-S3-Board** (nur 13 cm, experimentell) | nur FM und M17 (konstante Hüllkurve; Frequenz 2320–2450 MHz) | — (kein RX-Backend) |
 
 Geräteauswahl per editierbarem Dropdown ("Device") plus Scan- und
 Connect/Disconnect-Buttons. **Nur `pluto-tx`** hat zusätzlich ein
-"Device Type"-Dropdown (PlutoSDR/HackRF/Soundcard/AIOC), das Verbindungsfeld,
+"Device Type"-Dropdown (PlutoSDR/HackRF/Soundcard/AIOC/ESP32-S3), das Verbindungsfeld,
 Frequenzbereich und Pegel-Regler passend umschaltet.
 
 ## Sicherheit
@@ -516,10 +548,11 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
 ## Struktur
 
 ```
-install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-js8.sh / install-web-trx.sh
+install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-js8.sh / install-web-trx.sh / install-espdr.sh
+espdr/                    # Kopie aus esp32-sdr-trx (0BSD): Host-Teil des ESP32-S3-Senders + Firmware-Images; `tools/sync-espdr.sh`, nicht hier ändern
 pluto_tx/                 # Sende-App
 ├── config.py                # geräteunabhängige Konstanten
-├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard)
+├── devices/                  # TX-Geräte-Abstraktionsschicht (Pluto/HackRF/Soundcard/AIOC/ESP32-S3)
 ├── safety.py                 # PlutoSafety: rohes python3-libiio, unabhängig von GNU Radio
 ├── flowgraph.py               # PlutoTxFlowgraph: die gesamte Signalkette
 ├── dynamics.py                # Kompressor/Limiter
@@ -616,6 +649,10 @@ offene Punkte stehen am Ende dieser Datei.
 ## Lizenz
 
 [GPLv3](LICENSE) — Copyright (C) 2026 Jochen Hammes (DA2JH).
+
+Das Verzeichnis `espdr/` (Host-Teil des ESP32-S3-Senders und seine Firmware-Images) ist eine Kopie aus
+[esp32-sdr-trx](https://github.com/jochenhammes/esp32-sdr-trx) unter der Zero-Clause-BSD-Lizenz (`espdr/LICENSE`, `espdr/NOTICE`); der Rest dieses
+Repositories steht unter GPLv3. Die Kopie erzeugt `tools/sync-espdr.sh`, der Stand steht in `espdr/UPSTREAM`.
 
 Die optionalen Abhängigkeiten `gr-m17` (GPLv2), `rade_c`/RADE
 (BSD-2-Clause) und `ft8_lib` (MIT) werden von `install-m17.sh`/`install-rade.sh`/
