@@ -1,0 +1,10 @@
+repository: https://github.com/jochenhammes/esp32-sdr-trx
+commit: 580a0f7a4052410843b89c4f5c2f5973db68ef84
+subject: board: find esptool as a program on the PATH when this Python has no esptool module
+date: 2026-10-11T18:55:39+02:00
+licence: 0BSD (espdr/LICENSE); the rest of pluto-tx is GPL-3.0
+images (build products of the firmware of that repository, copied as they were; sha256 in espdr/images/SHA256SUMS.txt):
+  c5131425d56fb05c44874988ca77652a5c4482296bf206d944683ee131d73678  rx.bin
+  b017125ac6c1bcbb70c84e3675a0ecee485b3249f84803cae382b6b83c6f7fd6  tx.bin
+  09b2386299522e08fad02bfed8bab76bc5e37076b8d529c31811e967780b686b  bootloader.bin
+  7f00b6c042a89b15b0cac534f82ed988caf29278ff5700b0c511eb1b5bb7c820  partition-table.bin
