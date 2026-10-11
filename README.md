@@ -142,6 +142,9 @@ Vor der ersten Sendung einmal den Lizenzhinweis bestätigen (das sendet nichts):
 **Was du wissen musst** (gemessen mit einem Board und einem PlutoSDR als Empfänger, Einzelheiten in
 [`espdr/` → docs/research/PLAN-M17.md in esp32-sdr-trx](https://github.com/jochenhammes/esp32-sdr-trx/blob/feature/m17/docs/research/PLAN-M17.md), Abschnitt 10):
 - Die M17-Kette von `pluto-tx` dekodiert das Signal (Rufzeichen und Sprache), auch noch am Ende einer 120-s-Sendung.
+- Mit dem Gerät selbst (`pluto-cli`, ein Board, ein PlutoSDR als Empfänger, 2345 MHz, −6 dB) getestet: M17 von einer WAV-Datei wird dekodiert (Rufzeichen, 4,5 s Sprache);
+  FM sendet und endet sauber; fünf Sendungen hintereinander ohne hängenden Träger (Träger innerhalb der Messauflösung von 0,22 s beim Tasten und beim Loslassen).
+  **Nicht getestet:** die GUI im echten Betrieb, Mikrofonbetrieb über längere Zeit (Taktdrift Soundkarte gegen Chip), mehr als ein Board, 600-s-Sendungen.
 - **Außerhalb des Kanals ist der Sender nicht sauber**: die Nachbarfenster (9 kHz) liegen 37 dB (±12,5 kHz) und 46 dB (±25 kHz) unter der Kanalleistung,
   weiter draußen etwa −55 dBc bis ±200 kHz. Oberwellen sind **nicht gemessen**, die Leistung ist **nicht kalibriert** (Standardobergrenze −12 dB gegen den stärksten Wert).
 - Die Trägerfrequenz **weicht ab** (der Quarz des Boards, einige kHz, je nach Temperatur) und **driftet** (1,5 kHz in 106 s, gemessen mit aktivem Thermalmodell des Boards und ohne ppm-Korrektur);
