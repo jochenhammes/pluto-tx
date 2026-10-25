@@ -209,7 +209,9 @@ class Js8TxFlowgraphTests(unittest.TestCase):
         self.assertEqual(fg.js8_occupied_hz(), (144_179_500.0, 144_179_550.0))
         for freq, ok in ((7_078_000.0, True), (14_078_000.0, True), (100_000_000.0, False),
                          (7_198_460.0, False),                        # tone 0 inside 40 m, the top tone above
-                         (7_198_400.0, True), (13_998_000.0, False), (145_999_000.0, False)):
+                         (7_198_400.0, True), (13_998_000.0, False), (145_999_000.0, False),
+                         (28_074_000.0, True),                        # 10 m JS8 (28.078 is JS8's own call freq)
+                         (29_698_460.0, False), (27_998_000.0, False)):
             fg.set_frequency(freq)
             self.assertEqual(fg.js8_problem() is None, ok, freq)
             if not ok:
@@ -231,8 +233,10 @@ class Js8TxFlowgraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "amateur band"):
             fg.key_ptt()
         self.assertFalse(fg.keyed)
-        self.assertEqual(config.in_amateur_band(7_100_000), "40m")
-        self.assertEqual(config.in_amateur_band(14_200_000), "20m")
+        for freq, band in ((1_840_000, "160m"), (3_578_000, "80m"), (5_357_000, "60m"), (7_100_000, "40m"),
+                           (10_130_000, "30m"), (14_200_000, "20m"), (18_100_000, "17m"), (21_078_000, "15m"),
+                           (24_922_000, "12m"), (28_074_000, "10m"), (29_700_000, "10m"), (27_000_000, None)):
+            self.assertEqual(config.in_amateur_band(freq), band, freq)
 
 
 if __name__ == "__main__":

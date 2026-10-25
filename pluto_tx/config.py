@@ -688,9 +688,20 @@ LORA_TX_RF_BANDWIDTH_MARGIN = 1.2
 
 # German amateur radio band edges, used only for a non-blocking sanity
 # warning in the GUI -- independent of which TX device backend is active.
+# German amateur bands, licence class A (AFuV Anlage 1). HF: every band, so digimodes (FT8/JS8/...) work on all
+# of them -- the Pluto+ itself only transmits from 47 MHz up (devices/pluto.py), HF needs the HackRF or a radio
+# via Soundcard/AIOC. Further bands (6 m, 4 m, 9 cm and up) only once checked against the AFuV.
 DE_AMATEUR_BANDS_HZ = [
+    ("160m", 1_810_000, 2_000_000),
+    ("80m", 3_500_000, 3_800_000),
+    ("60m", 5_351_500, 5_366_500),
     ("40m", 7_000_000, 7_200_000),
+    ("30m", 10_100_000, 10_150_000),
     ("20m", 14_000_000, 14_350_000),
+    ("17m", 18_068_000, 18_168_000),
+    ("15m", 21_000_000, 21_450_000),
+    ("12m", 24_890_000, 24_990_000),
+    ("10m", 28_000_000, 29_700_000),
     ("2m", 144_000_000, 146_000_000),
     ("70cm", 430_000_000, 440_000_000),
     ("23cm", 1_240_000_000, 1_300_000_000),
