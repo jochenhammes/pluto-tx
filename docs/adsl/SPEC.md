@@ -71,7 +71,7 @@ Ein Traffic-Rahmen hat die Länge `0x18` (1 + 20 + 3 Byte), auf der Luft 432 Chi
 
 Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsignal stört den Diskriminator vollständig; bei −10 dB ist er folgenlos. Das kann eigene Störlinien des Empfängers bei sehr schwachen Signalen betreffen.
 
-## Echttest (31.10.2026, JO31)
+## Echttest (31.10.2026, Empfänger in JO43)
 
 **Testsendung, vom Betreiber freigegeben:** Pluto+ bei −40 dB über Funk, kurze Distanz, 868,2/868,4 MHz abwechselnd. Fünf Serien zu je 8 Paketen, zusammen etwa 0,2 s Sendezeit. Inhalt: Zufallsadresse (Privacy-Tabelle), „am Boden", Position bei 0°N 0°E, Modellflugzeug. Der OGN-Feed um diese Position blieb bei der geprüften ersten Serie leer. Das Sendeskript ist nicht Teil des Repos.
 
@@ -84,7 +84,9 @@ Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsigna
 
 Bei 20 dB zeigte eine Rohaufnahme keine Lücken und kein Clipping. Alle Bursts wurden gefunden, lagen aber nur rund 10 dB über dem Rauschen und scheiterten am CRC. Das passt zur Grenze aus den synthetischen Messungen.
 
-**Dauer-Empfang:** 39 Minuten am späten Nachmittag (16:32 bis 17:11 Uhr) auf Pluto+ und RTL-SDR ergaben kein echtes ADS-L-Paket. Das passt zum OGN-Feed: In den 30 davon aufgezeichneten Minuten meldete das Netz im Umkreis von 80 km um JO31 keinen ADS-L-Sender (`OGADSL`), aber 47 im FLARM-Format. Eine 90-Sekunden-Stichprobe mit 150 km Umkreis fand einen einzigen, etwa 100 km entfernt. **Echter Flugverkehr ist also noch nicht bestätigt.** Der Positionsabgleich mit OGN aus dem Plan steht deshalb noch aus.
+**Dauer-Empfang:** 39 Minuten am späten Nachmittag (16:32 bis 17:11 Uhr) auf Pluto+ und RTL-SDR ergaben kein echtes ADS-L-Paket. **Echter Flugverkehr ist also noch nicht bestätigt**, der Positionsabgleich mit OGN aus dem Plan steht noch aus.
+
+Die OGN-Prüfung während dieses Laufs galt versehentlich JO31 statt dem Empfängerstandort JO43 und sagt deshalb nichts über die Reichweite aus. Eine Stichprobe von 2 Minuten für 80 km um JO43 (17:46 Uhr) zeigte einen ADS-L-Sender: `PAWE5A900`, stehend bei 53°33′N 10°10′E. Das Präfix `PAW` deutet auf PilotAware hin, das laut Community-Übersicht das O-Band nutzt; ob es auch im M-Band sendet, ist nicht geprüft.
 
 **HackRF:** nicht am echten Gerät getestet, nur der synthetische Pfad bei seinen Raten.
 
