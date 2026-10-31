@@ -187,7 +187,7 @@ the real flowgraph exactly, not a `pluto_cli` simplification. That means
 the chosen output *and* saves any File Broadcast files seen in the same
 band, at the same time.
 
-**PSK31/RTTY are different: only ONE digimode can ever be active at a
+**Digimodes are different: only ONE can ever be active at a
 time**, selected via `--digimode`. This is a real GNU Radio limitation, not
 a `pluto_cli`-specific restriction: a block with a required input can't be
 left disconnected while a flowgraph is running, so switching which digimode
@@ -282,7 +282,7 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `unkeyed` | TX: just unkeyed | `mode` |
 | `interactive_ready` | TX `--interactive`: ready for input | `hint` |
 | `shutdown` | TX or RX: safe shutdown has completed | -- |
-| `started` | RX: flowgraph is running and unmuted | -- |
+| `started` | RX: flowgraph is running and unmuted (`--digimode adsl` stays muted: data only) | -- |
 | `repeat_wait` | TX with `--repeat-count` > 1: pause before the next transmission (`keyed` then also carries `repetition` and `of`) | `seconds`, `next`, `of` |
 | `psk31_char` | RX `--digimode psk31`: one decoded character (RX-only; TX `psk31` prints nothing) | `char` (single character string) |
 | `adsl_listen` | RX `--digimode adsl`: once at startup (`--freq` is ignored, needs an RF device and at least 1.8 MS/s) | `channels_hz`, `freq_hz`, `sample_rate_hz` |
@@ -373,6 +373,20 @@ RX. Any RX mode works alongside `--digimode rtty` (`fm` above is just a
 placeholder primary mode -- RTTY decodes from the IF stage independently
 of it, same as PSK31).
 
+### ADS-L reception (aircraft, 868 MHz)
+
+```bash
+pluto-cli rx fm --device rtlsdr --digimode adsl --json
+pluto-cli rx fm --device pluto --uri ip:plutoplus.local --digimode adsl --buffer-size 262144 --json
+```
+
+Receives 868.2 and 868.4 MHz at the same time and emits one `adsl_packet` per packet that passes its
+CRC. The tuning is fixed at 868.85 MHz (`--freq` is ignored) and the audio stays muted; `fm` is only a
+placeholder primary mode. `--bandwidth` must be at least 1800000; the device defaults all fit, and more
+does not improve reception. Receive only: this project has no ADS-L transmitter. Monitoring only, not
+for navigation or collision avoidance. Not yet confirmed on real air traffic and not yet tested on a
+real HackRF, see `docs/adsl/SPEC.md`.
+
 ## 8. Exit codes & known limitations
 
 - Exit code `0`: success. `1`: a handled error (bad device, unreachable
@@ -385,6 +399,6 @@ of it, same as PSK31).
 - `tx digitext`/`tx psk31`/`tx rtty`/`tx pocsag` ignore `--duration`: their transmission
   length is computed from the rendered text and cannot be shortened or
   extended.
-- **Only one of PSK31/RTTY can decode at a time** (`--digimode`) -- see
+- **Only one digimode can decode at a time** (`--digimode`) -- see
   section 4's own note on why this is a real GNU Radio limitation, not a
   `pluto_cli` restriction.

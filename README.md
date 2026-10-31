@@ -278,7 +278,7 @@ Ziel) direkt in der GUI einstellbar.
 Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
 gewählten primären Empfangsmodus (man kann z.B. FM hören und
 gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
-aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8, JS8 **oder** Meshtastic) kann
+aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic, MeshCore **oder** ADS-L) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
@@ -450,12 +450,34 @@ verwenden, kein Rufzeichen in Text auf dem öffentlichen 868-MHz-Kanal.
 **ADS-L (Luftfahrt, nur Empfang).** `pluto-advanced-rx` und `pluto-cli rx --digimode adsl`
 empfangen die Positionsmeldungen von Luftfahrzeugen nach EASA ADS-L 4 SRD860 auf 868,2 und
 868,4 MHz gleichzeitig (M-Band: GFSK, 100 kchip/s, Manchester, **kein LoRa**). Der Empfänger
-stimmt selbst auf 868,85 MHz ab und braucht mindestens 1,8 MS/s; die Standardraten aller Geräte
-passen. Die Tabelle zeigt pro Luftfahrzeug Adresse, Kategorie, Position, Höhe (über dem
+stimmt selbst auf 868,85 MHz ab und stellt beim Verlassen des Modus die vorige Frequenz wieder her.
+In der App: Reiter „Digimodes“, Eintrag „ADS-L (Aircraft, 868 MHz)“. Auf der Kommandozeile:
+
+```bash
+pluto-cli rx fm --device rtlsdr --digimode adsl --json
+```
+
+Die **RX-Bandbreite** muss mindestens 1,8 MS/s betragen, darunter verweigert die App den Start.
+Die Standardwerte passen, mehr Bandbreite bringt keine bessere Empfangsquote:
+
+| Gerät | Standard | Kleinste passende Stufe |
+|---|---|---|
+| RTL-SDR | 2,4 MS/s | 1,8 MS/s |
+| Pluto+ | 2,5 MS/s | 2,5 MS/s |
+| HackRF | 4 MS/s | 2 MS/s |
+
+Die Tabelle zeigt pro Luftfahrzeug Adresse, Kategorie, Position, Höhe (über dem
 WGS-84-Ellipsoid, nicht über Grund oder Meer), Tempo, Steigen, Kurs und die gemessene
 Frequenzablage; darunter steht das Paket-Log. Angezeigt wird nur, was die CRC besteht, gespeichert
 wird nichts. O-Band (LDR/HDR), FEC-Rahmen, Status- und Uplink-Inhalte sowie FLARM werden nicht
-dekodiert.
+dekodiert. Solange ADS-L aktiv ist, ist der File-Broadcast-Empfang abgeschaltet.
+
+**Empfangstipps:** Das Signal braucht rund 10 dB über dem Rauschen im 200-kHz-Kanal. Beim RTL-SDR die
+Standard-AGC oder eine feste Verstärkung ab etwa 40 dB nutzen; am Pluto über das Netzwerk für
+Dauerbetrieb den RX-Puffer 262144 wählen. In `pluto-cli` bleibt der Ton bei ADS-L stumm, in der App
+ist er wie immer aus, bis du den Empfang einschaltest. Ob gerade jemand in der Nähe sendet, zeigt das
+[OGN-Netz](https://www.glidernet.org) (Protokollkennung `OGADSL`); im Test war ADS-L deutlich seltener
+als FLARM.
 
 **Nur zur Beobachtung, nicht zur Navigation oder Kollisionsvermeidung:** Ein Empfänger hört nur
 einen Teil des Verkehrs. Das Projekt enthält bewusst keinen ADS-L-Sender.
@@ -537,7 +559,7 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 | alle Modi (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 | alle Modi außer LoRa und ADS-L (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
 | **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 (Audio + echtes serielles PTT) | — (kein RX-Backend) |
 | **ESP32-S3-Board** (nur 13 cm, experimentell) | nur FM und M17 (konstante Hüllkurve; Frequenz 2320–2450 MHz) | — (kein RX-Backend) |
 
@@ -582,6 +604,7 @@ pluto_tx/                 # Sende-App
 ├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
 ├── meshcore_codec.py / meshcore_identity.py  # MeshCore: Paketformat, Adverts (Ed25519), Gruppentext (AES-ECB+HMAC), Knotenidentität
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
+├── adsl_codec.py                # ADS-L: CRC-24, XXTEA, Traffic-Payload (nur Empfang, von der RX-App genutzt)
 ├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib
 ├── js8.py / js8_phy.py / js8_message.py / js8_source.py / js8_tables.py  # JS8: Wellenform + Slotplan, Rahmen (LDPC/CRC/Costas), Nachrichten (Varicode/JSC), Sequenzquelle, aus JS8Call extrahierte Tabellen
 ├── gui.py / app.py
@@ -590,6 +613,7 @@ pluto_tx/                 # Sende-App
 pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
 ├── waterfall_widget.py         # eigenes pyqtgraph-Wasserfall-Widget
+├── adsl_demod.py / adsl_deframer.py / adsl_state.py  # ADS-L: Burst-Demodulator (numpy), GNU-Radio-Hülle je Kanal, Luftfahrzeugliste
 ├── ft8_decoder.py / ft8_rx.py   # FT8: Slot-Decoder (jt9 oder ft8_lib), UTC-Slot-Empfänger
 ├── js8_decoder.py / js8_rx.py / js8_assembly.py  # JS8: Slot-Decoder (js8ref oder eigener), Empfänger je Speed, Mehrrahmen-Zusammensetzung
 └── ...

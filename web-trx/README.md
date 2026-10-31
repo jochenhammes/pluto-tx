@@ -361,7 +361,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 - FT8-Senden im Funkbetrieb testen (F3/F4 in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
 - JS8 mit echten Gegenstationen auf KW (2 m über Luft ist getestet, J7).
-- Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
+- Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, ADS-L, File Broadcast, …).
 
 ## Struktur
 

@@ -16,6 +16,12 @@ ADS-L ist **kein LoRa**. Die Sender nutzen zwar oft LoRa-Chips (SX1262, SX1276),
 
 Issue 2 erklärt die O-Band-Werte aus Issue 1 ausdrücklich für überholt.
 
+## Abstimmung und Bandbreite
+
+Beide M-Kanäle kommen aus einem Empfangsbereich um 868,85 MHz: So liegt keiner auf dem DC-Spike, und 869,525 MHz passt später dazu. Der entferntere Kanal liegt 650 kHz daneben. Dazu kommen 130 kHz für das Kanalfilter und Reserve zum Rand, daher mindestens 1,8 MS/s. Von dort an hing der Empfang in den Messungen nicht mehr von der Rate ab (gemessen bis 5 MS/s).
+
+Benutzung und Empfangstipps: `README.md`, Abschnitt ADS-L; CLI-Ereignisse: `pluto_cli/README.md`.
+
 ## M-Band-Rahmen
 
 ```
