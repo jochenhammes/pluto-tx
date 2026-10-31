@@ -11,6 +11,8 @@ offsets count from the least significant bit of each byte. See docs/adsl/SPEC.md
 """
 import struct
 
+from pluto_tx.mode_s_crc import crc24
+
 SYNC_BYTES = bytes((0x72, 0x4B))
 TRAFFIC_LENGTH = 0x18  # network header + 20 data bytes + CRC-24
 MIN_LENGTH = 12  # network header + 5-byte header + 3-byte minimum payload + CRC-24
@@ -38,17 +40,6 @@ _NO_POSITION = (0x800000, 0xFFFFFF)  # Issue 2 and Issue 1 respectively
 _XXTEA_ROUNDS = 6
 _XXTEA_DELTA = 0x9E3779B9
 _MASK32 = 0xFFFFFFFF
-_CRC24_POLY = 0xFFF409  # the Mode-S generator without its x^24 term
-
-
-def crc24(data: bytes) -> int:
-    """Mode-S CRC-24: running it over data plus its own three CRC bytes gives 0."""
-    crc = 0
-    for byte in data:
-        crc ^= byte << 16
-        for _ in range(8):
-            crc = ((crc << 1) ^ _CRC24_POLY if crc & 0x800000 else crc << 1) & 0xFFFFFF
-    return crc
 
 
 def _mx(y, z, total):
