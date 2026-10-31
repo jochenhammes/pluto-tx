@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import signal
 import sys
 import unittest
@@ -136,6 +137,90 @@ class CliTests(unittest.TestCase):
         code, events = run_cli(["rx", "fm", "--device", "fake", "--uri", "x", "--digimode", "adsb", "--adsb-locator", "XX99", "--json"])
         self.assertEqual(code, 1)
         self.assertIn("invalid --adsb-locator", json.dumps(events))
+
+
+class GuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt5 import QtWidgets
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def fake_window(self, rate=2_500_000):
+        from pluto_advanced_rx import flowgraph as rxf, gui
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(4096, np.complex64), rate)
+        w = gui.MainWindow("x")
+        w.device_type_combo.blockSignals(True)
+        w.device_type_combo.addItem("fake", "fake")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("fake"))
+        w.device_type_combo.blockSignals(False)
+        w.tb = rxf.AdvancedRxFlowgraph(uri="x", frequency=433.5e6, sample_rate=rate, device_type="fake")
+        w.freq_spin.setValue(433.5)
+        return w
+
+    def test_table(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("adsb"))
+        self.assertFalse(w.adsb_group_widget.isHidden())
+        self.assertTrue(w.adsl_group_widget.isHidden())
+        for m in (gen.callsign_message(ICAO, "DLH123"), gen.position_message(ICAO, 53.5, 9.5, 35000, 0),
+                  gen.position_message(ICAO, 53.5, 9.5, 35000, 1), gen.velocity_message(ICAO, 300, 400, -640)):
+            w._adsb_state.on_message(c.parse_message(m))
+        w._adsb_rendered_time = 0.0
+        w._poll_digimode()
+        cell = lambda name: w.adsb_table.item(0, w.ADSB_COLUMNS.index(name)).text()
+        self.assertEqual(cell("ICAO"), "3C6444")
+        self.assertEqual(cell("Callsign"), "DLH123")
+        self.assertEqual(cell("Alt ft"), "35000")
+        self.assertEqual(cell("kt"), "500")
+        self.assertEqual(cell("ft/min"), "-640")
+        self.assertEqual(cell("Latitude"), "53.5000")
+        w.adsb_clear_button.click()
+        self.assertEqual(w.adsb_table.rowCount(), 0)
+
+    def test_entering_and_leaving_the_mode(self):
+        w = self.fake_window()
+        w.zoom_slider.setValue(8)
+        w._rebuild_for_digimode("adsb")
+        self.assertEqual(w.tb.active_digimode, "adsb")
+        self.assertEqual(w.tb.nominal_freq_hz, config.ADSB_FREQ_HZ)
+        self.assertEqual(w.zoom_slider.value(), 1)
+        self.assertIsNone(w.tb.filebroadcast_deframer)
+        w._on_waterfall_clicked(1_090_500_000.0)
+        self.assertEqual(w.tb.nominal_freq_hz, config.ADSB_FREQ_HZ)
+        w._rebuild_for_digimode("adsl")
+        self.assertEqual(w.tb.nominal_freq_hz, config.ADSL_LO_HZ)
+        self.assertEqual(w.zoom_slider.value(), 4)
+        w._rebuild_for_digimode(None)
+        self.assertEqual(w.tb.nominal_freq_hz, 433.5e6)
+        self.assertEqual(w.zoom_slider.value(), 8)
+        w.tb.shutdown()
+
+    def test_too_low_rate_reports(self):
+        w = self.fake_window(rate=1_000_000)
+        old = w.tb
+        w._rebuild_for_digimode("adsb")
+        self.assertIs(w.tb, old)
+        self.assertIn("too low for ADS-B", w.status_label.text())
+
+    def test_rtl_gain_raised_and_restored(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("rtlsdr"))
+        self.assertEqual(w.gain_slider.value(), 20)
+        w._apply_fixed_tune_gain("adsb")
+        self.assertEqual(w.gain_slider.value(), 40)
+        w._apply_fixed_tune_gain(None)
+        self.assertEqual(w.gain_slider.value(), 20)
+
+    def test_soundcard_cannot_select_it(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("adsb"))
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("audio"))
+        self.assertNotEqual(w.digimode_combo.currentData(), "adsb")
 
 
 class LocatorTests(unittest.TestCase):

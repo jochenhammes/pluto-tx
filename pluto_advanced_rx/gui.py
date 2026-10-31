@@ -38,6 +38,7 @@ from .meshtastic_state import MeshtasticState
 from .pocsag_state import PocsagState
 from pluto_tx import adsl_codec
 from .adsl_state import AdslState, summarize as adsl_summarize
+from .adsb_state import AdsbState
 from .ft8_rx import Ft8State
 from .js8_rx import Js8State
 from pluto_tx import js8_phy
@@ -117,6 +118,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshcore_rendered_version = -1
         self._meshcore_last_frames = 0
         self._meshcore_last_activity_time = 0.0
+        # ADS-B aircraft (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._adsb_state = AdsbState()
+        self._adsb_rendered_version = -1
+        self._adsb_rendered_time = 0.0
         # ADS-L traffic (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
         self._adsl_state = AdslState()
         self._adsl_rendered_version = -1
@@ -310,6 +315,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
         self.digimode_combo.addItem("JS8 (JS8Call)", "js8")
         self.digimode_combo.addItem("ADS-L (Aircraft, 868 MHz)", "adsl")
+        self.digimode_combo.addItem("ADS-B (Aircraft, 1090 MHz)", "adsb")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
         self.digimode_combo.addItem("MeshCore (LoRa)", "meshcore")
         if not MESHCORE_AVAILABLE:
@@ -635,6 +641,36 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(pocsag_group, 1)
         self.pocsag_group_widget = pocsag_group
         self._update_pocsag_signal_label()
+
+        # --- ADS-B RX: aircraft positions on 1090 MHz. Far too many messages for a log, so only the aircraft list.
+        adsb_group = QtWidgets.QWidget()
+        adsb_layout = QtWidgets.QVBoxLayout(adsb_group)
+        adsb_layout.setContentsMargins(0, 0, 0, 0)
+        self.adsb_notice_label = QtWidgets.QLabel(
+            "<b>Monitoring only.</b> Not for navigation or collision avoidance: a receiver hears only part of the traffic, "
+            "and this one is not certified for anything.")
+        self.adsb_notice_label.setWordWrap(True)
+        adsb_layout.addWidget(self.adsb_notice_label)
+        adsb_row = QtWidgets.QHBoxLayout()
+        self.adsb_signal_label = QtWidgets.QLabel("")
+        self.adsb_signal_label.setWordWrap(True)
+        adsb_row.addWidget(self.adsb_signal_label, 1)
+        self.adsb_clear_button = QtWidgets.QPushButton("Clear")
+        self.adsb_clear_button.clicked.connect(self._on_adsb_clear_clicked)
+        adsb_row.addWidget(self.adsb_clear_button)
+        adsb_layout.addLayout(adsb_row)
+        self.adsb_table = QtWidgets.QTableWidget(0, len(self.ADSB_COLUMNS))
+        self.adsb_table.setHorizontalHeaderLabels(self.ADSB_COLUMNS)
+        self.adsb_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.adsb_table.verticalHeader().setVisible(False)
+        self.adsb_table.horizontalHeader().setStretchLastSection(True)
+        self.adsb_table.setMinimumHeight(160)
+        self.adsb_table.setToolTip("Altitude as the aircraft reports it: barometric, or GNSS where marked. Positions need "
+                                   "two messages to decode, so an aircraft can appear without one for a while.")
+        adsb_layout.addWidget(self.adsb_table, 1)
+        digimodes_tab_layout.addWidget(adsb_group, 1)
+        self.adsb_group_widget = adsb_group
+        self._update_adsb_signal_label()
 
         # --- ADS-L RX: aircraft conspicuity broadcasts on 868.2 + 868.4 MHz, both received at once. Entering the mode
         # tunes to one LO between the channels; only packets that pass their CRC ever reach these tables.
@@ -1326,6 +1362,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshcore_group_widget.setVisible(selected == "meshcore")
         self.pocsag_group_widget.setVisible(selected == "pocsag")
         self.adsl_group_widget.setVisible(selected == "adsl")
+        self.adsb_group_widget.setVisible(selected == "adsb")
         self.ft8_group_widget.setVisible(selected == "ft8")
         self.js8_group_widget.setVisible(selected == "js8")
 
@@ -1429,10 +1466,11 @@ class MainWindow(QtWidgets.QMainWindow):
             lora_item.setToolTip("LoRa needs an RF device, not a soundcard")
             if self.digimode_combo.currentData() == "meshtastic":
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
-        adsl_item = self.digimode_combo.model().item(self.digimode_combo.findData("adsl"))
-        adsl_item.setEnabled(has_frequency)
-        adsl_item.setToolTip("" if has_frequency else "ADS-L needs an RF device, not a soundcard")
-        if not has_frequency and self.digimode_combo.currentData() == "adsl":
+        for rf_only, name in (("adsl", "ADS-L"), ("adsb", "ADS-B")):
+            rf_item = self.digimode_combo.model().item(self.digimode_combo.findData(rf_only))
+            rf_item.setEnabled(has_frequency)
+            rf_item.setToolTip("" if has_frequency else f"{name} needs an RF device, not a soundcard")
+        if not has_frequency and self.digimode_combo.currentData() in ("adsl", "adsb"):
             self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
         mc_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshcore"))
         mc_item.setEnabled(MESHCORE_AVAILABLE and has_frequency)
@@ -1621,6 +1659,7 @@ class MainWindow(QtWidgets.QMainWindow):
             meshcore_preset_index=self._meshcore_preset_index(),
             on_pocsag_message=self._pocsag_state.on_message,
             on_adsl_packet=self._adsl_state.on_packet,
+            on_adsb_message=self._adsb_state.on_message,
             on_ft8_decodes=self._ft8_state.on_decodes,
             ft8_my_call=self._ft8_tx_setting("my_call"), ft8_my_grid=self._ft8_tx_setting("locator"),
             on_js8_decodes=self._js8_state.on_decodes, js8_submodes=self.js8_speed_combo.currentData(),
@@ -1980,6 +2019,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self._meshcore_state.set_identity(None)
             self.meshcore_own_key_label.setText("")
             self.meshcore_own_key_label.setToolTip("")
+
+    ADSB_COLUMNS = ["ICAO", "Callsign", "Latitude", "Longitude", "Alt ft", "kt", "ft/min", "Track", "Status", "Messages", "Age s"]
+
+    def _on_adsb_clear_clicked(self):
+        self._adsb_state.clear()
+        self._render_adsb_table()
+
+    def _update_adsb_signal_label(self):
+        if self.tb is None:
+            self.adsb_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "adsb":
+            self.adsb_signal_label.setText("Not listening.")
+            return
+        detector = self.tb.adsb_deframer.detector
+        aircraft, rejected = self._adsb_state.counts()
+        self.adsb_signal_label.setText(
+            f"Listening on {config.ADSB_FREQ_HZ / 1e6:.0f} MHz -- {detector.messages_ok} message(s), {detector.corrected} corrected, "
+            f"{detector.crc_failures} failed CRC, {aircraft} aircraft" + (f", {rejected} impossible position(s) rejected." if rejected else "."))
+
+    def _render_adsb_table(self):
+        self._adsb_rendered_version = self._adsb_state.version
+        self._adsb_rendered_time = time.time()
+        aircraft = sorted(self._adsb_state.get_aircraft(), key=lambda a: (a.get("emergency") in (None, "none"), a["icao"]))
+        table = self.adsb_table
+        table.setRowCount(len(aircraft))
+        now = time.time()
+
+        def shown(value, fmt="{:.0f}"):
+            return "" if value is None else fmt.format(value)
+        for r, a in enumerate(aircraft):
+            emergency = a.get("emergency")
+            altitude = shown(a.get("alt_ft")) + (" GNSS" if a.get("alt_type") == "gnss" and a.get("alt_ft") is not None else "")
+            status = "ground" if a.get("on_ground") else ""
+            if emergency not in (None, "none"):
+                status = emergency
+            if a.get("squawk"):
+                status = f"{status} {a['squawk']}".strip()
+            cells = [a["icao"], a.get("callsign", ""), shown(a["lat"], "{:.4f}"), shown(a["lon"], "{:.4f}"), altitude,
+                     shown(a.get("speed_kt")), shown(a.get("vrate_fpm"), "{:+.0f}"),
+                     shown(a.get("track_deg", a.get("heading_deg"))), status, str(a["messages"]), f"{max(0.0, now - a['time']):.0f}"]
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c == self.ADSB_COLUMNS.index("Status") and emergency not in (None, "none"):
+                    item.setBackground(QtGui.QColor("#c62828"))
+                    item.setForeground(QtGui.QColor("white"))
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
 
     ADSL_AIRCRAFT_COLUMNS = ["Address", "Category", "Latitude", "Longitude", "Alt m", "km/h", "Climb m/s", "Track",
                              "State", "Emergency", "Packets", "MHz", "Offset kHz", "Age s"]
@@ -2478,6 +2565,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._meshcore_state.version != self._meshcore_rendered_version:
             self._render_meshcore_table()
         self._update_pocsag_signal_label()
+        self._update_adsb_signal_label()
+        if self.digimode_combo.currentData() == "adsb" and time.time() - self._adsb_rendered_time >= 1.0:
+            self._render_adsb_table()  # at most once per second: hundreds of messages a second arrive here
         self._update_adsl_signal_label()
         if self._adsl_state.version != self._adsl_rendered_version or (
                 self.digimode_combo.currentData() == "adsl" and time.time() - self._adsl_rendered_time >= 1.0):
