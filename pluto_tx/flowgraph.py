@@ -42,6 +42,7 @@ from . import pocsag
 from . import pocsag_codec
 from . import rtty
 from . import ft8
+from .aprs_source import AprsArmedSource
 from .ft8_source import Ft8TimedSource
 from . import js8, js8_phy
 from .js8_source import Js8SequenceSource
@@ -1479,20 +1480,30 @@ class PlutoTxFlowgraph(gr.top_block):
         self._aprs_audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
         self.aprs_duration_s = len(self._aprs_audio) / config.AUDIO_RATE
 
-    def _aprs_start_source(self):
-        """Exactly like _pocsag_start_source(): only after the output path is up."""
+    def _aprs_install_source(self):
+        """Swap in the armed source while everything is still dark. lock()/unlock() takes around a second on a Pluto:
+        done after keying, as POCSAG does, that second and more went out as bare carrier ahead of each packet (measured
+        over the air), and on the APRS channel that is everyone's airtime."""
         self.lock()
         try:
             self.disconnect(self.aprs_source, self.aprs_resampler)
             if self.aprs_audio_gain is not None:
                 self.disconnect(self.aprs_source, self.aprs_audio_gain)
-            self.aprs_source = blocks.vector_source_f(self._aprs_audio.tolist(), repeat=False)
+            self.aprs_source = AprsArmedSource(self._aprs_audio)
+            self.aprs_source.set_max_output_buffer(2048)  # the silence queued ahead of the packet is bare carrier as well
             self.connect(self.aprs_source, self.aprs_resampler)
             if self.aprs_audio_gain is not None:
                 self.connect(self.aprs_source, self.aprs_audio_gain)
         finally:
             self.unlock()
+
+    def _aprs_start_source(self):
+        self.aprs_source.arm()
         PlutoTxFlowgraph._aprs_last_sent = time.monotonic()
+
+    def aprs_source_stop(self):
+        if isinstance(self.aprs_source, AprsArmedSource):
+            self.aprs_source.stop_playing()
 
     @property
     def aprs_hold_s(self):
@@ -2463,7 +2474,8 @@ class PlutoTxFlowgraph(gr.top_block):
                 self._js8_start_frame(iq)
                 return
         if self.mode == self.MODE_APRS:
-            self._ensure_aprs_audio()  # raises ValueError before any RF action; the source starts last
+            self._ensure_aprs_audio()  # raises ValueError before any RF action
+            self._aprs_install_source()  # still dark; it starts playing last
             if self.device.is_audio_only():
                 if self.device.needs_ptt_control:
                     self.device.pre_key()
@@ -2651,6 +2663,8 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.device.post_unkey()
             self._keyed = False
             return
+        if self.mode == self.MODE_APRS:
+            self.aprs_source_stop()
         if self.mode == self.MODE_APRS and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.aprs_audio_gain.set_k(0.0)

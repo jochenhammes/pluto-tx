@@ -9,6 +9,8 @@ import sys
 import time
 import unittest
 
+from gnuradio import gr
+
 import numpy as np
 
 from pluto_advanced_rx import config
@@ -109,6 +111,13 @@ class CliTests(unittest.TestCase):
         self.assertAlmostEqual(packet["lat"], 53.5, places=3)
         self.assertNotIn(mock.call(False), muted.call_args_list)
 
+    def test_explicit_frequency_wins_even_when_it_equals_the_cli_default(self):
+        from pluto_advanced_rx import config as rxc
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(1000, np.complex64), 2_500_000)
+        _code, events = run_cli(["rx", "fm", "--device", "fake", "--uri", "x", "--freq", str(rxc.DEFAULT_FREQUENCY), "--digimode", "aprs", "--duration", "0.1", "--json"])
+        self.assertEqual(next(e for e in events if e["event"] == "aprs_listen")["freq_hz"], rxc.DEFAULT_FREQUENCY)
+
     def test_explicit_frequency_wins(self):
         from tests import fakes
         fakes.make_fake_rx(np.zeros(1000, np.complex64), 2_500_000)
@@ -179,6 +188,77 @@ class TransmitTests(unittest.TestCase):
         self.assertIn("5330.00N/00900.00E-TEST", out)
 
 
+class KeyUpTests(unittest.TestCase):
+    """Bare carrier ahead of a packet is everyone's airtime on the shared channel."""
+    RATE = 2_500_000
+
+    def test_source_swap_happens_while_dark_and_playing_starts_last(self):
+        from unittest import mock
+        from pluto_tx import flowgraph as txf
+        from tests import fakes
+        fakes.register_tx()
+        txf.PlutoTxFlowgraph._aprs_last_sent = -1e9
+        fg = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_APRS, frequency=144.8e6, aprs_callsign="DA2JH",
+                                  aprs_lat=53.5, aprs_lon=9.0)
+        order = []
+        for name, target in (("lock", fg), ("pre_key", fg.device), ("set_power", fg.device), ("start", fg)):
+            attr = {"start": "_aprs_start_source"}.get(name, name)
+            original = getattr(target, attr)
+            setattr(target, attr, (lambda n, f: lambda *a, **k: (order.append(n), f(*a, **k))[1])(name, original))
+        fg.start()
+        time.sleep(0.2)
+        fg.key_ptt()
+        self.assertEqual(order[0], "lock")
+        self.assertEqual(order.count("lock"), 1)
+        self.assertEqual(order[-1], "start")
+        self.assertLess(order.index("lock"), order.index("pre_key"))
+        fg.unkey_ptt()
+        fg.stop()
+        fg.wait()
+
+    def test_little_carrier_ahead_of_the_packet_at_real_time_pace(self):
+        from gnuradio import blocks
+        from pluto_tx import flowgraph as txf
+        from tests import fakes
+        fakes.register_tx()
+        txf.PlutoTxFlowgraph._aprs_last_sent = -1e9
+        rate = self.RATE
+        real_sink = fakes.FakeTxDevice.build_sink
+
+        class Paced(gr.hier_block2):
+            def __init__(self, sink):
+                gr.hier_block2.__init__(self, "paced", gr.io_signature(1, 1, gr.sizeof_gr_complex), gr.io_signature(0, 0, 0))
+                self.throttle = blocks.throttle(gr.sizeof_gr_complex, rate)
+                self.connect(self, self.throttle, sink)
+        keep = []
+
+        def paced(device):
+            sink = real_sink(device)
+            device.sink = sink
+            keep.append(Paced(sink))
+            return keep[-1]
+        fakes.FakeTxDevice.build_sink = paced
+        self.addCleanup(setattr, fakes.FakeTxDevice, "build_sink", real_sink)
+        fg = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_APRS, frequency=144.8e6, aprs_callsign="DA2JH",
+                                  aprs_path=(), aprs_lat=53.5, aprs_lon=9.0, aprs_comment="TEST")
+        fg.start()
+        time.sleep(0.3)
+        fg.key_ptt()
+        time.sleep(fg.aprs_hold_s)
+        fg.unkey_ptt()
+        fg.stop()
+        fg.wait()
+        iq = np.array(fg.device.sink.data(), dtype=np.complex64)
+        on = np.flatnonzero(np.abs(iq) > 0.01)
+        iq = iq[on[0]:on[-1]]
+        freq = np.abs(np.angle(iq[1:] * np.conj(iq[:-1])))
+        lead_s = np.flatnonzero(freq > 0.001)[0] / rate
+        self.assertLess(lead_s, 0.2)
+        pad = np.zeros(int(0.1 * rate), np.complex64)
+        got, _ = run(np.concatenate([pad, iq, pad]), rate)
+        self.assertEqual(len(got), 1)
+
+
 class RefusalTests(unittest.TestCase):
     def tb(self, frequency=144.8e6, **settings):
         from pluto_tx import flowgraph as txf
@@ -206,6 +286,7 @@ class RefusalTests(unittest.TestCase):
         from pluto_tx import flowgraph as txf
         fg = self.tb(aprs_callsign="DA2JH", aprs_lat=53.5, aprs_lon=9.0)
         fg._ensure_aprs_audio()
+        fg._aprs_install_source()
         fg._aprs_start_source()
         again = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_APRS, frequency=144.8e6, aprs_callsign="DA2JH", aprs_lat=53.5, aprs_lon=9.0)
         self.assertIn("wait", again.aprs_problem())

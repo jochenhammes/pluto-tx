@@ -845,3 +845,26 @@ def test_aprs_params():
             modes.normalize_params("tx", "aprs", bad)
     assert modes.APRS_MAX_TEXT_LEN == radio_backend.aprs_codec.MAX_MESSAGE_TEXT
     assert modes.APRS_PATH_DEFAULT == ",".join(radio_backend.tx_config.APRS_DEFAULT_PATH)
+
+
+async def test_aprs_web_transmit_produces_a_decodable_signal(monkeypatch):
+    """Not only the events: what actually reaches the device has to decode."""
+    import numpy as np
+    from pluto_advanced_rx.aprs_demod import AprsFrameDetector
+
+    b, _events = await _aprs_tx_backend(monkeypatch)
+    await b.ptt(True)
+    await asyncio.sleep(b.tx.tb.aprs_hold_s + 0.3)
+    iq = np.array(b.tx.tb.device.sink.data(), dtype=np.complex64)
+    await _aprs_unkey(b)
+    assert len(iq) > 0
+    on = np.flatnonzero(np.abs(iq) > 0.01)
+    assert len(on) > 0, "nothing but silence reached the device"
+    iq = iq[on[0]:on[-1]]
+    rate = 2_500_000
+    audio = np.angle(iq[1:] * np.conj(iq[:-1])) * rate / (2 * np.pi * 3000)
+    decim = 50
+    audio = np.convolve(audio, np.ones(decim) / decim, "same")[::decim]
+    got = []
+    AprsFrameDetector(rate / decim, got.append).feed(audio.astype(np.float32))
+    assert [f["source"] for f in got] == ["DA2JH"]

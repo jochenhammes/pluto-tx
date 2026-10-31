@@ -505,8 +505,8 @@ JS8_DEFAULT_SUBMODES = (0,)
 # --- APRS RX: FM, 12.5/25 kHz channel. Not locked: other regions use other frequencies.
 APRS_DEFAULT_FREQ_HZ = 144_800_000
 APRS_DEVIATION_HZ = 3000.0  # only scales the discriminator; the demodulator compares tones, not levels
-APRS_CHANNEL_CUTOFF_HZ = 8000.0
-APRS_CHANNEL_TRANS_HZ = 3000.0
+APRS_CHANNEL_CUTOFF_HZ = 7000.0  # measured: 8000/3000 lost 2 of 5 real packets, 7000/2000 none; 3.5 kHz offset still decodes
+APRS_CHANNEL_TRANS_HZ = 2000.0
 APRS_AUDIO_RATE_HZ = 12_500  # target; the demodulator accepts whatever the decimation gives
 APRS_AUDIO_CUTOFF_HZ = 3500.0
 APRS_AUDIO_TRANS_HZ = 1500.0

@@ -45,7 +45,7 @@ def add_common_args(parser):
              "device for audio). Omit to use that backend's own default.",
     )
     parser.add_argument(
-        "--freq", type=float, default=rx_config.DEFAULT_FREQUENCY,
+        "--freq", type=float, default=None,  # None tells "not given" from the same value given on purpose
         help=f"Receive frequency in Hz (default: {rx_config.DEFAULT_FREQUENCY:.0f})",
     )
     parser.add_argument(
@@ -345,7 +345,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     if direct_sampling and not rx_devices.DEVICE_REGISTRY[args.device].supports_direct_sampling:
         emitter.error(f"--direct-sampling is only available for --device rtlsdr, not {args.device}")
         return 1
-    frequency = args.freq
+    frequency = args.freq if args.freq is not None else rx_config.DEFAULT_FREQUENCY
     selected_device = rx_devices.DEVICE_REGISTRY[args.device]
     if args.bandwidth is not None and args.bandwidth not in selected_device.sample_rate_hz_choices:
         offered = ", ".join(str(rate) for rate in selected_device.sample_rate_hz_choices)
@@ -353,7 +353,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         return 1
     if args.digimode == "aprs":
         # A starting point, not a lock: an explicit --freq wins, as other regions use other frequencies.
-        if args.freq == rx_config.DEFAULT_FREQUENCY:
+        if args.freq is None:
             frequency = rx_config.APRS_DEFAULT_FREQ_HZ
         emitter.emit("aprs_listen", freq_hz=frequency)
     if args.digimode == "adsb":
