@@ -461,6 +461,17 @@ REPEAT_COUNT_MAX = 999  # transmissions per PTT press (1 = send once)
 REPEAT_INTERVAL_RANGE_S = (1.0, 86400.0)  # pause between the end of one transmission and the start of the next
 REPEAT_INTERVAL_DEFAULT_S = 10.0
 
+# --- APRS (AX.25, AFSK 1200 Bd), see pluto_tx/aprs.py / aprs_codec.py
+APRS_FREQ_HZ = 144_800_000  # the European APRS channel
+APRS_DEVIATION_HZ = 3000.0
+APRS_TX_TAIL_S = 0.4
+APRS_SOUNDCARD_LEVEL = 0.5  # to a radio's microphone input: it adds its own pre-emphasis
+APRS_MIN_INTERVAL_S = 30.0  # one transmission per click, and not more often than this: the channel is shared
+APRS_DEFAULT_PATH = ("WIDE1-1", "WIDE2-1")
+APRS_PATHS = (("WIDE1-1", "WIDE2-1"), ("WIDE2-1",), ())
+APRS_DEFAULT_SYMBOL = "/-"  # a house: this is a home station by default
+APRS_DESTINATION = "APZPTX"  # APZ is the range reserved for experimental software
+
 # --- POCSAG paging (ITU-R M.584), see pluto_tx/pocsag.py / pocsag_codec.py ---
 POCSAG_BAUD_PRESETS = (512, 1200, 2400)
 POCSAG_BAUD_DEFAULT = 1200

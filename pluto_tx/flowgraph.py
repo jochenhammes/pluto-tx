@@ -36,6 +36,8 @@ from . import emphasis
 from . import filebroadcast
 from .filebroadcast_source import FileBroadcastSource
 from . import psk31
+from . import aprs
+from . import aprs_codec
 from . import pocsag
 from . import pocsag_codec
 from . import rtty
@@ -139,9 +141,11 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_MESHCORE = 13
     MODE_FT8 = 14
     MODE_JS8 = 15
+    MODE_APRS = 16
     # The names the CLI and TxDevice.supported_modes use for the modes.
+    _aprs_last_sent = -1e9  # per process, across rebuilt flowgraphs: a rebuild must not reopen the rate limit
     MODE_NAMES = {0: "fm", 1: "ssb", 2: "m17", 3: "freedv", 4: "rade", 5: "digitext", 6: "filebroadcast", 7: "psk31", 8: "baseband",
-                  9: "rtty", 10: "meshtastic", 11: "lsb", 12: "pocsag", 13: "meshcore", 14: "ft8", 15: "js8"}
+                  9: "rtty", 10: "meshtastic", 11: "lsb", 12: "pocsag", 13: "meshcore", 14: "ft8", 15: "js8", 16: "aprs"}
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -160,6 +164,8 @@ class PlutoTxFlowgraph(gr.top_block):
                  meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign="",
                  pocsag_ric=config.POCSAG_DEFAULT_RIC, pocsag_function=3, pocsag_kind="alpha", pocsag_text="",
                  pocsag_baud=config.POCSAG_BAUD_DEFAULT, pocsag_charset="ascii",
+                 aprs_kind="beacon", aprs_callsign="", aprs_path=config.APRS_DEFAULT_PATH, aprs_lat=None, aprs_lon=None,
+                 aprs_symbol=config.APRS_DEFAULT_SYMBOL, aprs_comment="", aprs_to="", aprs_text="", aprs_message_id=None,
                  meshcore_preset_index=0, meshcore_kind="advert", meshcore_name="", meshcore_text="",
                  meshcore_route="flood", meshcore_role=1, meshcore_location=None,
                  meshcore_channel_name="Public", meshcore_channel_secret_hex="", meshcore_identity=None,
@@ -956,6 +962,34 @@ class PlutoTxFlowgraph(gr.top_block):
             # Wired to the shared _soundcard_sink (or its own null_sink) at the end
             # of __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
+        # --- APRS branch (pluto_tx/aprs.py): AFSK audio straight into its own frequency modulator, exactly the shape of
+        # the POCSAG branch above: one-shot source rebuilt on every key_ptt(), tx_gain muted until then.
+        self.aprs_kind = aprs_kind
+        self.aprs_callsign = aprs_callsign
+        self.aprs_path = tuple(aprs_path)
+        self.aprs_lat = aprs_lat
+        self.aprs_lon = aprs_lon
+        self.aprs_symbol = aprs_symbol
+        self.aprs_comment = aprs_comment
+        self.aprs_to = aprs_to
+        self.aprs_text = aprs_text
+        self.aprs_message_id = aprs_message_id
+        self.aprs_frame = None
+        self._aprs_audio = None
+        self.aprs_duration_s = 0.0
+        self.aprs_source = blocks.vector_source_f([0.0], repeat=False)
+        self.aprs_resampler = filter.rational_resampler_fff(
+            interpolation=quad_rate // g_baseband, decimation=config.AUDIO_RATE // g_baseband,
+            taps=[], fractional_bw=0.47,
+        )
+        self.aprs_mod = analog.frequency_modulator_fc(2 * math.pi * config.APRS_DEVIATION_HZ / aprs.AMPLITUDE / quad_rate)
+        self.connect(self.aprs_source, self.aprs_resampler)
+        self.connect(self.aprs_resampler, self.aprs_mod)
+        self.aprs_audio_gain = None
+        if self.device.is_audio_only():
+            self.aprs_audio_gain = blocks.multiply_const_ff(0.0)
+            self.connect(self.aprs_source, self.aprs_audio_gain)
+
         # mode_selector only ever carries FM/SSB (2 inputs) -- M17 is
         # deliberately NOT a third selector input. Measured this session:
         # m17_coder's unusual output_multiple(192)-plus-large-downstream-
@@ -1019,6 +1053,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_filebroadcast = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see File Broadcast branch above
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
         self._null_sink_pocsag = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see POCSAG branch above
+        self._null_sink_aprs = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see APRS branch above
         self._null_sink_ft8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see FT8 branch above
         self._null_sink_js8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see JS8 branch above
 
@@ -1245,6 +1280,7 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_FILEBROADCAST] = self.filebroadcast_tx_resampler  # always available, see its branch above
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         producers[self.MODE_POCSAG] = self.pocsag_mod  # always available, see its branch above
+        producers[self.MODE_APRS] = self.aprs_mod  # always available, see its branch above
         producers[self.MODE_FT8] = self.ft8_tx_resampler  # always built (mode falls back without ft8_lib)
         producers[self.MODE_JS8] = self.js8_tx_resampler  # always built (pure Python codec)
         return producers
@@ -1272,6 +1308,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_baseband
         if producer is self.pocsag_mod:
             return self._null_sink_pocsag
+        if producer is self.aprs_mod:
+            return self._null_sink_aprs
         if producer is self.ft8_tx_resampler:
             return self._null_sink_ft8
         if producer is self.js8_tx_resampler:
@@ -1296,6 +1334,8 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_RADE] = self.rade_audio_gain
         if self.pocsag_audio_gain is not None:
             producers[self.MODE_POCSAG] = self.pocsag_audio_gain
+        if self.aprs_audio_gain is not None:
+            producers[self.MODE_APRS] = self.aprs_audio_gain
         return producers
 
     def _wire_soundcard_audio_producer(self, gain_block):
@@ -1352,7 +1392,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
                     self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
                     self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG, self.MODE_FT8,
-                    self.MODE_JS8):
+                    self.MODE_JS8, self.MODE_APRS):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
@@ -1388,6 +1428,73 @@ class PlutoTxFlowgraph(gr.top_block):
     def set_pocsag_charset(self, charset: str):
         self.pocsag_charset = charset
         self._pocsag_audio_dirty = True
+
+    # --- APRS ---------------------------------------------------------------
+
+    def set_aprs(self, **settings):
+        """Any of kind, callsign, path, lat, lon, symbol, comment, to, text, message_id."""
+        for name, value in settings.items():
+            if name not in ("kind", "callsign", "path", "lat", "lon", "symbol", "comment", "to", "text", "message_id"):
+                raise ValueError(f"unknown APRS setting {name!r}")
+            setattr(self, f"aprs_{name}", tuple(value) if name == "path" else value)
+
+    def _aprs_build_frame(self):
+        """-> the frame to send. Raises ValueError with a reason meant for the operator."""
+        if self.aprs_kind == "beacon":
+            if self.aprs_lat is None or self.aprs_lon is None:
+                raise ValueError("beacon needs a position (station locator or latitude/longitude)")
+            info = aprs_codec.beacon_info(self.aprs_lat, self.aprs_lon, self.aprs_symbol, self.aprs_comment)
+        elif self.aprs_kind == "message":
+            info = aprs_codec.message_info(self.aprs_to, self.aprs_text, self.aprs_message_id)
+        else:
+            raise ValueError(f"unknown APRS kind {self.aprs_kind!r}")
+        return aprs_codec.build_frame(self.aprs_callsign, config.APRS_DESTINATION, self.aprs_path, info)
+
+    def aprs_problem(self):
+        """None if the current APRS settings can be sent now, else a short reason."""
+        if not self.aprs_callsign:
+            return "no callsign set"
+        if not aprs_codec.valid_callsign(self.aprs_callsign):
+            return f"invalid callsign {self.aprs_callsign!r}"
+        if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
+            return "frequency is outside the amateur bands"
+        wait = config.APRS_MIN_INTERVAL_S - (time.monotonic() - PlutoTxFlowgraph._aprs_last_sent)
+        if wait > 0:
+            return f"the channel is shared: wait {wait:.0f} s before the next transmission"
+        try:
+            self._aprs_build_frame()
+        except ValueError as e:
+            return str(e)
+        return None
+
+    def _ensure_aprs_audio(self):
+        problem = self.aprs_problem()
+        if problem:
+            raise ValueError(problem)
+        self.aprs_frame = self._aprs_build_frame()
+        audio = aprs.encode_frame(self.aprs_frame)
+        pad = int(self.device.tx_end_loss_s * config.AUDIO_RATE)
+        self._aprs_audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
+        self.aprs_duration_s = len(self._aprs_audio) / config.AUDIO_RATE
+
+    def _aprs_start_source(self):
+        """Exactly like _pocsag_start_source(): only after the output path is up."""
+        self.lock()
+        try:
+            self.disconnect(self.aprs_source, self.aprs_resampler)
+            if self.aprs_audio_gain is not None:
+                self.disconnect(self.aprs_source, self.aprs_audio_gain)
+            self.aprs_source = blocks.vector_source_f(self._aprs_audio.tolist(), repeat=False)
+            self.connect(self.aprs_source, self.aprs_resampler)
+            if self.aprs_audio_gain is not None:
+                self.connect(self.aprs_source, self.aprs_audio_gain)
+        finally:
+            self.unlock()
+        PlutoTxFlowgraph._aprs_last_sent = time.monotonic()
+
+    @property
+    def aprs_hold_s(self):
+        return self.aprs_duration_s + config.APRS_TX_TAIL_S
 
     def pocsag_problem(self):
         """None if the current POCSAG settings can be sent, else a short reason."""
@@ -2353,6 +2460,16 @@ class PlutoTxFlowgraph(gr.top_block):
                 self._keyed = True
                 self._js8_start_frame(iq)
                 return
+        if self.mode == self.MODE_APRS:
+            self._ensure_aprs_audio()  # raises ValueError before any RF action; the source starts last
+            if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
+                self.tx_gain.set_k(1.0 + 0j)
+                self.aprs_audio_gain.set_k(config.APRS_SOUNDCARD_LEVEL)
+                self._keyed = True
+                self._aprs_start_source()
+                return
         if self.mode == self.MODE_POCSAG:
             self._ensure_pocsag_audio()  # raises ValueError before any RF action; the source starts last
             if self.device.is_audio_only():
@@ -2423,6 +2540,8 @@ class PlutoTxFlowgraph(gr.top_block):
         self._keyed = True
         if self.mode == self.MODE_POCSAG:
             self._pocsag_start_source()
+        if self.mode == self.MODE_APRS:
+            self._aprs_start_source()
         if self.mode == self.MODE_FT8:
             self._ft8_start_source()
         if self.mode == self.MODE_JS8:
@@ -2526,6 +2645,13 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.mode == self.MODE_FT8 and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.ft8_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
+        if self.mode == self.MODE_APRS and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.aprs_audio_gain.set_k(0.0)
             if self.device.needs_ptt_control:
                 self.device.post_unkey()
             self._keyed = False

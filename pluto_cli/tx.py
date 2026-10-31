@@ -17,12 +17,14 @@ from pluto_tx import js8 as tx_js8
 from pluto_tx import js8_message as tx_js8_message
 from pluto_tx import config as tx_config
 from pluto_tx import dcs as tx_dcs
+from pluto_tx import adsb_codec as tx_adsb_codec
+from pluto_tx import aprs_codec as tx_aprs_codec
 from pluto_tx import pocsag_codec as tx_pocsag
 from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "ft8", "js8", "meshtastic", "meshcore", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "aprs", "ft8", "js8", "meshtastic", "meshcore", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -411,6 +413,55 @@ def run_pocsag(args):
     )
 
 
+def add_aprs_subparser(subparsers):
+    p = subparsers.add_parser(
+        "aprs", help="One APRS packet: a position beacon or a text message (AX.25, AFSK 1200 Bd, FM +-3 kHz)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--kind", choices=("beacon", "message"), default="beacon", help="What to send (default: beacon)")
+    p.add_argument("--call", required=True, help="Your callsign with optional SSID, e.g. DA2JH-9")
+    p.add_argument("--path", choices=tuple(",".join(path) or "none" for path in tx_config.APRS_PATHS),
+                   default=",".join(tx_config.APRS_DEFAULT_PATH), help="Digipeater path (default: %(default)s)")
+    p.add_argument("--locator", default="", help="Beacon position as a Maidenhead locator (the middle of its square)")
+    p.add_argument("--position", nargs=2, type=float, metavar=("LAT", "LON"), help="Beacon position, north and east positive")
+    p.add_argument("--symbol", default=tx_config.APRS_DEFAULT_SYMBOL, help="APRS symbol, table and code (default: %(default)s)")
+    p.add_argument("--comment", default="", help="Beacon comment")
+    p.add_argument("--to", default="", help="Message: addressee's callsign")
+    p.add_argument("--text", default="", help=f"Message text, at most {tx_aprs_codec.MAX_MESSAGE_TEXT} characters")
+    p.add_argument("--message-id", default=None, help="Message number; asks the addressee for an acknowledgement")
+    p.set_defaults(func=run_aprs, freq=None)
+
+
+def run_aprs(args):
+    emitter = runtime.Emitter(args.json)
+    if args.freq is None:  # no default on purpose: nothing goes out on the channel by accident
+        emitter.error(f"give --freq explicitly (the European APRS channel is {tx_config.APRS_FREQ_HZ})")
+        return 1
+    lat, lon = args.position if args.position else (None, None)
+    if args.locator:
+        center = tx_adsb_codec.locator_center(args.locator)
+        if center is None:
+            emitter.error(f"invalid --locator {args.locator}")
+            return 1
+        lat, lon = center
+
+    def preflight(tb):
+        problem = tb.aprs_problem()
+        if problem:  # before any RF action
+            emitter.error(problem)
+            tb.shutdown_safe()
+            sys.exit(1)
+        frame = tx_aprs_codec.parse_frame(tb._aprs_build_frame())
+        emitter.emit("aprs_packet", direction="tx", **tx_aprs_codec.summarize(frame))
+
+    return _run(
+        args, PlutoTxFlowgraph.MODE_APRS, emitter, post_construct=preflight,
+        aprs_kind=args.kind, aprs_callsign=args.call, aprs_lat=lat, aprs_lon=lon, aprs_symbol=args.symbol, aprs_comment=args.comment,
+        aprs_path=tuple(p for p in args.path.split(",") if p != "none"), aprs_to=args.to, aprs_text=args.text, aprs_message_id=args.message_id,
+    )
+
+
 def add_ft8_subparser(subparsers):
     p = subparsers.add_parser(
         "ft8", help="FT8 message in the next 15 s UTC slot (USB; manual sequencing -- one message per call; "
@@ -720,6 +771,7 @@ def add_subparsers(tx_subparsers):
     add_psk31_subparser(tx_subparsers)
     add_rtty_subparser(tx_subparsers)
     add_pocsag_subparser(tx_subparsers)
+    add_aprs_subparser(tx_subparsers)
     add_ft8_subparser(tx_subparsers)
     add_js8_subparser(tx_subparsers)
     add_meshtastic_subparser(tx_subparsers)
