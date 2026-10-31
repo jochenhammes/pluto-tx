@@ -161,3 +161,12 @@ def parse_frame(frame: bytes):
 
 def address_label(info: dict) -> str:
     return f"{info['address_table_name']}:{info['address']:06X}"
+
+
+def event_fields(info: dict) -> dict:
+    """A received packet as JSON-ready fields for pluto-cli's and Web-TRX's adsl_packet event."""
+    fields = {k: v for k, v in info.items() if k not in ("inverted", "signed", "address_table")}
+    if "address" in info:
+        fields["address"] = f"{info['address']:06X}"
+        fields["address_label"] = address_label(info)
+    return fields

@@ -268,11 +268,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         emitter.emit("meshcore_packet", **fields)
 
     def on_adsl_packet(info):
-        fields = {k: v for k, v in info.items() if k not in ("inverted", "signed", "address_table")}
-        if "address" in info:
-            fields["address"] = f"{info['address']:06X}"
-            fields["address_label"] = adsl_codec.address_label(info)
-        emitter.emit("adsl_packet", **fields)
+        emitter.emit("adsl_packet", **adsl_codec.event_fields(info))
 
     pocsag_state = PocsagState()
     pocsag_state.set_charset(args.pocsag_charset)

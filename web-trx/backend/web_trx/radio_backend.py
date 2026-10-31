@@ -40,6 +40,7 @@ from gnuradio import analog, gr
 from gnuradio import filter as gr_filter
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
+from pluto_advanced_rx.adsl_state import AdslState
 from pluto_advanced_rx.flowgraph import M17_AVAILABLE as RX_M17_AVAILABLE
 from pluto_advanced_rx.flowgraph import RADE_AVAILABLE as RX_RADE_AVAILABLE
 from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph
@@ -48,6 +49,7 @@ from pluto_advanced_rx.ft8_decoder import sender_call as ft8_sender_call
 from pluto_advanced_rx.js8_assembly import Js8Assembler
 from pluto_advanced_rx.js8_decoder import available_backends as js8_rx_backends
 from pluto_advanced_rx.pocsag_state import PocsagState
+from pluto_tx import adsl_codec
 from pluto_tx import config as tx_config
 from pluto_tx import devices as tx_devices
 from pluto_tx import ft8 as tx_ft8
@@ -87,8 +89,11 @@ RX_DEMOD_MODES = {
     "rtty": AdvancedRxFlowgraph.MODE_SSB,
     "ft8": AdvancedRxFlowgraph.MODE_SSB,
     "js8": AdvancedRxFlowgraph.MODE_SSB,
+    "adsl": AdvancedRxFlowgraph.MODE_FM,  # data only: its audio is never sent anywhere
 }
-RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8"}
+RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl"}
+ADSL_STATUS_S = 1.0
+ADSL_CHANNEL_HALF_HZ = 100_000.0
 
 
 def rx_bands() -> dict[str, list[float]]:
@@ -106,6 +111,8 @@ def rx_bands() -> dict[str, list[float]]:
         "lsb": [-ssb_hi, -ssb_lo],
         "rade": [rx_config.RADE_OFDM_LOW_HZ, rx_config.RADE_OFDM_HIGH_HZ],
         "m17": [-m17_half, m17_half],
+        "adsl": [min(rx_config.ADSL_CHANNELS_HZ) - rx_config.ADSL_LO_HZ - ADSL_CHANNEL_HALF_HZ,
+                 max(rx_config.ADSL_CHANNELS_HZ) - rx_config.ADSL_LO_HZ + ADSL_CHANNEL_HALF_HZ],
     }
 SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8", "js8")  # squelch probe after the SSB filter
 FT8_STATUS_S = 15.0  # ft8_status at least once per slot, and on every change
@@ -281,6 +288,8 @@ class GnuRadioBackend(SessionBackend):
         self._rx_lock = asyncio.Lock()
         self._tx_lock = asyncio.Lock()
         self._pocsag_rx_state = PocsagState()
+        self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
+        self._freq_before_adsl: float | None = None  # the operator's frequency while ADS-L holds its fixed LO
         self._squelch_open = True
         self._rtty_lock = threading.Lock()
         self._rtty_pending: list[str] = []
@@ -304,6 +313,7 @@ class GnuRadioBackend(SessionBackend):
                 "fft_sizes": rx_config.FFT_SIZE_PRESETS,
                 "rx_modes": [m for m in RX_DEMOD_MODES if _rx_mode_available(m)],
                 "rx_bands": rx_bands(),
+                "map_tile_url": os.environ.get("WEB_TRX_MAP_TILE_URL", ""),
                 "rx_sample_rates": {t: list(rx_devices.DEVICE_REGISTRY[t].sample_rate_hz_choices)
                                     for t in RX_DEVICE_TYPES},
                 "rx_gain": {t: _rx_gain_info(rx_devices.DEVICE_REGISTRY[t]) for t in RX_DEVICE_TYPES},
@@ -371,6 +381,12 @@ class GnuRadioBackend(SessionBackend):
         st = self._state(direction)
         if direction == "tx" and self.keyed:
             raise SessionError("tx: cannot retune while keyed")
+        if direction == "rx" and st.connection is not None and st.mode == "adsl":
+            raise SessionError("rx: ADS-L tunes itself, the frequency can't be changed in this mode")
+        if direction == "rx" and st.connection is None and self._freq_before_adsl is not None:
+            self._freq_before_adsl = freq_hz  # disconnected: for the next non-ADS-L mode
+            self._save_settings()
+            return
         # Allowed while disconnected: kept and used by the next flowgraph build.
         st.freq_hz = freq_hz
         if st.tb is not None:
@@ -398,6 +414,8 @@ class GnuRadioBackend(SessionBackend):
                 # Pluto's TX timing (docs/FT8_PLAN.md section 7).
                 raise SessionError("rx: bandwidth can't change while an FT8 series is armed")
             value = int(value)
+            if st.mode == "adsl" and value < rx_config.ADSL_MIN_SAMPLE_RATE_HZ:
+                raise SessionError(f"ADS-L needs at least {rx_config.ADSL_MIN_SAMPLE_RATE_HZ / 1e6:g} MS/s")
             choices = rx_devices.DEVICE_REGISTRY[st.device_type].sample_rate_hz_choices if st.device_type else ()
             if value not in choices:
                 raise SessionError(f"sample_rate must be one of {list(choices)} for {st.device_type}")
@@ -481,7 +499,9 @@ class GnuRadioBackend(SessionBackend):
             return
         data = {
             direction: {
-                "freq_hz": st.freq_hz, "mode": st.mode, "mode_params": st.mode_params,
+                # While ADS-L has the receiver on its fixed LO, the operator's frequency is the one to keep.
+                "freq_hz": self._freq_before_adsl if st is self.rx and self._freq_before_adsl is not None else st.freq_hz,
+                "mode": st.mode, "mode_params": st.mode_params,
                 "device_type": st.device_type, "gains": st.gains,
                 # restored on the next server start; "" is a valid connection
                 # (auto-detect, e.g. RTL-SDR/HackRF), hence the explicit flag
@@ -680,12 +700,22 @@ class GnuRadioBackend(SessionBackend):
             # mode change is a rebuild, exactly like the CLI's one-flowgraph-
             # per-invocation model.
             await self._teardown_rx()
+            tuning_before = st.freq_hz, self._freq_before_adsl
+            if mode == "adsl":
+                if self._freq_before_adsl is None:
+                    self._freq_before_adsl = st.freq_hz
+                st.freq_hz = rx_config.ADSL_LO_HZ
+            elif self._freq_before_adsl is not None:
+                st.freq_hz, self._freq_before_adsl = self._freq_before_adsl, None
             try:
                 st.tb = await asyncio.to_thread(self._build_rx, mode, params)
             except Exception as e:
+                st.freq_hz, self._freq_before_adsl = tuning_before
                 raise SessionError(f"rx: could not start {st.device_type} ({st.connection}): {e}") from e
             st.mode = mode
             st.mode_params = dict(params)
+            if st.freq_hz != tuning_before[0]:
+                await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
 
     def _build_rx(self, mode: str, params: dict):
         st = self.rx
@@ -695,13 +725,14 @@ class GnuRadioBackend(SessionBackend):
             device_type=st.device_type, uri=st.connection, frequency=st.freq_hz,
             gain_mode=gain_mode, manual_gain_db=manual_gain_db, gain_values=gain_values,
             demod_mode=RX_DEMOD_MODES[mode],
-            sample_rate=self._rx_sample_rate(),
+            sample_rate=self._rx_sample_rate(mode),
             direct_sampling=(DIRECT_SAMPLING_MODES.get(st.gains.get("direct_sampling", "off"), 0)
                              if _supports_direct_sampling(st.device_type) else 0),
             frequency_correction_ppm=float(st.gains.get("freq_correction_ppm", 0.0)),
             fm_deemphasis=bool(params.get("deemphasis", rx_config.FM_DEEMPH_DEFAULT)),
             active_digimode=RX_DIGIMODES.get(mode),
             on_pocsag_message=self._on_pocsag_message,
+            on_adsl_packet=self._on_adsl_packet,
             on_m17_fields=self._on_m17_fields,
             on_rtty_char=self._on_rtty_char,
             rtty_mark_hz=params.get("mark_hz", rx_config.RTTY_MARK_HZ_DEFAULT),
@@ -736,17 +767,20 @@ class GnuRadioBackend(SessionBackend):
                 if name in st.gains:
                     _apply_rx_gain(tb, name, st.gains[name])
             tb.start()
-            tb.set_rx_muted(not self._rx_local_audio)
+            tb.set_rx_muted(mode == "adsl" or not self._rx_local_audio)
         except Exception:
             tb.shutdown()
             raise
         return tb
 
-    def _rx_sample_rate(self) -> int | None:
-        """Saved choice if the current device supports it, else the device default."""
+    def _rx_sample_rate(self, mode: str | None = None) -> int | None:
+        """Saved choice if the current device supports it, else the device default. ADS-L also falls back to
+        the default (always fast enough) from a too low saved choice, which stays saved for the other modes."""
         rate = self.rx.gains.get("sample_rate")
         choices = rx_devices.DEVICE_REGISTRY[self.rx.device_type].sample_rate_hz_choices
-        return int(rate) if rate is not None and int(rate) in choices else None
+        if rate is None or int(rate) not in choices:
+            return None
+        return None if mode == "adsl" and int(rate) < rx_config.ADSL_MIN_SAMPLE_RATE_HZ else int(rate)
 
     async def _teardown_rx(self) -> None:
         tb, self.rx.tb = self.rx.tb, None
@@ -804,7 +838,7 @@ class GnuRadioBackend(SessionBackend):
                 await self._emit_event("rx_level", {"level_db": round(level_db, 1), "squelch_open": self._squelch_open})
 
     def _deliver_audio(self, pcm16: bytes) -> None:
-        if not self._squelch_open:
+        if not self._squelch_open or self.rx.mode == "adsl":
             return  # the browser's player just runs dry (silence), no bandwidth used
         self._from_gr_thread(self._on_audio(AudioFrame(pcm16=pcm16, sample_rate_hz=AUDIO_RATE_HZ)))
 
@@ -818,6 +852,16 @@ class GnuRadioBackend(SessionBackend):
             "text": row["text"], "corrected": row["corrected"],
         }))
 
+    def _on_adsl_packet(self, info: dict) -> None:
+        row = self._adsl_state.on_packet(info)
+        self._from_gr_thread(self._emit_event("adsl_packet", {**adsl_codec.event_fields(info), "time": row["time"]}))
+
+    async def adsl_clear(self) -> None:
+        self._adsl_state.clear()
+
+    def adsl_snapshot(self) -> dict:
+        return {"aircraft": self._adsl_state.get_aircraft_json()}
+
     def _on_rtty_char(self, char: str) -> None:
         with self._rtty_lock:  # GNU Radio thread; flushed by _rx_aux_loop
             self._rtty_pending.append(char)
@@ -827,7 +871,7 @@ class GnuRadioBackend(SessionBackend):
         (pluto_cli.runtime.run_rx_session does it in a sleep loop): RTTY
         AFC steps (nothing inside the flowgraph calls them), batched RTTY
         text, RADE sync/SNR status."""
-        last_afc = last_rade = last_ft8 = last_js8 = 0.0
+        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = 0.0
         last_rade_state = last_ft8_state = last_js8_state = None
         while True:
             await asyncio.sleep(RTTY_FLUSH_S)
@@ -843,6 +887,11 @@ class GnuRadioBackend(SessionBackend):
                 if mode == "rtty" and now - last_afc >= rx_config.RTTY_AFC_POLL_INTERVAL_S:
                     last_afc = now
                     await asyncio.to_thread(tb.rtty_afc_step)
+                if mode == "adsl" and now - last_adsl >= ADSL_STATUS_S:
+                    last_adsl = now
+                    await self._emit_event("adsl_status", {"channels": [
+                        {"channel_hz": channel[0], "packets": channel[3].packets, "crc_failures": channel[3].crc_failures}
+                        for channel in tb.adsl_channels]})
                 receiver = getattr(tb, "ft8_receiver", None)
                 if mode == "ft8" and receiver is not None:
                     decoder = getattr(receiver.decoder, "backend", None)

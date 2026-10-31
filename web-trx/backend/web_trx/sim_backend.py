@@ -9,6 +9,7 @@ pipes carry data correctly, it does not model real RF propagation.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -33,7 +34,14 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
 TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8")
-RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8")
+RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl")
+
+# ADS-L receive: invented aircraft around the station, one packet per second each, in the event fields a real
+# packet has. Deliberately no encoder here: nothing in the application can produce an ADS-L frame.
+ADSL_LO_HZ = 868_850_000
+ADSL_CHANNELS_HZ = (868_200_000, 868_400_000)
+ADSL_DEFAULT_CENTER = (53.5, 9.0)
+ADSL_SIM_PERIOD_S = 1.0
 
 # JS8 receive: frames built with pluto-tx' real JS8 codec and assembled like GnuRadioBackend does -- our own
 # transmissions come back in their periods (loopback), plus a simulated neighbour (CQ, heartbeat, and a
@@ -99,6 +107,11 @@ class SimBackend(SessionBackend):
         self._ft8_series: ft8_series.Ft8Series | None = None
         # Loopback: our own transmissions show up in the ft8_slot of their slot.
         self._ft8_sent: list[tuple[float, str]] = []
+        self._adsl_task: asyncio.Task | None = None
+        self._adsl_state = _adsl_state_module().AdslState()
+        self._adsl_counts = {hz: 0 for hz in ADSL_CHANNELS_HZ}
+        self._adsl_tick = 0
+        self._freq_before_adsl: float | None = None
         self._js8_task: asyncio.Task | None = None
         self._js8_series: js8_series.Js8Series | None = None
         self._js8_sent: list[tuple[float, int, str, int]] = []   # (period start, submode, frame, flags)
@@ -121,6 +134,7 @@ class SimBackend(SessionBackend):
 
     def features(self) -> dict:
         return {"rx_modes": list(RX_MODES), "tx_modes": list(TX_MODES),
+                "map_tile_url": os.environ.get("WEB_TRX_MAP_TILE_URL", ""),
                 "ft8": {"tx": "ft8" in TX_MODES, "rx_backends": ["sim"], "clock_synced": True},
                 "js8": {"tx": "js8" in TX_MODES, "rx_backends": ["sim"], "submodes": ["normal", "fast", "turbo", "slow"],
                         "jsc": _js8_modules()[1].jsc_available(), "clock_synced": True}}
@@ -159,12 +173,27 @@ class SimBackend(SessionBackend):
             raise SessionError("tx: FT8 series is armed -- cancel it first")
         if direction == "tx":
             await self._cancel_js8("mode_change")  # like GnuRadioBackend: a mode change ends a JS8 message
+        if direction == "rx":
+            before = st.freq_hz
+            if mode == "adsl":
+                if self._freq_before_adsl is None:
+                    self._freq_before_adsl = st.freq_hz
+                st.freq_hz = ADSL_LO_HZ
+            elif self._freq_before_adsl is not None:
+                st.freq_hz, self._freq_before_adsl = self._freq_before_adsl, None
+            if st.freq_hz != before:
+                await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
         st.mode = mode
         st.mode_params = params
 
     async def tune(self, direction: str, freq_hz: float) -> None:
         # Allowed while disconnected too: the frequency is kept and used on
         # the next connect (same as GnuRadioBackend).
+        if direction == "rx" and self.rx.connection is not None and self.rx.mode == "adsl":
+            raise SessionError("rx: ADS-L tunes itself, the frequency can't be changed in this mode")
+        if direction == "rx" and self.rx.connection is None and self._freq_before_adsl is not None:
+            self._freq_before_adsl = freq_hz  # disconnected: for the next non-ADS-L mode
+            return
         self._state(direction).freq_hz = freq_hz
 
     async def set_gain(self, direction: str, name: str, value: float) -> None:
@@ -387,6 +416,8 @@ class SimBackend(SessionBackend):
             await auto.stop()
         await self._cancel_ft8("shutdown", device_safe=True)
         await self._cancel_js8("shutdown", device_safe=True)
+        if self._adsl_task is not None:
+            self._adsl_task.cancel()
         if self._js8_task is not None:
             self._js8_task.cancel()
         if self._spectrum_task is not None:
@@ -412,6 +443,8 @@ class SimBackend(SessionBackend):
             self._audio_task = asyncio.create_task(self._audio_loop())
         if self._ft8_task is None:
             self._ft8_task = asyncio.create_task(self._ft8_loop())
+        if self._adsl_task is None:
+            self._adsl_task = asyncio.create_task(self._adsl_loop())
         if self._js8_task is None:
             self._js8_task = asyncio.create_task(self._js8_loop())
         if self._js8_auto is None:
@@ -498,6 +531,51 @@ class SimBackend(SessionBackend):
                 "complete": m.complete and not m.incomplete, "incomplete": m.incomplete}))
         return events
 
+    async def adsl_clear(self) -> None:
+        self._adsl_state.clear()
+
+    def adsl_snapshot(self) -> dict:
+        return {"aircraft": self._adsl_state.get_aircraft_json()}
+
+    def fake_adsl_packets(self) -> list[dict]:
+        """One second of invented traffic: a circling glider, a transit, one in distress, one without a position."""
+        lat0, lon0 = station.locator_center(self.station.get("locator", "")) or ADSL_DEFAULT_CENTER
+        scale = math.cos(math.radians(lat0))
+        t = self._adsl_tick
+        self._adsl_tick += 1
+
+        def packet(table, address, category, state, emergency, lat, lon, alt, speed, climb, track):
+            channel = ADSL_CHANNELS_HZ[t % 2]
+            self._adsl_counts[channel] += 1
+            return {"version": 0, "key_index": 0, "kind": "traffic", "payload_type": 2, "raw": "",
+                    "address_table": table[0], "address_table_name": table[1], "address": address, "relayed": False,
+                    "timestamp_s": (t % 60) * 0.25, "category": category, "flight_state": state, "emergency": emergency,
+                    "lat": lat, "lon": lon, "alt_m": alt, "speed_mps": speed, "climb_mps": climb, "track_deg": track,
+                    "channel_hz": channel, "correlation": 0.9, "frequency_offset_hz": -300, "inverted": False}
+
+        angle = t * 0.08  # about 80 s per circle
+        return [
+            packet((6, "FLARM"), 0xDD1234, "glider", "airborne", "none", lat0 + 0.12 + 0.015 * math.cos(angle),
+                   lon0 - 0.15 + 0.015 * math.sin(angle) / scale, 1250, 25.0, 1.5, math.degrees(angle + math.pi / 2) % 360),
+            packet((5, "ICAO"), 0x3C6444, "light fixed wing", "airborne", "none", lat0 - 0.25 + 0.0006 * (t % 900),
+                   lon0 + 0.3 - 0.0009 * (t % 900) / scale, 1600, 62.0, 0.0, 305.0),
+            packet((7, "OGN"), 0x07A1B2, "light rotorcraft", "airborne", "general", lat0 - 0.1, lon0 - 0.2 + 0.0005 * (t % 600) / scale,
+                   420, 30.0, -2.0, 90.0),
+            packet((0, "RND"), 0x51F0AA, "paraglider", "airborne", "none", None, None, None, None, None, None),
+        ]
+
+    async def _adsl_loop(self) -> None:
+        while True:
+            await asyncio.sleep(ADSL_SIM_PERIOD_S)
+            if self.rx.connection is None or self.rx.mode != "adsl":
+                continue
+            codec = _adsl_state_module().adsl_codec
+            for info in self.fake_adsl_packets():
+                row = self._adsl_state.on_packet(info)
+                await self._emit_event("adsl_packet", {**codec.event_fields(info), "time": row["time"]})
+            await self._emit_event("adsl_status", {"channels": [
+                {"channel_hz": hz, "packets": count, "crc_failures": 0} for hz, count in self._adsl_counts.items()]})
+
     async def _ft8_loop(self) -> None:
         last_slot = None
         while True:
@@ -561,7 +639,7 @@ class SimBackend(SessionBackend):
         n = int(AUDIO_SAMPLE_RATE_HZ * AUDIO_CHUNK_S)
         while True:
             await asyncio.sleep(AUDIO_CHUNK_S)
-            if self.rx.connection is None or self.rx.mode is None:
+            if self.rx.connection is None or self.rx.mode in (None, "adsl"):
                 continue
             freq_hz = AUDIO_TONE_HZ.get(self.rx.mode, 500.0)
             t = (np.arange(n) + self._audio_phase) / AUDIO_SAMPLE_RATE_HZ
@@ -599,6 +677,14 @@ def _snapshot_direction(st: _DirectionState, keyed: bool) -> dict:
         "gains": dict(st.gains),
         "keyed": keyed,
     }
+
+
+def _adsl_state_module():
+    """pluto_advanced_rx.adsl_state (no GNU Radio or Qt), imported late like _js8_modules()."""
+    pluto_path.ensure_importable()
+    from pluto_advanced_rx import adsl_state
+
+    return adsl_state
 
 
 def _js8_modules():

@@ -8,6 +8,7 @@ from pluto_tx import adsl_codec
 
 MAX_ROWS = 500
 MAX_AIRCRAFT = 500
+MAX_TRAIL_POINTS = 200
 TRAFFIC_FIELDS = ("lat", "lon", "alt_m", "speed_mps", "climb_mps", "track_deg", "timestamp_s", "category", "flight_state",
                   "emergency")
 
@@ -33,6 +34,7 @@ class AdslState:
             if "address" in row:
                 self._update_aircraft(row)
             self._version += 1
+        return row
 
     def _update_aircraft(self, row):
         label = adsl_codec.address_label(row)
@@ -40,7 +42,7 @@ class AdslState:
         if entry is None:
             if len(self._aircraft) >= MAX_AIRCRAFT:  # drop the longest-silent one
                 del self._aircraft[min(self._aircraft, key=lambda k: self._aircraft[k]["time"])]
-            entry = self._aircraft[label] = {"label": label, "packets": 0, "kinds": set()}
+            entry = self._aircraft[label] = {"label": label, "packets": 0, "kinds": set(), "trail": []}
         entry["packets"] += 1
         entry["time"] = row["time"]
         entry["channel_hz"] = row.get("channel_hz")
@@ -51,6 +53,9 @@ class AdslState:
             # such fields at all and leaves the last known traffic data in place.
             if field in row:
                 entry[field] = row[field]
+        if row.get("lat") is not None and row.get("lon") is not None:
+            entry["trail"].append([row["time"], row["lat"], row["lon"]])
+            del entry["trail"][:-MAX_TRAIL_POINTS]
 
     def get_snapshot(self):
         with self._lock:
@@ -59,7 +64,12 @@ class AdslState:
     def get_aircraft(self):
         """Most recently heard first."""
         with self._lock:
-            return sorted((dict(a) for a in self._aircraft.values()), key=lambda a: a["time"], reverse=True)
+            return sorted((dict(a, kinds=set(a["kinds"]), trail=list(a["trail"])) for a in self._aircraft.values()),
+                          key=lambda a: a["time"], reverse=True)
+
+    def get_aircraft_json(self):
+        """get_aircraft() with JSON-ready values, for a client joining later."""
+        return [dict(a, kinds=sorted(a["kinds"])) for a in self.get_aircraft()]
 
     def counts(self):
         with self._lock:

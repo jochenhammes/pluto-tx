@@ -32,6 +32,17 @@ def normalize(call: str, locator: str) -> dict:
     return {"call": call, "locator": locator}
 
 
+def locator_center(locator: str) -> tuple[float, float] | None:
+    """(latitude, longitude; north and east positive) of the middle of a validated locator; None if empty."""
+    if not locator:
+        return None
+    lon = (ord(locator[0]) - 65) * 20 + int(locator[2]) * 2 - 180
+    lat = (ord(locator[1]) - 65) * 10 + int(locator[3]) - 90
+    if len(locator) == 6:
+        return lat + (ord(locator[5]) - 65 + 0.5) / 24, lon + (ord(locator[4]) - 65 + 0.5) / 12
+    return lat + 0.5, lon + 1.0
+
+
 def from_environment() -> dict:
     """Start values; invalid ones are ignored rather than stopping the server."""
     try:

@@ -144,6 +144,9 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
         return {"submode": submode, "decoder": decoder}
     if mode == "js8" and direction == "tx":
         return _js8_tx(params)
+    if mode == "adsl" and direction == "rx":
+        _reject_unknown(params, set(), "adsl")
+        return {}
     if mode == "rade" and direction == "tx":
         _reject_unknown(params, {"eoo"}, "rade")
         return {"eoo": _bool(params, "eoo", False)}

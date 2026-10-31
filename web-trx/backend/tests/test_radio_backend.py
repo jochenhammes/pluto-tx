@@ -357,6 +357,7 @@ def test_rx_bands_match_the_rx_apps_demod_band_shading():
     assert bands["m17"] == [-5600.0, 5600.0]           # deviation + symbol rate
     assert bands["rade"] == [750.0, 2200.0]
     assert "ft8" not in bands                          # FT8 keeps its own audio-band marker
+    assert bands["adsl"] == [-750_000.0, -350_000.0]   # both M-band channels, below the fixed LO
     assert set(bands) <= set(radio_backend.RX_DEMOD_MODES)
 
 
@@ -382,3 +383,141 @@ async def test_rx_display_setting_during_a_rebuild_reaches_the_new_flowgraph():
     assert new_tb.zoom == 4
     assert b.rx.gains["fft_zoom"] == 4
     b.rx.tb = None
+
+
+# -- ADS-L through the real flowgraph, on a fake device replaying synthetic IQ --
+
+def _repo_module(name):
+    """web-trx/backend/tests shadows the repository's own tests package, so load these by path."""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3] / "tests"
+    spec = importlib.util.spec_from_file_location(f"pluto_{name}", root / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _adsl_iq(rate, packets, lo_hz=868_850_000):
+    import numpy as np
+
+    gen = _repo_module("adsl_testgen")
+    pad = 0.05
+    x = np.zeros(int((max(p[1] for p in packets) + 0.02 + pad) * rate), np.complex128)
+    for channel_hz, start_s, address in packets:
+        burst = gen.modulate(gen.air_chips(gen.frame(gen.traffic_clear(address=address))), rate)
+        start = int((start_s + pad) * rate)
+        t = np.arange(start, start + len(burst))
+        x[start:start + len(burst)] += burst * np.exp(2j * np.pi * (channel_hz - lo_hz) * t / rate)
+    return x.astype(np.complex64)
+
+
+async def _adsl_backend(tmp_path, monkeypatch, rate, iq):
+    import numpy as np
+    from gnuradio import blocks
+    from pluto_advanced_rx.devices.base import RxDevice
+    from pluto_advanced_rx.devices.pluto import PlutoDevice
+
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    built = []
+
+    class FakeRx(PlutoDevice):
+        device_type = "fake"
+        display_name = "fake"
+        DEFAULT_CONNECTION = "x"
+        default_sample_rate_hz = rate
+        sample_rate_hz_choices = (1_000_000, rate)
+        _source = None
+
+        def __init__(self, *a, **k):
+            RxDevice.__init__(self, *a, **k)
+            built.append(self)
+
+        def build_source(self):
+            return blocks.vector_source_c(np.asarray(iq).tolist(), False)
+
+        def set_frequency(self, hz):
+            pass
+
+        def set_gain(self, name, value):
+            pass
+
+        def set_gain_mode(self, mode):
+            pass
+
+        def read_hw_state(self):
+            return {}
+
+    monkeypatch.setitem(radio_backend.rx_devices.DEVICE_REGISTRY, "fake", FakeRx)
+    monkeypatch.setitem(radio_backend.DEVICE_LABELS, "fake", "fake")
+    b, events, _spectrum, audio = make_backend()
+    b._loop = asyncio.get_running_loop()  # start_background_tasks() would do this
+    b.rx.device_type, b.rx.connection = "fake", "x"
+    b.rx.freq_hz = 433_500_000.0
+    return b, events, audio, built
+
+
+def _read_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+async def _settle(b, events, name, count, seconds=5.0):
+    for _ in range(int(seconds / 0.05)):
+        if sum(1 for n, _f in events if n == name) >= count:
+            return
+        await asyncio.sleep(0.05)
+
+
+async def test_adsl_packets_reach_events_state_and_stay_silent(tmp_path, monkeypatch):
+    rate = 2_400_000
+    iq = _adsl_iq(rate, [(868_200_000, 0.0, 0x111111), (868_400_000, 0.05, 0x222222)])
+    b, events, audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, iq)
+    b._rx_local_audio = True  # even a server with local audio enabled must stay quiet in this mode
+    muted = []
+    original = radio_backend.AdvancedRxFlowgraph.set_rx_muted
+    monkeypatch.setattr(radio_backend.AdvancedRxFlowgraph, "set_rx_muted", lambda self, m: (muted.append(m), original(self, m))[1])
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.tb.nominal_freq_hz == 868_850_000
+    assert b.rx.tb.active_digimode == "adsl"
+    await asyncio.to_thread(b.rx.tb.wait)
+    for channel in b.rx.tb.adsl_channels:
+        channel[3]._detector.flush()
+    await _settle(b, events, "adsl_packet", 2)
+    packets = [f for n, f in events if n == "adsl_packet"]
+    assert {(p["channel_hz"], p["address"]) for p in packets} == {(868_200_000, "111111"), (868_400_000, "222222")}
+    assert all(json.dumps(p) and "time" in p for p in packets)
+    assert audio == []
+    assert muted == [True]
+    assert {a["label"] for a in b.adsl_snapshot()["aircraft"]} == {"FANET:111111", "FANET:222222"}
+    assert ("tuned", {"direction": "rx", "freq_hz": 868_850_000}) in events
+    await b.disconnect("rx")
+
+
+async def test_adsl_keeps_the_operators_frequency_in_the_saved_settings(tmp_path, monkeypatch):
+    rate = 2_400_000
+    b, _events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, _adsl_iq(rate, [(868_200_000, 0.0, 1)]))
+    b._settings_path = str(tmp_path / "settings.json")
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.freq_hz == 868_850_000
+    saved = _read_json(b._settings_path)
+    assert saved["rx"]["freq_hz"] == 433_500_000.0
+    assert saved["rx"]["mode"] == "adsl"
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.freq_hz == 433_500_000.0
+    await b.disconnect("rx")
+
+
+async def test_adsl_tuning_and_too_low_rates(tmp_path, monkeypatch):
+    rate = 2_400_000
+    b, _events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, _adsl_iq(rate, [(868_200_000, 0.0, 1)]))
+    b.rx.gains["sample_rate"] = 1_000_000  # saved for another mode: stays saved, ADS-L takes the device default
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.tb.sample_rate == rate
+    assert b.rx.gains["sample_rate"] == 1_000_000
+    with pytest.raises(SessionError, match="tunes itself"):
+        await b.tune("rx", 145e6)
+    with pytest.raises(SessionError, match="needs at least"):
+        await b.set_gain("rx", "sample_rate", 1_000_000)
+    await b.disconnect("rx")

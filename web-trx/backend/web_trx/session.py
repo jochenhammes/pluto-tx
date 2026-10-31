@@ -106,6 +106,13 @@ class SessionBackend(abc.ABC):
     async def js8_automation_request(self, action: str, params: dict) -> None:
         raise SessionError("JS8 automation is not available")
 
+    async def adsl_clear(self) -> None:
+        raise SessionError("ADS-L is not available")
+
+    def adsl_snapshot(self) -> dict:
+        """ADS-L aircraft heard so far, for a client joining later (sent with 'hello')."""
+        return {}
+
     def operator_activity(self) -> None:
         """Any request from a browser: the operator is there (JS8 idle watchdog)."""
 
@@ -177,7 +184,7 @@ class SessionManager:
 
     REQUESTS = (
         "scan", "connect", "disconnect", "select_mode", "tune", "set_gain",
-        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "hb_ack",
+        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "adsl_clear", "hb_ack",
     )
 
     def __init__(self, backend: SessionBackend, tx_log=None):
@@ -323,6 +330,7 @@ class SessionManager:
                 "mode_options": modes.client_options(), "station": self.backend.station,
                 # FT8 slot clock in the browser: offset between its clock and ours.
                 "server_time": time.time(),
+                "adsl": self.backend.adsl_snapshot(),
                 **self.backend.snapshot(),
             })
             while True:
@@ -405,6 +413,9 @@ class SessionManager:
             await b.ptt(False)
         elif request == "estop":
             await b.estop()
+        elif request == "adsl_clear":
+            await b.adsl_clear()
+            await self._emit_event("adsl_cleared", {})
         elif request == "js8_auto":
             await b.js8_automation_request(str(params.get("action", "")), params)
         elif request == "set_station":
