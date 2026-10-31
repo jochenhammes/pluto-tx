@@ -44,6 +44,7 @@ from .meshtastic_deframer import MeshtasticDeframer
 from .pocsag_deframer import PocsagDeframer
 from .adsl_deframer import AdslDeframer
 from .adsb_deframer import AdsbDeframer
+from .aprs_deframer import AprsDeframer
 from . import adsl_demod
 from pluto_tx.lora_airtime import cr_index as _lora_cr_index
 
@@ -114,7 +115,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_meshcore_packet=None, meshcore_preset_index=0, on_ft8_decodes=None,
                  ft8_backend=config.FT8_DECODER_BACKEND, ft8_my_call="", ft8_my_grid="",
                  on_js8_decodes=None, js8_submodes=config.JS8_DEFAULT_SUBMODES,
-                 js8_backend=config.JS8_DECODER_BACKEND, on_adsl_packet=None, on_adsb_message=None):
+                 js8_backend=config.JS8_DECODER_BACKEND, on_adsl_packet=None, on_adsb_message=None, on_aprs_frame=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -898,7 +899,30 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.connect(self.adsb_dc_blocker, self.adsb_magnitude)
             self.connect(self.adsb_magnitude, self.adsb_deframer)
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb"):
+        # --- APRS RX: FM on the 50 kHz IF like POCSAG, down to about 12.5 kS/s audio for the demodulator. A sound card
+        # fed by an FM radio already delivers that audio.
+        self.aprs_deframer = None
+        if active_digimode == "aprs":
+            source_rate = self.sample_rate if self.device.is_audio_only() else self.if_rate
+            aprs_decim = max(1, round(source_rate / config.APRS_AUDIO_RATE_HZ))
+            aprs_lowpass = filter.fir_filter_fff(aprs_decim, firdes.low_pass(
+                1.0, source_rate, config.APRS_AUDIO_CUTOFF_HZ, config.APRS_AUDIO_TRANS_HZ, window.WIN_HAMMING))
+            self.aprs_deframer = AprsDeframer(on_aprs_frame or (lambda frame: None), source_rate / aprs_decim)
+            if self.device.is_audio_only():
+                self.aprs_audio_real = blocks.complex_to_real()
+                self.connect(self.pluto_source, self.aprs_audio_real)  # before the tuning rotator: plain audio
+                self.connect(self.aprs_audio_real, aprs_lowpass)
+            else:
+                self.aprs_channel_filter = filter.fir_filter_ccc(1, firdes.low_pass(
+                    1.0, self.if_rate, config.APRS_CHANNEL_CUTOFF_HZ, config.APRS_CHANNEL_TRANS_HZ, window.WIN_HAMMING))
+                self.aprs_demod = analog.quadrature_demod_cf(self.if_rate / (2 * math.pi * config.APRS_DEVIATION_HZ))
+                self.connect(self.if_filter, self.aprs_channel_filter)
+                self.connect(self.aprs_channel_filter, self.aprs_demod)
+                self.connect(self.aprs_demod, aprs_lowpass)
+            self.aprs_audio_lowpass = aprs_lowpass
+            self.connect(aprs_lowpass, self.aprs_deframer)
+
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb", "aprs"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the

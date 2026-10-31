@@ -398,7 +398,7 @@ def run_rx_session(tb, args, emitter: Emitter, filebroadcast_state=None):
     from pluto_advanced_rx import config as rx_config
 
     tb.start()
-    tb.set_rx_muted(rx_config.fixed_tune_frequency(tb.active_digimode) is not None)  # data only: the FM/SSB path would just play noise for hours
+    tb.set_rx_muted(rx_config.is_data_only(tb.active_digimode))  # data only: the FM/SSB path would just play noise for hours
     emitter.emit("started")
 
     saved_files = set()

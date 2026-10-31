@@ -21,6 +21,7 @@ from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
 from pluto_advanced_rx.adsb_state import AdsbState
+from pluto_advanced_rx.aprs_state import AprsState
 from pluto_tx import adsb_codec, adsl_codec
 from pluto_advanced_rx.meshcore_state import MeshcoreState
 from pluto_advanced_rx.meshtastic_state import MeshtasticState
@@ -89,7 +90,7 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb", "aprs"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
@@ -287,6 +288,11 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                 aircraft.pop("trail", None)
                 emitter.emit("adsb_aircraft", **aircraft)
 
+    aprs_state = AprsState()
+
+    def on_aprs_frame(frame):
+        emitter.emit("aprs_packet", **aprs_state.on_frame(frame))
+
     pocsag_state = PocsagState()
     pocsag_state.set_charset(args.pocsag_charset)
     pocsag_state.set_hide_damaged(False)  # damaged calls are filtered by on_pocsag_message()
@@ -345,6 +351,11 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         offered = ", ".join(str(rate) for rate in selected_device.sample_rate_hz_choices)
         emitter.error(f"--bandwidth {args.bandwidth} is not available on --device {args.device} (offered: {offered})")
         return 1
+    if args.digimode == "aprs":
+        # A starting point, not a lock: an explicit --freq wins, as other regions use other frequencies.
+        if args.freq == rx_config.DEFAULT_FREQUENCY:
+            frequency = rx_config.APRS_DEFAULT_FREQ_HZ
+        emitter.emit("aprs_listen", freq_hz=frequency)
     if args.digimode == "adsb":
         rate = args.bandwidth or selected_device.default_sample_rate_hz
         if rate < rx_config.ADSB_MIN_SAMPLE_RATE_HZ:
@@ -417,7 +428,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             rtty_baud_rate=args.rtty_baud_rate, rtty_reverse=args.rtty_reverse,
             on_rtty_char=on_rtty_char,
             on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
-            on_pocsag_message=on_pocsag_message, on_adsl_packet=on_adsl_packet, on_adsb_message=adsb_state.on_message,
+            on_pocsag_message=on_pocsag_message, on_adsl_packet=on_adsl_packet, on_adsb_message=adsb_state.on_message, on_aprs_frame=on_aprs_frame,
             on_ft8_decodes=on_ft8_decodes, ft8_backend=args.ft8_decoder,
             ft8_my_call=args.ft8_mycall, ft8_my_grid=args.ft8_mygrid,
             on_js8_decodes=on_js8_decodes if args.digimode == "js8" else None,

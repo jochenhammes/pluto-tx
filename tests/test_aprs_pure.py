@@ -77,6 +77,9 @@ class AprslibVectorTests(unittest.TestCase):
                 self.assertAlmostEqual(info["lat"], expected["latitude"], places=3)
                 self.assertAlmostEqual(info["lon"], expected["longitude"], places=3)
                 self.assertEqual(info["symbol"], expected["symbol_table"] + expected["symbol"])
+                if info["kind"] == "weather":  # here ccc/sss is the wind, which aprslib calls course and speed
+                    self.assertEqual(info.get("wind_dir_deg"), expected["course"])
+                    continue
                 if expected.get("course"):
                     self.assertEqual(info.get("course_deg"), expected["course"] % 360)
                 if expected.get("speed") is not None and expected.get("course"):

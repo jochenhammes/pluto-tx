@@ -502,6 +502,28 @@ JS8_DECODER_BACKEND = "auto"
 # Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)
 JS8_DEFAULT_SUBMODES = (0,)
 
+# --- APRS RX: FM, 12.5/25 kHz channel. Not locked: other regions use other frequencies.
+APRS_DEFAULT_FREQ_HZ = 144_800_000
+APRS_DEVIATION_HZ = 3000.0  # only scales the discriminator; the demodulator compares tones, not levels
+APRS_CHANNEL_CUTOFF_HZ = 8000.0
+APRS_CHANNEL_TRANS_HZ = 3000.0
+APRS_AUDIO_RATE_HZ = 12_500  # target; the demodulator accepts whatever the decimation gives
+APRS_AUDIO_CUTOFF_HZ = 3500.0
+APRS_AUDIO_TRANS_HZ = 1500.0
+
+
+def is_data_only(mode):
+    """Modes that only make sense as data: no sound in pluto-cli."""
+    return mode in ("adsl", "adsb", "aprs")
+
+
+def mode_default_frequency(mode):
+    """Where entering the mode tunes: locked for fixed-tune modes, a starting point otherwise."""
+    if mode == "aprs":
+        return APRS_DEFAULT_FREQ_HZ
+    return fixed_tune_frequency(mode)
+
+
 # --- Modes that hold the tuner themselves (ADS-L, ADS-B): their frequency, the lowest usable sample rate, a usable gain for
 # an RTL-SDR whose operator left it at its 20 dB default, and the waterfall zoom. Data only: they never play audio.
 def fixed_tune_frequency(mode):
