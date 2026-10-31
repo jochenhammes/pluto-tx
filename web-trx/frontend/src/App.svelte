@@ -1150,7 +1150,7 @@
     </div>
 
     <div class="row rx-freq-row">
-      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxMode === "adsl"} />
+      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxMode === "adsl" && rxConnected} />
       {#if features.rx_direct_sampling?.includes(rxDeviceType)}
         <div class="field narrow">
           <label for="rxDirect" title="RTL-SDR ohne Tuner direkt abtasten: KW bis 28,8 MHz (über 14,4 MHz gespiegelt). RTL-SDR Blog V3: Q">Direct Sampling</label>
