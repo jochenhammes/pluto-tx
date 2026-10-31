@@ -67,7 +67,7 @@ Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsigna
 
 ## Echttest (31.10.2026, JO31)
 
-**Testsendung mit deiner Freigabe:** Pluto+ bei −40 dB über Funk, kurze Distanz, 868,2/868,4 MHz abwechselnd. Fünf Serien zu je 8 Paketen, zusammen etwa 0,2 s Sendezeit. Inhalt: Zufallsadresse (Privacy-Tabelle), „am Boden", Position bei 0°N 0°E, Modellflugzeug. Der OGN-Feed um diese Position blieb bei der geprüften ersten Serie leer. Das Sendeskript ist nicht Teil des Repos.
+**Testsendung, vom Betreiber freigegeben:** Pluto+ bei −40 dB über Funk, kurze Distanz, 868,2/868,4 MHz abwechselnd. Fünf Serien zu je 8 Paketen, zusammen etwa 0,2 s Sendezeit. Inhalt: Zufallsadresse (Privacy-Tabelle), „am Boden", Position bei 0°N 0°E, Modellflugzeug. Der OGN-Feed um diese Position blieb bei der geprüften ersten Serie leer. Das Sendeskript ist nicht Teil des Repos.
 
 | Empfänger | Einstellung | Pakete | Korrelation |
 |---|---|---|---|
@@ -78,7 +78,7 @@ Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsigna
 
 Bei 20 dB zeigte eine Rohaufnahme keine Lücken und kein Clipping. Alle Bursts wurden gefunden, lagen aber nur rund 10 dB über dem Rauschen und scheiterten am CRC. Das passt zur Grenze aus den synthetischen Messungen.
 
-**Dauer-Empfang:** rund 45 Minuten am späten Nachmittag auf Pluto+ und RTL-SDR ergaben kein echtes ADS-L-Paket. Laut OGN-Feed war im Umkreis von 150 km um JO31 in einer 90-Sekunden-Stichprobe nur ein ADS-L-Sender aktiv. **Echter Flugverkehr ist also noch nicht bestätigt.** Der OGN-Abgleich aus dem Plan steht deshalb noch aus.
+**Dauer-Empfang:** 39 Minuten am späten Nachmittag (16:32 bis 17:11 Uhr) auf Pluto+ und RTL-SDR ergaben kein echtes ADS-L-Paket. Das passt zum OGN-Feed: In den 30 davon aufgezeichneten Minuten meldete das Netz im Umkreis von 80 km um JO31 keinen ADS-L-Sender (`OGADSL`), aber 47 im FLARM-Format. Eine 90-Sekunden-Stichprobe mit 150 km Umkreis fand einen einzigen, etwa 100 km entfernt. **Echter Flugverkehr ist also noch nicht bestätigt.** Der Positionsabgleich mit OGN aus dem Plan steht deshalb noch aus.
 
 **HackRF:** nicht am echten Gerät getestet, nur der synthetische Pfad bei seinen Raten.
 
