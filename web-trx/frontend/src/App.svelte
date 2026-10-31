@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import Waterfall from "./lib/Waterfall.svelte";
   import FreqInput from "./lib/FreqInput.svelte";
+  import AdslPanel, { type AdslAircraft, type AdslStatus } from "./lib/AdslPanel.svelte";
+  import { locatorCenter } from "./lib/geo";
   import RxDecoder, {
     type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status, type Ft8Decode,
   } from "./lib/RxDecoder.svelte";
@@ -21,6 +23,7 @@
   const MODE_LABELS: Record<string, string> = {
     fm: "FM", ssb: "SSB (USB)", lsb: "SSB (LSB)", m17: "M17", rade: "RADE",
     pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8", js8: "JS8 (JS8Call)",
+    adsl: "ADS-L (Luftfahrt, 868 MHz)",
   };
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
@@ -63,7 +66,7 @@
   let zoomIndex = 0;
   $: zoom = ZOOM_STEPS[zoomIndex] ?? 1;
   let features: {
-    fft_zoom_max?: number; fft_avg_max?: number; fft_sizes?: number[]; rx_modes?: string[]; tx_modes?: string[];
+    fft_zoom_max?: number; fft_avg_max?: number; fft_sizes?: number[]; map_tile_url?: string; rx_modes?: string[]; tx_modes?: string[];
     rx_sample_rates?: Record<string, number[]>;
     rx_gain?: Record<string, RxGainInfo>;
     rx_direct_sampling?: string[];
@@ -82,6 +85,12 @@
   // FT8 receive
   let rxFt8Decoder = "auto";
   let ft8Slots: Ft8Slot[] = [];
+  // ADS-L aircraft: collected as packets arrive, drawn at most once per second (adslFlush below).
+  const ADSL_TRAIL_POINTS = 200;
+  const adslAircraft = new Map<string, AdslAircraft>();
+  let adslList: AdslAircraft[] = [];
+  let adslDirty = false;
+  let adslStatus: AdslStatus | null = null;
   let ft8Status: Ft8Status | null = null;
   // JS8 receive (backend js8_frames / js8_message / js8_status)
   let rxJs8 = { submode: "normal", decoder: "auto" };
@@ -113,12 +122,18 @@
   let bottomTab: BottomTab = "rx";
   const BOTTOM_DEFAULT_PX = 220;
   const BOTTOM_MIN_PX = 110;
+  // The ADS-L map needs more room than a decoder list: a height of its own, kept separately.
+  const ADSL_BOTTOM_DEFAULT_PX = 460;
   let bottomHeight = BOTTOM_DEFAULT_PX;
+  let adslBottomHeight = ADSL_BOTTOM_DEFAULT_PX;
   try {
     bottomHeight = Number(localStorage.getItem("webtrx.bottomHeight")) || BOTTOM_DEFAULT_PX;
+    adslBottomHeight = Number(localStorage.getItem("webtrx.adslBottomHeight")) || ADSL_BOTTOM_DEFAULT_PX;
   } catch {
     /* storage unavailable: default height */
   }
+  $: adslView = rxMode === "adsl" && bottomTab === "rx";
+  $: shownBottomHeight = adslView ? clampBottom(adslBottomHeight) : bottomHeight;
   function clampBottom(px: number): number {
     // Keep at least ~260 px for header, RX controls and a usable waterfall.
     return Math.round(Math.max(BOTTOM_MIN_PX, Math.min(px, window.innerHeight - 260)));
@@ -126,15 +141,21 @@
   function startResize(e: PointerEvent): void {
     const handle = e.currentTarget as HTMLElement;
     const startY = e.clientY;
-    const startHeight = bottomHeight;
+    const startHeight = shownBottomHeight;
+    const forAdsl = adslView;
     handle.setPointerCapture(e.pointerId);
-    const move = (ev: PointerEvent) => (bottomHeight = clampBottom(startHeight - (ev.clientY - startY)));
+    const move = (ev: PointerEvent) => {
+      const px = clampBottom(startHeight - (ev.clientY - startY));
+      if (forAdsl) adslBottomHeight = px;
+      else bottomHeight = px;
+    };
     const end = () => {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", end);
       handle.removeEventListener("pointercancel", end);
       try {
-        localStorage.setItem("webtrx.bottomHeight", String(bottomHeight));
+        if (forAdsl) localStorage.setItem("webtrx.adslBottomHeight", String(adslBottomHeight));
+        else localStorage.setItem("webtrx.bottomHeight", String(bottomHeight));
       } catch {
         /* ignore */
       }
@@ -144,9 +165,10 @@
     handle.addEventListener("pointercancel", end);
   }
   function resetBottomHeight(): void {
-    bottomHeight = BOTTOM_DEFAULT_PX;
+    if (adslView) adslBottomHeight = ADSL_BOTTOM_DEFAULT_PX;
+    else bottomHeight = BOTTOM_DEFAULT_PX;
     try {
-      localStorage.removeItem("webtrx.bottomHeight");
+      localStorage.removeItem(adslView ? "webtrx.adslBottomHeight" : "webtrx.bottomHeight");
     } catch {
       /* ignore */
     }
@@ -296,6 +318,7 @@
   let stationCall = "";
   let stationLocator = "";
   let stationSaved = { call: "", locator: "" }; // the server's value, restored after a refused edit
+  $: adslStation = locatorCenter(stationSaved.locator);
   function applyStation(st: { call?: string; locator?: string } | undefined): void {
     stationSaved = { call: st?.call ?? "", locator: st?.locator ?? "" };
     stationCall = stationSaved.call;
@@ -500,6 +523,7 @@
       if (features.js8?.tx) client.request("js8_auto", { action: "status" });
       if (typeof e.server_time === "number") serverOffsetS = e.server_time - Date.now() / 1000;
       clockSynced = features.ft8?.clock_synced ?? true;
+      adslLoadSnapshot(e.adsl as { aircraft?: Record<string, unknown>[] } | undefined);
       if (fmOptions === null) {
         fmOptions = (e.mode_options as { fm: FmOptions }).fm;
         fmDeviationHz = fmOptions.deviation_default_hz;
@@ -603,6 +627,13 @@
       m17Caller = { src: String(e.src), dst: String(e.dst ?? ""), time: new Date().toLocaleTimeString() };
     }
     if (e.event === "rade_status") radeStatus = e as unknown as RadeStatus;
+    if (e.event === "adsl_packet" && e.address_label) adslOnPacket(e);
+    if (e.event === "adsl_status") adslStatus = e as unknown as AdslStatus;
+    if (e.event === "adsl_cleared") {
+      adslAircraft.clear();
+      adslDirty = true;
+      adslFlush();
+    }
     if (e.event === "ft8_slot") {
       const slot = e as unknown as Ft8Slot;
       // One entry per slot (also keys the table): a repeated slot replaces the old one.
@@ -807,11 +838,54 @@
       : rxMode === "ft8" ? { decoder: rxFt8Decoder } : rxMode === "js8" ? { ...rxJs8 } : {};
     client.request("select_mode", { direction: "rx", mode: rxMode, params });
   }
+  // -- ADS-L --
+  const toLocalMs = (serverS: number): number => (serverS - serverOffsetS) * 1000;
+  function adslLoadSnapshot(snapshot: { aircraft?: Record<string, unknown>[] } | undefined): void {
+    adslAircraft.clear();
+    for (const a of snapshot?.aircraft ?? []) {
+      const trail = (a.trail ?? []) as [number, number, number][];
+      adslAircraft.set(String(a.label), {
+        ...(a as unknown as AdslAircraft),
+        heard_ms: toLocalMs(Number(a.time)),
+        position_ms: trail.length ? toLocalMs(trail[trail.length - 1][0]) : null,
+      });
+    }
+    adslDirty = true;
+    adslFlush();
+  }
+  function adslOnPacket(e: Record<string, unknown>): void {
+    const label = String(e.address_label);
+    const old = adslAircraft.get(label);
+    const hasPosition = e.lat != null && e.lon != null;
+    const trail = old?.trail ?? [];
+    if (hasPosition) {
+      trail.push([Number(e.time), Number(e.lat), Number(e.lon)]);
+      trail.splice(0, trail.length - ADSL_TRAIL_POINTS);
+    }
+    // Same rule as AdslState: a field marked invalid (null) replaces the old value, an absent one keeps it.
+    adslAircraft.set(label, {
+      ...old, ...(e as unknown as Partial<AdslAircraft>), label, trail, packets: (old?.packets ?? 0) + 1,
+      heard_ms: Date.now(), position_ms: hasPosition ? Date.now() : (old?.position_ms ?? null),
+    });
+    adslDirty = true;
+  }
+  function adslFlush(): void {
+    if (!adslDirty) return;
+    adslDirty = false;
+    adslList = [...adslAircraft.values()];
+  }
+  const adslFlushTimer = setInterval(adslFlush, 1000);
+  onDestroy(() => clearInterval(adslFlushTimer));
+  function clearAdsl(): void {
+    client.request("adsl_clear", {});
+  }
+
   function tuneRx(hz: number): void {
     rxFreqHz = hz;
     if (rxConnected) client.request("tune", { direction: "rx", freq_hz: hz });
   }
   function onWaterfallClick(freqHz: number): void {
+    if (rxMode === "adsl") return; // the mode tunes itself
     tuneRx(Math.round(freqHz / 100) * 100);
   }
   function toggleAudio(): void {
@@ -1075,7 +1149,7 @@
     </div>
 
     <div class="row rx-freq-row">
-      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" />
+      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxMode === "adsl"} />
       {#if features.rx_direct_sampling?.includes(rxDeviceType)}
         <div class="field narrow">
           <label for="rxDirect" title="RTL-SDR ohne Tuner direkt abtasten: KW bis 28,8 MHz (über 14,4 MHz gespiegelt). RTL-SDR Blog V3: Q">Direct Sampling</label>
@@ -1110,7 +1184,8 @@
       </div>
       <div class="field narrow">
         <label for="rxAudioBtn">Audio</label>
-        <button id="rxAudioBtn" on:click={toggleAudio}>{audioOn ? "\u{1F50A} RX-Audio an" : "\u{1F507} RX-Audio aus"}</button>
+        <button id="rxAudioBtn" on:click={toggleAudio} disabled={rxMode === "adsl"}
+          title={rxMode === "adsl" ? "ADS-L ist ein reiner Datenmodus, ohne Ton" : ""}>{audioOn ? "\u{1F50A} RX-Audio an" : "\u{1F507} RX-Audio aus"}</button>
       </div>
       <div class="field narrow volume">
         <label for="rxVolume">Lautstärke {volumePct} %</label>
@@ -1691,7 +1766,7 @@
   <span></span>
 </div>
 
-<section class="panel bottom-panel" style="height: {bottomHeight}px">
+<section class="panel bottom-panel" style="height: {shownBottomHeight}px">
   <div class="tabs" role="tablist">
     <button role="tab" class:active={bottomTab === "rx"} aria-selected={bottomTab === "rx"}
       on:click={() => (bottomTab = "rx")}>Empfang — {MODE_LABELS[rxMode] ?? rxMode}</button>
@@ -1702,7 +1777,10 @@
   </div>
 
   <div class="tab-body" class:hidden={bottomTab !== "rx"}>
-    {#if rxMode === "js8" && rxConnected}
+    {#if rxMode === "adsl"}
+      <AdslPanel aircraft={adslList} status={adslStatus} station={adslStation} connected={rxConnected}
+        tileSetting={features.map_tile_url ?? ""} onClear={clearAdsl} />
+    {:else if rxMode === "js8" && rxConnected}
       <Js8Panel messages={js8Messages} periods={js8Periods} status={js8Status} myCall={stationCall}
         onPick={features.js8?.tx ? pickJs8 : null}
         auto={features.js8?.tx ? js8Auto : null} autoEvents={js8AutoEvents} inbox={js8Inbox}
