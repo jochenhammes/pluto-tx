@@ -34,3 +34,44 @@
 | Plausibilität | Ein Sprung über 0,7 km/s + 5 km verwirft den Fix. Mit bekannter Station werden Positionen weiter als 800 km entfernt verworfen. |
 | Bitkorrektur | Nur ein Bit und nur für Adressen, die schon unkorrigiert gehört wurden. |
 | Anzeige | Ein Flugzeug erscheint erst nach zwei gültigen Nachrichten. |
+| Mindestrate | 2,4 MS/s statt der zuerst geplanten 2 MS/s, siehe Messung. Der HackRF bleibt deshalb auf seinen 4 MS/s. |
+| Datenrate | Der Empfänger fasst Nachrichten je Flugzeug zusammen und gibt höchstens einmal pro Sekunde aus, was sich geändert hat. |
+
+## Messwerte Demodulator (synthetisch)
+
+`python3 -m tests.adsb_measure`: kein Funk, Pulslage zufällig gegen den Abtasttakt. SNR ist die Pulsleistung zum Rauschen in der gesamten Abtastbandbreite.
+
+| SNR | 2,0 MS/s | 2,048 | 2,4 | 2,5 | 3,2 | 4,0 | 5,0 |
+|---|---|---|---|---|---|---|---|
+| 10 dB | 16 % | 0 % | 3 % | 9 % | 50 % | 82 % | 95 % |
+| 12 dB | 39 % | 0 % | 28 % | 47 % | 89 % | 98 % | 100 % |
+| 15 dB | 60 % | 2 % | 80 % | 95 % | 100 % | 100 % | 100 % |
+| 20 dB | 77 % | 9 % | 100 % | 100 % | 100 % | 100 % | 100 % |
+
+Unter 2,4 MS/s fällt ein Puls zu oft auf zwei Samples, benachbarte Bits werden dann mehrdeutig; das ist kein Schwellenproblem, 2,048 MS/s scheitert auch bei 30 dB meist (47 %). Deshalb werden tiefere Raten verweigert.
+
+| Größe | Ergebnis |
+|---|---|
+| Rauschen, 60 s | 0 falsche Nachrichten, bei 2,4 und 4 MS/s |
+| CPU | rund 6,5 % eines Kerns je Rauschen, rund 10 % bei 500 Nachrichten/s (nur Detektor) |
+| DC-Spike in Pulsstärke | ohne Abzug 0 %, mit Abzug 100 %; deshalb sitzt ein `dc_blocker` fest im Signalweg |
+| Zwei Rahmen überlappend | Der zweite geht verloren. Der erste übersteht einen um 10 dB schwächeren Störer zu 95 %, bei gleicher Stärke gar nicht. |
+| Browser, 100 Flugzeuge | keine lange Aufgabe in 30 s |
+
+## Echttest (31.10.2026, Empfänger in JO43, nur Empfang)
+
+Pluto+, 2,5 MS/s, die vorhandene Behelfsantenne (nicht für 1090 MHz ausgelegt). Vergleich mit dem öffentlichen OGN-Feed (`OGADSB`, 400 km um JO43, zur selben Zeit 129 bis 182 Flugzeuge).
+
+| Lauf | Ergebnis |
+|---|---|
+| 100 s `pluto-cli` | 1 Flugzeug, 5 Nachrichten; Adresse `4BB84C` auch im OGN-Feed |
+| Verstärkungsreihe manuell 40–73 dB und AGC, je 30 s | 0 Nachrichten, dazu passend wenige, schwache Pulse in einer Rohaufnahme |
+| 40 s Web-TRX bis Browser-Karte | 1 Flugzeug `DLH9PT`, 23 Nachrichten, davon 4 korrigiert, 138 kt im Sinkflug, 0 Audio-Frames |
+| 10 min `pluto-cli` | 2 Flugzeuge, beide auch im OGN-Feed: `DLH5CP` 35 Nachrichten, `4BCDE7` 6 |
+
+**Abgleich:** Der eine zeitnahe Positionsvergleich mit OGN lag 60 m auseinander. Die Höhe wich um 434 ft ab, wir melden die barometrische Höhe wie gesendet (−75 ft auf einem Anflug), OGN gibt einen anderen Bezug aus. Ein einzelner Vergleich ist kein statistischer Nachweis, und ob die 434 ft allein am Bezug liegen, habe ich nicht geprüft.
+
+**Einordnung:** Empfangen wurden nur tief anfliegende Flugzeuge im Raum Hamburg, von rund 150 gleichzeitig gemeldeten. Dass nur nahe Flugzeuge durchkommen, spricht für die Antenne als Grenze, belegt ist das aber erst mit einer passenden Antenne. Das spiegeln auch die wenigen, schwachen Pulse in der Rohaufnahme wider.
+
+**Nicht getestet:** RTL-SDR (am Testabend wegen eines USB-Fehlers nicht erreichbar) und HackRF am echten Signal. Die Vorgabe 40 dB für das RTL-SDR ist von ADS-L übernommen, nicht auf 1090 MHz gemessen. Eine Übersteuerung durch nahe Sender ist damit ebenfalls ungeprüft.
+

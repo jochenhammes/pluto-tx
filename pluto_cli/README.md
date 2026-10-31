@@ -162,7 +162,7 @@ Common flags (every mode):
 | `--gain DB` | Manual gain, used when `--gain-mode manual` |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
-| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8,adsl}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
+| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8,adsl,adsb}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
 | `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency, used with `--digimode psk31` |
 | `--rtty-mark-hz HZ` | RTTY mark tone frequency, used with `--digimode rtty` |
 | `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
@@ -174,6 +174,7 @@ Common flags (every mode):
 | `--ft8-mycall CALL`, `--ft8-mygrid LOC` | Your call/locator for `--digimode ft8` with jt9: replies to you are decoded with a-priori knowledge |
 | `--js8-submode {normal,fast,turbo,slow,all}`, `--js8-decoder {auto,js8,own}` | Speed(s) for `--digimode js8` (default normal; `all` decodes the four at once) and the decoder: JS8Call's own (`tools/js8ref`, built by `install-js8.sh`, default when present) or the built-in numpy one. Tune `--freq` to the USB dial frequency (e.g. 7078000) |
 | `--meshtastic-region {eu433,eu868}` / `--meshtastic-modem-preset NAME` | Region (default `eu868`) and Meshtastic modem preset (LongFast, LongModerate, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo, LongTurbo; default LongFast, the only one verified against real hardware) for `--digimode meshtastic`; retunes to the preset's carrier, `--freq` is ignored; RX `--bandwidth` must be at least twice the preset's LoRa bandwidth. Requires gr-lora_sdr, see `install-lora.sh` |
+| `--adsb-locator LOCATOR` | With `--digimode adsb`: Maidenhead locator of the receiver, for surface positions and a range check |
 | `--meshcore-decrypt-dm` | With `--digimode meshcore`: also decrypt direct messages addressed to this app's node identity (created if missing; emits `meshcore_identity`); senders must have advertised first |
 | `--meshcore-preset NAME` / `--meshcore-channel NAME:HEX32` | MeshCore preset (default `MeshCore EU/UK Narrow`, retunes to its carrier, `--freq` is ignored) and extra group channels to decrypt (repeatable; the Public channel is always decoded) for `--digimode meshcore`. Requires gr-lora_sdr + cryptography |
 | `--meshtastic-channel NAME` / `--meshtastic-psk B64` | Channel name (default `LongFast`) and key (default `AQ==` = stock channel; empty = unencrypted) used to read frames |
@@ -282,9 +283,11 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `unkeyed` | TX: just unkeyed | `mode` |
 | `interactive_ready` | TX `--interactive`: ready for input | `hint` |
 | `shutdown` | TX or RX: safe shutdown has completed | -- |
-| `started` | RX: flowgraph is running and unmuted (`--digimode adsl` stays muted: data only) | -- |
+| `started` | RX: flowgraph is running and unmuted (`--digimode adsl`/`adsb` stay muted: data only) | -- |
 | `repeat_wait` | TX with `--repeat-count` > 1: pause before the next transmission (`keyed` then also carries `repetition` and `of`) | `seconds`, `next`, `of` |
 | `psk31_char` | RX `--digimode psk31`: one decoded character (RX-only; TX `psk31` prints nothing) | `char` (single character string) |
+| `adsb_listen` | RX `--digimode adsb`: once at startup (`--freq` is ignored, needs an RF device and at least 2.4 MS/s) | `freq_hz`, `sample_rate_hz` |
+| `adsb_aircraft` | RX `--digimode adsb`: an aircraft that changed, at most once per second each, after its second valid message. Monitoring only, not for navigation or collision avoidance | `icao`, `messages`, `time`, `lat`, `lon`, `position_time`, and as far as received `callsign`, `alt_ft`, `alt_type` (`baro`/`gnss`), `speed_kt`, `speed_type`, `track_deg`, `heading_deg`, `vrate_fpm`, `on_ground`, `emergency`, `squawk` |
 | `adsl_listen` | RX `--digimode adsl`: once at startup (`--freq` is ignored, needs an RF device and at least 1.8 MS/s) | `channels_hz`, `freq_hz`, `sample_rate_hz` |
 | `adsl_packet` | RX `--digimode adsl`: one packet that passed its CRC. Monitoring only, not for navigation or collision avoidance | `channel_hz`, `kind`, `version`, `key_index`, `raw`, `correlation`, `frequency_offset_hz`, `address`, `address_label`, `address_table_name`, `relayed`, `payload_type`; `kind` = `traffic` also `lat`, `lon`, `alt_m` (above the WGS-84 ellipsoid), `speed_mps`, `climb_mps`, `track_deg` (each null if the sender marks it invalid), `timestamp_s`, `category`, `flight_state`, `emergency` and the integrity fields |
 | `meshcore_identity` | RX `--meshcore-decrypt-dm`: once at startup | `public_key` |
@@ -372,6 +375,17 @@ and the matching `--rtty-mark-hz`/`--rtty-shift-hz`/`--rtty-baud-rate` on
 RX. Any RX mode works alongside `--digimode rtty` (`fm` above is just a
 placeholder primary mode -- RTTY decodes from the IF stage independently
 of it, same as PSK31).
+
+### ADS-B reception (aircraft, 1090 MHz)
+
+```bash
+pluto-cli rx fm --device rtlsdr --digimode adsb --adsb-locator JO43 --json
+```
+
+Receive only: this project never transmits on 1090 MHz, not even for testing. The tuning is fixed at 1090 MHz (`--freq` is
+ignored) and the audio stays muted; `fm` is only a placeholder primary mode. `--bandwidth` must be at least 2400000. A locator
+is optional: positions on the ground need it, and it lets impossible positions be rejected. Monitoring only, not for
+navigation or collision avoidance.
 
 ### ADS-L reception (aircraft, 868 MHz)
 

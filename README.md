@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic/LoRa, MeshCore/LoRa, ADS-L-Empfang) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic/LoRa, MeshCore/LoRa, ADS-L- und ADS-B-Empfang) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -30,7 +30,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, JS8 (JS8Call-kompatibel, Normal/Fast/Turbo/Slow), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte), nur RX: ADS-L (Luftfahrt, 868 MHz) |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, JS8 (JS8Call-kompatibel, Normal/Fast/Turbo/Slow), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte), nur RX: ADS-L (Luftfahrt, 868 MHz), ADS-B (Luftfahrt, 1090 MHz) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX), ESP32-S3-Board (TX, nur 13 cm, nur FM und M17, experimentell) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Fernbetrieb** | `web-trx` — Browser-Oberfläche (FastAPI + Svelte) auf derselben Codebasis, ein Betreiber, Login, HTTPS |
@@ -278,7 +278,7 @@ Ziel) direkt in der GUI einstellbar.
 Reiter "Digimodes" in beiden Apps. Läuft unabhängig vom gerade
 gewählten primären Empfangsmodus (man kann z.B. FM hören und
 gleichzeitig einen PSK31-Chat auf derselben Bandbreite mitverfolgen) —
-aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic, MeshCore **oder** ADS-L) kann
+aber nur einer der Digimodes (PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic, MeshCore, ADS-L **oder** ADS-B) kann
 gleichzeitig aktiv dekodieren, per eigenem Digimode-Kombo im
 Digimodes-Reiter umschaltbar.
 
@@ -493,6 +493,24 @@ Pluto+ und RTL-SDR (40 dB) je 8 von 8 Paketen korrekt an, auch über Web-TRX bis
 nur 20 dB am RTL-SDR gingen Pakete verloren. **Echter Flugverkehr ist noch nicht empfangen worden**, und der
 **HackRF ist nur synthetisch getestet**, nicht am echten Gerät. Details: `docs/adsl/SPEC.md`.
 
+**ADS-B (Luftfahrt, nur Empfang).** `pluto-advanced-rx`, `pluto-cli rx --digimode adsb` und [Web-TRX](web-trx/README.md)
+empfangen die Positionsmeldungen von Flugzeugen auf 1090 MHz (DF17/DF18). Der Modus stimmt selbst ab. Die Tabelle zeigt
+ICAO-Adresse, Rufzeichen, Position, Höhe in Fuß (meist barometrisch), Knoten, ft/min, Kurs und Notfall samt Squawk. In Web-TRX kommt die Live-Karte dazu. **Nicht zur Navigation oder Kollisionsvermeidung.** Das Projekt sendet auf
+1090 MHz grundsätzlich nicht, auch nicht zum Testen.
+
+```bash
+pluto-cli rx fm --device rtlsdr --digimode adsb --adsb-locator JO43 --json
+```
+
+Die **RX-Bandbreite** muss mindestens 2,4 MS/s betragen; das sind die Standardwerte von RTL-SDR (2,4) und Pluto+ (2,5), HackRF
+läuft mit 4 MS/s. Mehr Bandbreite verbessert hier den Empfang messbar, kostet aber CPU. Eine Position braucht zwei
+passende Nachrichten, ein Flugzeug kann also zunächst ohne Position erscheinen. Die Antenne sollte für 1090 MHz taugen und
+möglichst frei stehen.
+
+Prüfstand: am Pluto+ über Funk an echtem Verkehr geprüft, auch über Web-TRX bis zur Karte; die Positionen passen zum
+OGN-Netz, mit der Behelfsantenne kamen aber nur wenige, nahe Flugzeuge an. **Das RTL-SDR und der HackRF sind mit ADS-B noch
+nicht am echten Signal getestet.** Details und Messwerte: `docs/adsb/SPEC.md`.
+
 **Waterfall Writer.** Sendet eingegebenen Text so, dass er beim
 Empfänger direkt im Wasserfall/Spektrum als lesbares Bild erscheint —
 dieselbe Grundidee wie klassisches Hellschreiber. Zwei Layouts
@@ -564,7 +582,7 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **PlutoSDR / Pluto+** | alle Modi, volle Sicherheitsschicht (Dämpfung + LO-Powerdown, siehe unten) | alle Modi |
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
-| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 | alle Modi außer LoRa und ADS-L (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
+| **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 | alle Modi außer LoRa, ADS-L und ADS-B (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
 | **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8 (Audio + echtes serielles PTT) | — (kein RX-Backend) |
 | **ESP32-S3-Board** (nur 13 cm, experimentell) | nur FM und M17 (konstante Hüllkurve; Frequenz 2320–2450 MHz) | — (kein RX-Backend) |
 
@@ -609,7 +627,8 @@ pluto_tx/                 # Sende-App
 ├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
 ├── meshcore_codec.py / meshcore_identity.py  # MeshCore: Paketformat, Adverts (Ed25519), Gruppentext (AES-ECB+HMAC), Knotenidentität
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
-├── adsl_codec.py                # ADS-L: CRC-24, XXTEA, Traffic-Payload (nur Empfang, von der RX-App genutzt)
+├── adsl_codec.py                # ADS-L: XXTEA, Traffic-Payload (nur Empfang, von der RX-App genutzt)
+├── adsb_codec.py / mode_s_crc.py  # ADS-B: Nachrichten, CPR-Positionen (nur Empfang); CRC-24 für ADS-B und ADS-L
 ├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib
 ├── js8.py / js8_phy.py / js8_message.py / js8_source.py / js8_tables.py  # JS8: Wellenform + Slotplan, Rahmen (LDPC/CRC/Costas), Nachrichten (Varicode/JSC), Sequenzquelle, aus JS8Call extrahierte Tabellen
 ├── gui.py / app.py
@@ -619,6 +638,7 @@ pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── devices/                  # RX-Geräte-Abstraktionsschicht (Pluto/HackRF/RTL-SDR/Audio)
 ├── waterfall_widget.py         # eigenes pyqtgraph-Wasserfall-Widget
 ├── adsl_demod.py / adsl_deframer.py / adsl_state.py  # ADS-L: Burst-Demodulator (numpy), GNU-Radio-Hülle je Kanal, Luftfahrzeugliste
+├── adsb_demod.py / adsb_deframer.py / adsb_state.py  # ADS-B: Pulsdemodulator (numpy), GNU-Radio-Hülle, Flugzeugliste mit Positionslogik
 ├── ft8_decoder.py / ft8_rx.py   # FT8: Slot-Decoder (jt9 oder ft8_lib), UTC-Slot-Empfänger
 ├── js8_decoder.py / js8_rx.py / js8_assembly.py  # JS8: Slot-Decoder (js8ref oder eigener), Empfänger je Speed, Mehrrahmen-Zusammensetzung
 └── ...

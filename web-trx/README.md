@@ -238,6 +238,15 @@ einem NOTAUS bleibt der Sender aus. Unter `run/` liegen Log (`web-trx.log`), PID
 Frequenzen, Modi, Leistung, Audio-Aufbereitung, Wasserfall) und das
 Zertifikat.
 
+### ADS-B mit Live-Karte
+
+Der Modus **ADS-B** empfängt Flugzeuge auf 1090 MHz und zeigt sie wie ADS-L (unten) auf der Karte und in einer Tabelle,
+hier mit Rufzeichen, Höhe in Fuß, Knoten, ft/min und Squawk sowie Ringen von 50 bis 400 km. **Nur zur Beobachtung, nicht zur
+Navigation oder Kollisionsvermeidung.** Die Sperren sind dieselben: Abstimmung fest auf 1090 MHz, kein Ton, kein
+Senden. Er braucht mindestens 2,4 MS/s; ein zu niedriger gespeicherter Wert wird in diesem Modus durch den Standard ersetzt.
+Am RTL-SDR gilt dasselbe wie bei ADS-L: Eine unveränderte Verstärkung läuft hier mit 40 dB. Der Server fasst die
+Nachrichten zusammen und schickt dem Browser nur einmal pro Sekunde, was sich geändert hat. Details: [`docs/adsb/SPEC.md`](../docs/adsb/SPEC.md).
+
 ### ADS-L mit Live-Karte
 
 Der Modus **ADS-L** empfängt die Positionsmeldungen von Luftfahrzeugen auf 868,2 und 868,4 MHz und zeigt sie
