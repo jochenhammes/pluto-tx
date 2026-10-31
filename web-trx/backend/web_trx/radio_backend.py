@@ -289,9 +289,9 @@ class GnuRadioBackend(SessionBackend):
         self._tx_lock = asyncio.Lock()
         self._pocsag_rx_state = PocsagState()
         self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
-        self._freq_before_adsl: float | None = None  # the operator's frequency while ADS-L holds its fixed LO
-        self._adsl_gain_key: str | None = None  # a gain only ADS-L set (not the operator): not saved, undone on leaving
-        self._adsl_gain_default: float = 0.0
+        self._freq_before_fixed: float | None = None  # the operator's frequency while ADS-L/ADS-B hold the tuner
+        self._fixed_gain_key: str | None = None  # a gain only such a mode set (not the operator): not saved, undone on leaving
+        self._fixed_gain_default: float = 0.0
         self._squelch_open = True
         self._rtty_lock = threading.Lock()
         self._rtty_pending: list[str] = []
@@ -383,10 +383,10 @@ class GnuRadioBackend(SessionBackend):
         st = self._state(direction)
         if direction == "tx" and self.keyed:
             raise SessionError("tx: cannot retune while keyed")
-        if direction == "rx" and st.connection is not None and st.mode == "adsl":
-            raise SessionError("rx: ADS-L tunes itself, the frequency can't be changed in this mode")
-        if direction == "rx" and st.connection is None and self._freq_before_adsl is not None:
-            self._freq_before_adsl = freq_hz  # disconnected: for the next non-ADS-L mode
+        if direction == "rx" and st.connection is not None and rx_config.fixed_tune_frequency(st.mode) is not None:
+            raise SessionError(f"rx: {st.mode.upper()} tunes itself, the frequency can't be changed in this mode")
+        if direction == "rx" and st.connection is None and self._freq_before_fixed is not None:
+            self._freq_before_fixed = freq_hz  # disconnected: for the next non-ADS-L mode
             self._save_settings()
             return
         # Allowed while disconnected: kept and used by the next flowgraph build.
@@ -400,12 +400,12 @@ class GnuRadioBackend(SessionBackend):
         if direction == "tx" and name.startswith("stage:"):
             await self._set_tx_secondary_stage(name[6:], value)
             return
-        if direction == "rx" and name == "fft_zoom" and st.mode == "adsl":
+        if direction == "rx" and name == "fft_zoom" and rx_config.fixed_tune_frequency(st.mode) is not None:
             if st.tb is not None:  # only for now: the zoom saved for the other modes stays as it is
                 await asyncio.to_thread(_apply_rx_gain, st.tb, name, value)
             return
-        if direction == "rx" and name == self._adsl_gain_key:
-            self._adsl_gain_key = None  # the operator's own choice from here on
+        if direction == "rx" and name == self._fixed_gain_key:
+            self._fixed_gain_key = None  # the operator's own choice from here on
         if name == "freq_correction_ppm":
             value = float(value)
             if not PPM_RANGE[0] <= value <= PPM_RANGE[1]:
@@ -422,8 +422,8 @@ class GnuRadioBackend(SessionBackend):
                 # Pluto's TX timing (docs/FT8_PLAN.md section 7).
                 raise SessionError("rx: bandwidth can't change while an FT8 series is armed")
             value = int(value)
-            if st.mode == "adsl" and value < rx_config.ADSL_MIN_SAMPLE_RATE_HZ:
-                raise SessionError(f"ADS-L needs at least {rx_config.ADSL_MIN_SAMPLE_RATE_HZ / 1e6:g} MS/s")
+            if value < rx_config.fixed_tune_min_rate(st.mode):
+                raise SessionError(f"{st.mode.upper()} needs at least {rx_config.fixed_tune_min_rate(st.mode) / 1e6:g} MS/s")
             choices = rx_devices.DEVICE_REGISTRY[st.device_type].sample_rate_hz_choices if st.device_type else ()
             if value not in choices:
                 raise SessionError(f"sample_rate must be one of {list(choices)} for {st.device_type}")
@@ -507,11 +507,11 @@ class GnuRadioBackend(SessionBackend):
             return
         data = {
             direction: {
-                # While ADS-L has the receiver on its fixed LO, the operator's frequency is the one to keep.
-                "freq_hz": self._freq_before_adsl if st is self.rx and self._freq_before_adsl is not None else st.freq_hz,
+                # While such a mode holds the tuner, the operator's frequency is the one to keep.
+                "freq_hz": self._freq_before_fixed if st is self.rx and self._freq_before_fixed is not None else st.freq_hz,
                 "mode": st.mode, "mode_params": st.mode_params,
                 "device_type": st.device_type,
-                "gains": {k: v for k, v in st.gains.items() if not (st is self.rx and k == self._adsl_gain_key)},
+                "gains": {k: v for k, v in st.gains.items() if not (st is self.rx and k == self._fixed_gain_key)},
                 # restored on the next server start; "" is a valid connection
                 # (auto-detect, e.g. RTL-SDR/HackRF), hence the explicit flag
                 "connected": st.connection is not None, "connection": st.connection,
@@ -709,18 +709,19 @@ class GnuRadioBackend(SessionBackend):
             # mode change is a rebuild, exactly like the CLI's one-flowgraph-
             # per-invocation model.
             await self._teardown_rx()
-            await self._adsl_rx_gain(mode)
-            tuning_before = st.freq_hz, self._freq_before_adsl
-            if mode == "adsl":
-                if self._freq_before_adsl is None:
-                    self._freq_before_adsl = st.freq_hz
-                st.freq_hz = rx_config.ADSL_LO_HZ
-            elif self._freq_before_adsl is not None:
-                st.freq_hz, self._freq_before_adsl = self._freq_before_adsl, None
+            await self._fixed_tune_rx_gain(mode)
+            tuning_before = st.freq_hz, self._freq_before_fixed
+            fixed_hz = rx_config.fixed_tune_frequency(mode)
+            if fixed_hz is not None:
+                if self._freq_before_fixed is None:
+                    self._freq_before_fixed = st.freq_hz
+                st.freq_hz = fixed_hz
+            elif self._freq_before_fixed is not None:
+                st.freq_hz, self._freq_before_fixed = self._freq_before_fixed, None
             try:
                 st.tb = await asyncio.to_thread(self._build_rx, mode, params)
             except Exception as e:
-                st.freq_hz, self._freq_before_adsl = tuning_before
+                st.freq_hz, self._freq_before_fixed = tuning_before
                 raise SessionError(f"rx: could not start {st.device_type} ({st.connection}): {e}") from e
             st.mode = mode
             st.mode_params = dict(params)
@@ -728,22 +729,23 @@ class GnuRadioBackend(SessionBackend):
                 await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
             await self._emit_event("rx_fft_zoom", {"value": st.tb.fft_probe.zoom})
 
-    async def _adsl_rx_gain(self, mode: str) -> None:
-        """ADS-L on an RTL-SDR whose operator never chose a gain: a usable value instead of the 20 dB default, shown
-        in the browser like any other setting and undone when leaving the mode."""
+    async def _fixed_tune_rx_gain(self, mode: str) -> None:
+        """ADS-L/ADS-B on an RTL-SDR whose operator never chose a gain: a usable value instead of the 20 dB default,
+        shown in the browser like any other setting and undone when leaving the mode."""
         st = self.rx
         cls = rx_devices.DEVICE_REGISTRY[st.device_type]
         stage = next((g for g in cls.gain_stages if g.controls_agc), None)
-        if mode == "adsl" and st.device_type == "rtlsdr" and stage is not None and self._adsl_gain_key is None:
+        fixed_gain = rx_config.fixed_tune_rtl_gain(mode)
+        if fixed_gain is not None and st.device_type == "rtlsdr" and stage is not None and self._fixed_gain_key is None:
             key = f"stage:{stage.name}"
             if key not in st.gains and st.gains.get("gain_mode") != "agc":
-                st.gains[key] = rx_config.ADSL_RTL_TUNER_GAIN_DB
-                self._adsl_gain_key, self._adsl_gain_default = key, stage.default_value
+                st.gains[key] = fixed_gain
+                self._fixed_gain_key, self._fixed_gain_default = key, stage.default_value
                 await self._emit_event("rx_gain", {"name": stage.name, "value": st.gains[key]})
-        elif mode != "adsl" and self._adsl_gain_key is not None:
-            key, self._adsl_gain_key = self._adsl_gain_key, None
+        elif fixed_gain is None and self._fixed_gain_key is not None:
+            key, self._fixed_gain_key = self._fixed_gain_key, None
             st.gains.pop(key, None)
-            await self._emit_event("rx_gain", {"name": key.removeprefix("stage:"), "value": self._adsl_gain_default})
+            await self._emit_event("rx_gain", {"name": key.removeprefix("stage:"), "value": self._fixed_gain_default})
 
     def _build_rx(self, mode: str, params: dict):
         st = self.rx
@@ -792,23 +794,23 @@ class GnuRadioBackend(SessionBackend):
             tb.web_trx_level_probe = probe
             tb.set_fft_size(int(st.gains.get("fft_size", DEFAULT_FFT_SIZE)))
             for name in ("fft_zoom", "fft_avg"):
-                if name in st.gains and not (name == "fft_zoom" and mode == "adsl"):  # it picks its own view
+                if name in st.gains and not (name == "fft_zoom" and rx_config.fixed_tune_frequency(mode) is not None):  # its own view
                     _apply_rx_gain(tb, name, st.gains[name])
             tb.start()
-            tb.set_rx_muted(mode == "adsl" or not self._rx_local_audio)
+            tb.set_rx_muted(rx_config.fixed_tune_frequency(mode) is not None or not self._rx_local_audio)
         except Exception:
             tb.shutdown()
             raise
         return tb
 
     def _rx_sample_rate(self, mode: str | None = None) -> int | None:
-        """Saved choice if the current device supports it, else the device default. ADS-L also falls back to
+        """Saved choice if the current device supports it, else the device default. ADS-L and ADS-B also fall back to
         the default (always fast enough) from a too low saved choice, which stays saved for the other modes."""
         rate = self.rx.gains.get("sample_rate")
         choices = rx_devices.DEVICE_REGISTRY[self.rx.device_type].sample_rate_hz_choices
         if rate is None or int(rate) not in choices:
             return None
-        return None if mode == "adsl" and int(rate) < rx_config.ADSL_MIN_SAMPLE_RATE_HZ else int(rate)
+        return None if int(rate) < rx_config.fixed_tune_min_rate(mode) else int(rate)
 
     async def _teardown_rx(self) -> None:
         tb, self.rx.tb = self.rx.tb, None
@@ -866,7 +868,7 @@ class GnuRadioBackend(SessionBackend):
                 await self._emit_event("rx_level", {"level_db": round(level_db, 1), "squelch_open": self._squelch_open})
 
     def _deliver_audio(self, pcm16: bytes) -> None:
-        if not self._squelch_open or self.rx.mode == "adsl":
+        if not self._squelch_open or rx_config.fixed_tune_frequency(self.rx.mode) is not None:
             return  # the browser's player just runs dry (silence), no bandwidth used
         self._from_gr_thread(self._on_audio(AudioFrame(pcm16=pcm16, sample_rate_hz=AUDIO_RATE_HZ)))
 

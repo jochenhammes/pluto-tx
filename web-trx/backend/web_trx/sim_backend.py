@@ -39,6 +39,8 @@ RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "
 # ADS-L receive: invented aircraft around the station, one packet per second each, in the event fields a real
 # packet has. Deliberately no encoder here: nothing in the application can produce an ADS-L frame.
 ADSL_LO_HZ = 868_850_000
+ADSB_FREQ_HZ = 1_090_000_000
+FIXED_TUNE_HZ = {"adsl": ADSL_LO_HZ, "adsb": ADSB_FREQ_HZ}
 ADSL_CHANNELS_HZ = (868_200_000, 868_400_000)
 ADSL_DEFAULT_CENTER = (53.5, 9.0)
 ADSL_SIM_PERIOD_S = 1.0
@@ -111,7 +113,7 @@ class SimBackend(SessionBackend):
         self._adsl_state = _adsl_state_module().AdslState()
         self._adsl_counts = {hz: 0 for hz in ADSL_CHANNELS_HZ}
         self._adsl_tick = 0
-        self._freq_before_adsl: float | None = None
+        self._freq_before_fixed: float | None = None
         self._js8_task: asyncio.Task | None = None
         self._js8_series: js8_series.Js8Series | None = None
         self._js8_sent: list[tuple[float, int, str, int]] = []   # (period start, submode, frame, flags)
@@ -175,12 +177,12 @@ class SimBackend(SessionBackend):
             await self._cancel_js8("mode_change")  # like GnuRadioBackend: a mode change ends a JS8 message
         if direction == "rx":
             before = st.freq_hz
-            if mode == "adsl":
-                if self._freq_before_adsl is None:
-                    self._freq_before_adsl = st.freq_hz
-                st.freq_hz = ADSL_LO_HZ
-            elif self._freq_before_adsl is not None:
-                st.freq_hz, self._freq_before_adsl = self._freq_before_adsl, None
+            if mode in FIXED_TUNE_HZ:
+                if self._freq_before_fixed is None:
+                    self._freq_before_fixed = st.freq_hz
+                st.freq_hz = FIXED_TUNE_HZ[mode]
+            elif self._freq_before_fixed is not None:
+                st.freq_hz, self._freq_before_fixed = self._freq_before_fixed, None
             if st.freq_hz != before:
                 await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
         st.mode = mode
@@ -189,10 +191,10 @@ class SimBackend(SessionBackend):
     async def tune(self, direction: str, freq_hz: float) -> None:
         # Allowed while disconnected too: the frequency is kept and used on
         # the next connect (same as GnuRadioBackend).
-        if direction == "rx" and self.rx.connection is not None and self.rx.mode == "adsl":
-            raise SessionError("rx: ADS-L tunes itself, the frequency can't be changed in this mode")
-        if direction == "rx" and self.rx.connection is None and self._freq_before_adsl is not None:
-            self._freq_before_adsl = freq_hz  # disconnected: for the next non-ADS-L mode
+        if direction == "rx" and self.rx.connection is not None and self.rx.mode in FIXED_TUNE_HZ:
+            raise SessionError(f"rx: {self.rx.mode.upper()} tunes itself, the frequency can't be changed in this mode")
+        if direction == "rx" and self.rx.connection is None and self._freq_before_fixed is not None:
+            self._freq_before_fixed = freq_hz  # disconnected: for the next non-ADS-L mode
             return
         self._state(direction).freq_hz = freq_hz
 
@@ -639,7 +641,7 @@ class SimBackend(SessionBackend):
         n = int(AUDIO_SAMPLE_RATE_HZ * AUDIO_CHUNK_S)
         while True:
             await asyncio.sleep(AUDIO_CHUNK_S)
-            if self.rx.connection is None or self.rx.mode in (None, "adsl"):
+            if self.rx.connection is None or self.rx.mode is None or self.rx.mode in FIXED_TUNE_HZ:
                 continue
             freq_hz = AUDIO_TONE_HZ.get(self.rx.mode, 500.0)
             t = (np.arange(n) + self._audio_phase) / AUDIO_SAMPLE_RATE_HZ

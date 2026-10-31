@@ -502,10 +502,29 @@ JS8_DECODER_BACKEND = "auto"
 # Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)
 JS8_DEFAULT_SUBMODES = (0,)
 
+# --- Modes that hold the tuner themselves (ADS-L, ADS-B): their frequency, the lowest usable sample rate, a usable gain for
+# an RTL-SDR whose operator left it at its 20 dB default, and the waterfall zoom. Data only: they never play audio.
+def fixed_tune_frequency(mode):
+    return {"adsl": ADSL_LO_HZ, "adsb": ADSB_FREQ_HZ}.get(mode)
+
+
+def fixed_tune_min_rate(mode):
+    return {"adsl": ADSL_MIN_SAMPLE_RATE_HZ, "adsb": ADSB_MIN_SAMPLE_RATE_HZ}.get(mode, 0)
+
+
+def fixed_tune_rtl_gain(mode):
+    return {"adsl": ADSL_RTL_TUNER_GAIN_DB, "adsb": ADSB_RTL_TUNER_GAIN_DB}.get(mode)
+
+
+def fixed_tune_view_zoom(mode, sample_rate_hz):
+    return adsl_view_zoom(sample_rate_hz) if mode == "adsl" else 1
+
+
 # --- ADS-B RX (1090 MHz, docs/adsb/SPEC.md). Exactly on the channel: the signal needs the whole sampled bandwidth, a DC
 # blocker takes care of the spike HackRF and RTL-SDR leave there.
 ADSB_FREQ_HZ = 1_090_000_000
 ADSB_RTL_TUNER_GAIN_DB = 40.0
+ADSB_MIN_SAMPLE_RATE_HZ = 2_400_000
 ADSB_DC_BLOCKER_SAMPLES = 1024
 
 # --- ADS-L RX (EASA ADS-L 4 SRD860, M-band, docs/adsl/SPEC.md). One LO for both channels, placed so that neither lands

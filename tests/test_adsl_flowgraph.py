@@ -372,11 +372,11 @@ class GuiTests(unittest.TestCase):
         w = gui.MainWindow("x")
         w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("rtlsdr"))
         self.assertEqual(w.gain_slider.value(), 20)
-        w._apply_adsl_gain("adsl")
+        w._apply_fixed_tune_gain("adsl")
         self.assertEqual(w.gain_slider.value(), int(config.ADSL_RTL_TUNER_GAIN_DB))
         self.assertEqual(w.gain_label.text(), "40 dB")
         self.assertEqual(w._current_gain_kwargs(gui.devices.DEVICE_REGISTRY["rtlsdr"])["manual_gain_db"], 40.0)
-        w._apply_adsl_gain(None)
+        w._apply_fixed_tune_gain(None)
         self.assertEqual(w.gain_slider.value(), 20)
 
     def test_a_gain_the_operator_chose_stays(self):
@@ -384,21 +384,21 @@ class GuiTests(unittest.TestCase):
         w = gui.MainWindow("x")
         w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("rtlsdr"))
         w.gain_slider.setValue(33)
-        w._apply_adsl_gain("adsl")
+        w._apply_fixed_tune_gain("adsl")
         self.assertEqual(w.gain_slider.value(), 33)
-        w._apply_adsl_gain(None)
+        w._apply_fixed_tune_gain(None)
         self.assertEqual(w.gain_slider.value(), 33)
         w.gain_slider.setValue(20)
-        w._apply_adsl_gain("adsl")
+        w._apply_fixed_tune_gain("adsl")
         w.gain_slider.setValue(38)  # changed while in the mode: no longer ours to undo
-        w._apply_adsl_gain(None)
+        w._apply_fixed_tune_gain(None)
         self.assertEqual(w.gain_slider.value(), 38)
 
     def test_other_devices_keep_their_gain(self):
         from pluto_advanced_rx import gui
         w = gui.MainWindow("x")
         before = w.gain_slider.value()
-        w._apply_adsl_gain("adsl")
+        w._apply_fixed_tune_gain("adsl")
         self.assertEqual(w.gain_slider.value(), before)
 
     def test_soundcard_cannot_select_adsl(self):

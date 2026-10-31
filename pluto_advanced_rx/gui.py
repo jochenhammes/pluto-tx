@@ -145,8 +145,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # toggle). Starts None: the Digimodes tab isn't the default
         # active tab, so nothing should be decoding yet at startup.
         self._active_digimode = None
-        self._adsl_gain_undo = None
-        self._zoom_before_adsl = None
+        self._fixed_gain_undo = None
+        self._zoom_before_fixed = None
 
         # M17 RX status -- same "constructed ONCE, survives every flowgraph
         # rebuild" reasoning as _psk31_state above. Just the most recent
@@ -2740,15 +2740,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_gain_mode(mode)
         self.gain_slider.setEnabled(mode == "manual")
 
-    def _apply_adsl_view(self, digimode):
-        """The waterfall on the two channels while in ADS-L (the flowgraph centres its rows there); the operator's
-        zoom comes back when leaving the mode."""
-        if digimode == "adsl" and self._zoom_before_adsl is None:
-            self._zoom_before_adsl = self.zoom_slider.value()
-            self._set_zoom_slider_quietly(config.adsl_view_zoom(self.bandwidth_combo.currentData()))
-        elif digimode != "adsl" and self._zoom_before_adsl is not None:
-            self._set_zoom_slider_quietly(self._zoom_before_adsl)
-            self._zoom_before_adsl = None
+    def _apply_fixed_tune_view(self, digimode):
+        """The waterfall on what such a mode receives (the flowgraph centres its rows there); the operator's zoom comes
+        back when leaving the mode."""
+        fixed = config.fixed_tune_frequency(digimode) is not None
+        if fixed:
+            if self._zoom_before_fixed is None:
+                self._zoom_before_fixed = self.zoom_slider.value()
+            self._set_zoom_slider_quietly(config.fixed_tune_view_zoom(digimode, self.bandwidth_combo.currentData()))
+        elif self._zoom_before_fixed is not None:
+            self._set_zoom_slider_quietly(self._zoom_before_fixed)
+            self._zoom_before_fixed = None
         self.waterfall.clear()  # rows of the old view would be the wrong frequencies
 
     def _set_zoom_slider_quietly(self, value):
@@ -2759,19 +2761,20 @@ class MainWindow(QtWidgets.QMainWindow):
         span = self.bandwidth_combo.currentData() / value
         self.zoom_label.setText(f"{value}x (full span)" if value == 1 else f"{value}x ({self._format_hz(span)})")
 
-    def _apply_adsl_gain(self, digimode):
-        """ADS-L on an RTL-SDR left at its 20 dB default: a usable value instead, visible on the slider and undone
-        when leaving the mode. A gain the operator chose stays untouched."""
+    def _apply_fixed_tune_gain(self, digimode):
+        """ADS-L/ADS-B on an RTL-SDR left at its 20 dB default: a usable value instead, visible on the slider and
+        undone when leaving the mode. A gain the operator chose stays untouched."""
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         stage = next((g for g in device_cls.gain_stages if g.controls_agc), None)
-        if digimode == "adsl" and device_cls.device_type == "rtlsdr" and stage is not None:
+        fixed_gain = config.fixed_tune_rtl_gain(digimode)
+        if fixed_gain is not None and device_cls.device_type == "rtlsdr" and stage is not None:
             default = int(round(stage.default_value))
             if self.gain_slider.value() == default and self.gain_mode_combo.currentData() == "manual":
-                self._set_gain_slider_quietly(int(config.ADSL_RTL_TUNER_GAIN_DB))
-                self._adsl_gain_undo = default
-        elif digimode != "adsl" and self._adsl_gain_undo is not None:
-            self._set_gain_slider_quietly(self._adsl_gain_undo)
-            self._adsl_gain_undo = None
+                self._set_gain_slider_quietly(int(fixed_gain))
+                self._fixed_gain_undo = default
+        elif fixed_gain is None and self._fixed_gain_undo is not None:
+            self._set_gain_slider_quietly(self._fixed_gain_undo)
+            self._fixed_gain_undo = None
 
     def _set_gain_slider_quietly(self, value):
         self.gain_slider.blockSignals(True)  # the flowgraph being built right now takes the value from the slider
@@ -2780,7 +2783,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gain_label.setText(f"{value} dB")
 
     def _on_gain_changed(self, value):
-        self._adsl_gain_undo = None  # the operator's own choice from here on
+        self._fixed_gain_undo = None  # the operator's own choice from here on
         if self.tb is not None:
             self.tb.set_manual_gain(float(value))
         self.gain_label.setText(f"{value} dB")
@@ -3081,7 +3084,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_waterfall_clicked(self, freq_hz):
         if self.tb is None:
             return
-        if self.tb.active_digimode == "adsl":  # the mode holds its own tuning: a click would lose the channels
+        if config.fixed_tune_frequency(self.tb.active_digimode) is not None:  # a click would lose what the mode receives
             return
         # Route through the spin box rather than calling tb.set_frequency()
         # directly, so a click reuses the exact same retune/marker-update
@@ -3230,17 +3233,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._autotune_cancel()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
-        self._apply_adsl_gain(new_digimode)
-        self._apply_adsl_view(new_digimode)
+        self._apply_fixed_tune_gain(new_digimode)
+        self._apply_fixed_tune_view(new_digimode)
         freq = self.tb.nominal_freq_hz
         # Meshtastic presets retune the receiver to the preset's carrier, ADS-L to
         # its fixed LO; the previous frequency comes back when leaving the mode again.
-        fixed_freq_digimodes = ("meshtastic", "meshcore", "adsl")
+        fixed_freq_digimodes = ("meshtastic", "meshcore", "adsl", "adsb")
         if new_digimode in fixed_freq_digimodes:
             if self.tb.active_digimode not in fixed_freq_digimodes:
                 self._freq_before_lora = freq
-            if new_digimode == "adsl":
-                freq = config.ADSL_LO_HZ
+            if config.fixed_tune_frequency(new_digimode) is not None:
+                freq = config.fixed_tune_frequency(new_digimode)
             else:
                 freq = (self._meshtastic_preset() if new_digimode == "meshtastic" else self._meshcore_preset()).frequency_hz
         elif self.tb.active_digimode in fixed_freq_digimodes and self._freq_before_lora is not None:
@@ -3269,8 +3272,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.status_label.setText(f"Could not switch digimode: {e}")
             self._active_digimode = old_digimode
-            self._apply_adsl_gain(old_digimode)
-            self._apply_adsl_view(old_digimode)
+            self._apply_fixed_tune_gain(old_digimode)
+            self._apply_fixed_tune_view(old_digimode)
             return
 
         new_tb.set_fine_offset(fine)
@@ -3475,12 +3478,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # from whatever device was previously selected, so don't trust it
         # for a device with no frequency concept at all.
         frequency_hz = 0.0 if device_cls.frequency_range_hz == (0.0, 0.0) else self.freq_spin.value() * 1e6
-        if self._active_digimode == "adsl":  # connecting with ADS-L already selected: same LO as entering the mode
-            self._apply_adsl_gain("adsl")
-            self._apply_adsl_view("adsl")
-            if abs(frequency_hz - config.ADSL_LO_HZ) > 1:
+        fixed_hz = config.fixed_tune_frequency(self._active_digimode)
+        if fixed_hz is not None:  # connecting with such a mode already selected: same tuning as entering it
+            self._apply_fixed_tune_gain(self._active_digimode)
+            self._apply_fixed_tune_view(self._active_digimode)
+            if abs(frequency_hz - fixed_hz) > 1:
                 self._freq_before_lora = frequency_hz
-            frequency_hz = config.ADSL_LO_HZ
+            frequency_hz = fixed_hz
             self.freq_spin.blockSignals(True)
             self.freq_spin.setValue(frequency_hz / 1e6)
             self.freq_spin.blockSignals(False)

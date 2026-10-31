@@ -20,7 +20,6 @@ from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
-from pluto_advanced_rx.adsb_demod import MIN_SAMPLE_RATE_HZ as ADSB_MIN_SAMPLE_RATE_HZ
 from pluto_advanced_rx.adsb_state import AdsbState
 from pluto_tx import adsb_codec, adsl_codec
 from pluto_advanced_rx.meshcore_state import MeshcoreState
@@ -348,8 +347,8 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         return 1
     if args.digimode == "adsb":
         rate = args.bandwidth or selected_device.default_sample_rate_hz
-        if rate < ADSB_MIN_SAMPLE_RATE_HZ:
-            emitter.error(f"--digimode adsb needs at least {ADSB_MIN_SAMPLE_RATE_HZ} Hz of --bandwidth, got {rate}")
+        if rate < rx_config.ADSB_MIN_SAMPLE_RATE_HZ:
+            emitter.error(f"--digimode adsb needs at least {rx_config.ADSB_MIN_SAMPLE_RATE_HZ} Hz of --bandwidth, got {rate}")
             return 1
         if selected_device.frequency_range_hz == (0.0, 0.0):
             emitter.error(f"--digimode adsb needs an RF device, not --device {args.device}")

@@ -12,7 +12,6 @@ import numpy as np
 from pluto_tx import adsb_codec
 from pluto_tx.mode_s_crc import crc24
 
-MIN_SAMPLE_RATE_HZ = 2_400_000
 MESSAGE_BITS = 112
 _PREAMBLE_US = 8.0
 _FRAME_US = _PREAMBLE_US + MESSAGE_BITS
@@ -166,5 +165,6 @@ class AdsbFrameDetector:
         self.messages_ok += 1
         info["snr_db"] = round(20 * np.log10(max(pulse_level / noise, 1e-3)), 1)
         info["corrected"] = corrected
+        info["raw"] = message.hex().upper()
         self._on_message(info)
         return True

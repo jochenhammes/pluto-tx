@@ -44,7 +44,6 @@ from .meshtastic_deframer import MeshtasticDeframer
 from .pocsag_deframer import PocsagDeframer
 from .adsl_deframer import AdslDeframer
 from .adsb_deframer import AdsbDeframer
-from . import adsb_demod
 from . import adsl_demod
 from pluto_tx.lora_airtime import cr_index as _lora_cr_index
 
@@ -889,9 +888,9 @@ class AdvancedRxFlowgraph(gr.top_block):
         if active_digimode == "adsb":
             if self.device.is_audio_only():
                 raise ValueError("ADS-B needs an RF device, not a soundcard")
-            if self.sample_rate < adsb_demod.MIN_SAMPLE_RATE_HZ:
+            if self.sample_rate < config.ADSB_MIN_SAMPLE_RATE_HZ:
                 raise ValueError(f"RX bandwidth {self.sample_rate / 1e6:g} MS/s is too low for ADS-B -- "
-                                 f"pick at least {adsb_demod.MIN_SAMPLE_RATE_HZ / 1e6:g} MS/s")
+                                 f"pick at least {config.ADSB_MIN_SAMPLE_RATE_HZ / 1e6:g} MS/s")
             self.adsb_dc_blocker = filter.dc_blocker_cc(config.ADSB_DC_BLOCKER_SAMPLES, True)
             self.adsb_magnitude = blocks.complex_to_mag()
             self.adsb_deframer = AdsbDeframer(on_adsb_message or (lambda info: None), self.sample_rate)
