@@ -502,6 +502,12 @@ JS8_DECODER_BACKEND = "auto"
 # Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)
 JS8_DEFAULT_SUBMODES = (0,)
 
+# --- ADS-B RX (1090 MHz, docs/adsb/SPEC.md). Exactly on the channel: the signal needs the whole sampled bandwidth, a DC
+# blocker takes care of the spike HackRF and RTL-SDR leave there.
+ADSB_FREQ_HZ = 1_090_000_000
+ADSB_RTL_TUNER_GAIN_DB = 40.0
+ADSB_DC_BLOCKER_SAMPLES = 1024
+
 # --- ADS-L RX (EASA ADS-L 4 SRD860, M-band, docs/adsl/SPEC.md). One LO for both channels, placed so that neither lands
 # on the DC spike HackRF and RTL-SDR do not correct, and the O-band channel (869.525 MHz) still fits later.
 ADSL_LO_HZ = 868_850_000

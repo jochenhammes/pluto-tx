@@ -172,6 +172,20 @@ def cpr_local(cpr_lat: int, cpr_lon: int, odd: bool, reference: tuple[float, flo
     return lat, d_lon * (m + x)
 
 
+def locator_center(locator: str) -> tuple[float, float] | None:
+    """Middle of a Maidenhead locator (4 or 6 characters) as (lat, lon), north and east positive; None if not valid."""
+    loc = (locator or "").strip().upper()
+    if len(loc) not in (4, 6) or not ("A" <= loc[0] <= "R" and "A" <= loc[1] <= "R" and loc[2:4].isdigit()):
+        return None
+    lon = (ord(loc[0]) - 65) * 20 + int(loc[2]) * 2 - 180
+    lat = (ord(loc[1]) - 65) * 10 + int(loc[3]) - 90
+    if len(loc) == 6:
+        if not ("A" <= loc[4] <= "X" and "A" <= loc[5] <= "X"):
+            return None
+        return lat + (ord(loc[5]) - 65 + 0.5) / 24, lon + (ord(loc[4]) - 65 + 0.5) / 12
+    return lat + 0.5, lon + 1.0
+
+
 def distance_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     lat1, lat2 = math.radians(a[0]), math.radians(b[0])
     h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(math.radians(b[1] - a[1]) / 2) ** 2

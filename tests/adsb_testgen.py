@@ -47,15 +47,16 @@ def velocity_message(icao, east_kt, north_kt, vrate_fpm=0):
     return encode_message(icao, 19, 1 << 48 | v(east_kt) << 32 | v(north_kt) << 21 | vr << 10)
 
 
-def ppm_power(message: bytes, rate: float, pad_us=2.0) -> np.ndarray:
+def ppm_power(message: bytes, rate: float, pad_us=2.0, delay_us=0.0) -> np.ndarray:
     """Amplitude (0..1) of the on-air pulse train at `rate`: a 0.5 us pulse at 0, 1, 3.5, 4.5 us, then per bit
-    a pulse in the first (1) or second (0) half of its microsecond, starting at 8 us."""
+    a pulse in the first (1) or second (0) half of its microsecond, starting at 8 us. delay_us moves it against
+    the sample clock: a real message never starts exactly on a sample."""
     starts = [0.0, 1.0, 3.5, 4.5]
     for i in range(len(message) * 8):
         bit = (message[i // 8] >> (7 - i % 8)) & 1
         starts.append(8.0 + i + (0.0 if bit else 0.5))
     total = int((8 + len(message) * 8 + 2 * pad_us) * rate / 1e6) + 2
-    edges = (np.arange(total + 1)) / (rate / 1e6) - pad_us
+    edges = (np.arange(total + 1)) / (rate / 1e6) - pad_us - delay_us
     level = np.zeros(total)
     for start in starts:  # share of each sample covered by the pulse
         overlap = np.minimum(edges[1:], start + 0.5) - np.maximum(edges[:-1], start)
@@ -63,6 +64,6 @@ def ppm_power(message: bytes, rate: float, pad_us=2.0) -> np.ndarray:
     return np.minimum(level, 1.0)
 
 
-def iq(message, rate, phase_rad=0.0, freq_offset_hz=0.0, amplitude=1.0):
-    a = ppm_power(message, rate) * amplitude
+def iq(message, rate, phase_rad=0.0, freq_offset_hz=0.0, amplitude=1.0, delay_us=0.0):
+    a = ppm_power(message, rate, delay_us=delay_us) * amplitude
     return a * np.exp(1j * (phase_rad + 2 * np.pi * freq_offset_hz * np.arange(len(a)) / rate))

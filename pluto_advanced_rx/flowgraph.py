@@ -43,6 +43,8 @@ from .rtty_deframer import RTTYBaudotDeframer
 from .meshtastic_deframer import MeshtasticDeframer
 from .pocsag_deframer import PocsagDeframer
 from .adsl_deframer import AdslDeframer
+from .adsb_deframer import AdsbDeframer
+from . import adsb_demod
 from . import adsl_demod
 from pluto_tx.lora_airtime import cr_index as _lora_cr_index
 
@@ -113,7 +115,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_meshcore_packet=None, meshcore_preset_index=0, on_ft8_decodes=None,
                  ft8_backend=config.FT8_DECODER_BACKEND, ft8_my_call="", ft8_my_grid="",
                  on_js8_decodes=None, js8_submodes=config.JS8_DEFAULT_SUBMODES,
-                 js8_backend=config.JS8_DECODER_BACKEND, on_adsl_packet=None):
+                 js8_backend=config.JS8_DECODER_BACKEND, on_adsl_packet=None, on_adsb_message=None):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -224,7 +226,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         # branch point wide enough for this mode.
         self.filebroadcast_deframer = None  # stays None for audio-only devices -- see gui.py's own None-check
         # Also off for ADS-L, the one mode that may well run for hours on a small machine: saves 20-30 % of a core (measured).
-        if not self.device.is_audio_only() and active_digimode != "adsl":
+        if not self.device.is_audio_only() and active_digimode not in ("adsl", "adsb"):
             g_fb = math.gcd(int(self.sample_rate), int(config.FILEBROADCAST_WORKING_RATE_HZ))
             fb_interp = int(config.FILEBROADCAST_WORKING_RATE_HZ) // g_fb
             fb_decim = int(self.sample_rate) // g_fb
@@ -882,7 +884,22 @@ class AdvancedRxFlowgraph(gr.top_block):
                 self.connect(demod, deframer)
                 self.adsl_channels.append((channel_hz, xlate, demod, deframer))
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl"):
+        # --- ADS-B RX: 1090 MHz, the magnitude of the whole sampled bandwidth into a burst demodulator.
+        self.adsb_deframer = None
+        if active_digimode == "adsb":
+            if self.device.is_audio_only():
+                raise ValueError("ADS-B needs an RF device, not a soundcard")
+            if self.sample_rate < adsb_demod.MIN_SAMPLE_RATE_HZ:
+                raise ValueError(f"RX bandwidth {self.sample_rate / 1e6:g} MS/s is too low for ADS-B -- "
+                                 f"pick at least {adsb_demod.MIN_SAMPLE_RATE_HZ / 1e6:g} MS/s")
+            self.adsb_dc_blocker = filter.dc_blocker_cc(config.ADSB_DC_BLOCKER_SAMPLES, True)
+            self.adsb_magnitude = blocks.complex_to_mag()
+            self.adsb_deframer = AdsbDeframer(on_adsb_message or (lambda info: None), self.sample_rate)
+            self.connect(self.pluto_source, self.adsb_dc_blocker)
+            self.connect(self.adsb_dc_blocker, self.adsb_magnitude)
+            self.connect(self.adsb_magnitude, self.adsb_deframer)
+
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the

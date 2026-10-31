@@ -57,5 +57,5 @@ jobs:
       - run: pip install PyQt5 numpy
       - run: python -m unittest -v tests.test_webtrx_control tests.test_webtrx_widget
       - run: python -m unittest -v tests.test_js8_tables tests.test_js8_phy tests.test_js8_message tests.test_js8_codec_roundtrip
-      - run: python -m unittest -v tests.test_adsl_pure tests.test_adsl_demod
+      - run: python -m unittest -v tests.test_adsl_pure tests.test_adsl_demod tests.test_adsb_pure tests.test_adsb_demod
       - run: shellcheck web-trx/scripts/*.sh install-web-trx.sh install-js8.sh
