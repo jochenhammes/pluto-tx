@@ -238,6 +238,28 @@ einem NOTAUS bleibt der Sender aus. Unter `run/` liegen Log (`web-trx.log`), PID
 Frequenzen, Modi, Leistung, Audio-Aufbereitung, Wasserfall) und das
 Zertifikat.
 
+### ADS-L mit Live-Karte
+
+Der Modus **ADS-L** empfängt die Positionsmeldungen von Luftfahrzeugen auf 868,2 und 868,4 MHz und zeigt sie
+im Reiter „Empfang“ auf einer Karte und in einer Tabelle. **Nur zur Beobachtung, nicht zur Navigation oder
+Kollisionsvermeidung.** Protokoll und Messwerte: [`docs/adsl/SPEC.md`](../docs/adsl/SPEC.md).
+
+- **Einstellung:** Der Modus stimmt den Empfänger selbst auf 868,85 MHz ab und braucht mindestens 1,8 MS/s; die
+  Frequenz ist so lange gesperrt, beim Verlassen kommt die vorige zurück. Ton gibt es hier nicht. Ein RTL-SDR
+  mit unveränderter Verstärkung läuft in diesem Modus mit 40 dB statt 20 dB.
+- **Karte:** eigene Station und Ringe von 25, 50 und 100 km aus dem Stations-Locator (Locator oben eintragen);
+  Pfeil nach Kurs, Spur der letzten Positionen, Notfall rot. Nach 60 s ohne Position wird ein Marker blass, nach
+  5 Minuten verschwindet er; in der Tabelle bleibt der Eintrag. Die Höhe gilt über dem WGS-84-Ellipsoid,
+  nicht über Meer oder Grund. Luftfahrzeuge ohne Position stehen nur in der Tabelle.
+- **Datenfluss:** Die Kartenkacheln lädt der Browser direkt von OpenStreetMap; OSM sieht also die IP des Browsers
+  und den Kartenausschnitt. Ohne Internet oder mit `WEB_TRX_MAP_TILE_URL=none` bleiben Marker, Ringe und
+  Tabelle voll nutzbar. Die Liste liegt nur im Speicher des Servers, übersteht ein Neuladen der Seite, aber keinen
+  Server-Neustart, und wird nirgends gespeichert.
+- **Dauerbetrieb:** Ohne offenen Browser trennt der Server den Empfänger wie in jedem Modus nach
+  `WEB_TRX_NO_OPERATOR_S`.
+- **Stand:** über Funk mit eigenen Testpaketen bis zur Karte geprüft (RTL-SDR, 8 von 8). Echter Flugverkehr ist noch
+  nicht empfangen worden, und HackRF ist nur synthetisch getestet.
+
 ### Headless-Betrieb (Autostart als systemd-Dienst, optional)
 
 ```bash
@@ -281,6 +303,7 @@ Per Umgebungsvariable oder als `KEY=value`-Zeile in `web-trx.env`:
 | `WEB_TRX_PASSWORD` | beim ersten Start erzeugt und in `web-trx.env` gespeichert | Login-Passwort (ein Betreiber, ein geteiltes Passwort) |
 | `WEB_TRX_STATION_CALL` / `WEB_TRX_STATION_LOCATOR` | leer | Startwert der Stationsdaten, solange noch keine gespeichert sind |
 | `WEB_TRX_NO_OPERATOR_S` | `10` | Sekunden ohne Browser, bis Empfänger und Sender getrennt werden (Aussendungen enden sofort) |
+| `WEB_TRX_MAP_TILE_URL` | leer = OpenStreetMap | Kartenbild der ADS-L-Karte: eigene Kachel-URL (`https://…/{z}/{x}/{y}.png`) oder `none` für gar keins |
 | `WEB_TRX_SESSIONS_PATH` | `run/sessions.json` | Anmeldungen überleben Server-Neustarts (nur Token-Hashes) |
 | `WEB_TRX_HOST` / `WEB_TRX_PORT` | `0.0.0.0` / `8321` | Listen-Adresse |
 | `WEB_TRX_TLS` | `true` | `false` = plain HTTP (Mikrofon dann nur auf `localhost`) |
@@ -361,7 +384,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 - FT8-Senden im Funkbetrieb testen (F3/F4 in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
 - JS8 mit echten Gegenstationen auf KW (2 m über Luft ist getestet, J7).
-- Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, ADS-L, File Broadcast, …).
+- Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
 
 ## Struktur
 

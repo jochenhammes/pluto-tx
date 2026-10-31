@@ -472,9 +472,9 @@ Frequenzablage; darunter steht das Paket-Log. Angezeigt wird nur, was die CRC be
 wird nichts. O-Band (LDR/HDR), FEC-Rahmen, Status- und Uplink-Inhalte sowie FLARM werden nicht
 dekodiert. Solange ADS-L aktiv ist, ist der File-Broadcast-Empfang abgeschaltet.
 
-**Empfangstipps:** Das Signal braucht rund 10 dB über dem Rauschen im 200-kHz-Kanal. Beim RTL-SDR die
-Standard-AGC oder eine feste Verstärkung ab etwa 40 dB nutzen; am Pluto über das Netzwerk für
-Dauerbetrieb den RX-Puffer 262144 wählen. In `pluto-cli` bleibt der Ton bei ADS-L stumm, in der App
+**Empfangstipps:** Das Signal braucht rund 10 dB über dem Rauschen im 200-kHz-Kanal. Beim RTL-SDR stellt
+der Modus eine unveränderte Verstärkung selbst auf 40 dB und beim Verlassen zurück; die allgemeine Vorgabe
+von 20 dB ist hierfür zu wenig. Am Pluto über das Netzwerk für Dauerbetrieb den RX-Puffer 262144 wählen. In `pluto-cli` bleibt der Ton bei ADS-L stumm, in der App
 ist er wie immer aus, bis du den Empfang einschaltest. Ob gerade jemand in der Nähe sendet, zeigt das
 [OGN-Netz](https://www.glidernet.org) (Protokollkennung `OGADSL`); im Test war ADS-L deutlich seltener
 als FLARM.
@@ -482,10 +482,11 @@ als FLARM.
 **Nur zur Beobachtung, nicht zur Navigation oder Kollisionsvermeidung:** Ein Empfänger hört nur
 einen Teil des Verkehrs. Das Projekt enthält bewusst keinen ADS-L-Sender.
 
-Prüfstand: über Funk mit Testpaketen vom Pluto+ (−40 dB, Position bei 0°N 0°E, kurze Distanz)
-kamen auf Pluto+ und RTL-SDR je 8 von 8 Paketen korrekt an. Nur mit zu geringer fester
-RTL-Verstärkung (20 dB) gingen Pakete verloren; die AGC-Vorgabe oder 40 dB funktionieren. **Echter
-Flugverkehr ist noch nicht empfangen worden** (im Testzeitraum war in Reichweite keiner), und der
+Auch in [Web-TRX](web-trx/README.md) verfügbar, dort zusätzlich mit Live-Karte.
+
+Prüfstand: über Funk mit Testpaketen vom Pluto+ (−40 dB, Position bei 0°N 0°E, kurze Distanz) kamen auf
+Pluto+ und RTL-SDR (40 dB) je 8 von 8 Paketen korrekt an, auch über Web-TRX bis zur Karte im Browser. Mit
+nur 20 dB am RTL-SDR gingen Pakete verloren. **Echter Flugverkehr ist noch nicht empfangen worden**, und der
 **HackRF ist nur synthetisch getestet**, nicht am echten Gerät. Details: `docs/adsl/SPEC.md`.
 
 **Waterfall Writer.** Sendet eingegebenen Text so, dass er beim

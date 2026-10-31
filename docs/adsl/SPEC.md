@@ -67,22 +67,28 @@ Ein Traffic-Rahmen hat die Länge `0x18` (1 + 20 + 3 Byte), auf der Luft 432 Chi
 | Rauschen, 40 s | 0 Kandidaten, 0 falsche Pakete |
 | CPU | rund 2 % eines Kerns je Kanal, unter Dauerlast 3,5 % (nur Detektor, ohne Filter) |
 | Starkes Signal 200 kHz daneben | +20 dB: 95 %; +40 dB: 22 %, weil dann überlappende Pakete verloren gehen |
-| Falscher Kanal bis 60 dB | keine Fehlzuordnung |
+| Falscher Kanal bis 60 dB | keine Fehlzuordnung (nur synthetisch; über Funk siehe Echttest) |
 
 Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsignal stört den Diskriminator vollständig; bei −10 dB ist er folgenlos. Das kann eigene Störlinien des Empfängers bei sehr schwachen Signalen betreffen.
 
 ## Echttest (31.10.2026, Empfänger in JO43)
 
-**Testsendung, vom Betreiber freigegeben:** Pluto+ bei −40 dB über Funk, kurze Distanz, 868,2/868,4 MHz abwechselnd. Fünf Serien zu je 8 Paketen, zusammen etwa 0,2 s Sendezeit. Inhalt: Zufallsadresse (Privacy-Tabelle), „am Boden", Position bei 0°N 0°E, Modellflugzeug. Der OGN-Feed um diese Position blieb bei der geprüften ersten Serie leer. Das Sendeskript ist nicht Teil des Repos.
+**Testsendungen, vom Betreiber freigegeben:** Pluto+ bei −40 dB über Funk, kurze Distanz, 868,2/868,4 MHz abwechselnd. Acht Serien zu je 8 Paketen, zusammen etwa 0,35 s Sendezeit. Inhalt: Zufallsadresse (Privacy-Tabelle), „am Boden", Position bei 0°N 0°E, Modellflugzeug. Das Sendeskript ist nicht Teil des Repos. Im OGN-Feed um diese Position, in vier der acht Serien mitgelesen, tauchte kein ADS-L-Paket auf; einmal stand dort ein einzelnes FANET-Paket (`OGNFNT`), dessen Absender ich nicht geklärt habe.
 
-| Empfänger | Einstellung | Pakete | Korrelation |
+| Weg | Empfänger | Einstellung | Pakete |
 |---|---|---|---|
-| Pluto+ | fest 30 dB, Puffer 262144 | 8/8 | 0,89 |
-| RTL-SDR | Standard-AGC | 8/8 | 0,92 |
-| RTL-SDR | fest 40 dB | 8/8 | 0,92 |
-| RTL-SDR | fest 20 dB | 5/8 und 2/8 | 0,8 |
+| CLI | Pluto+ | fest 30 dB, Puffer 262144 | 8/8 |
+| CLI | Pluto+ | Vorgabe `slow_attack`, Puffer 262144 | 8/8 (zwei Serien) |
+| CLI | RTL-SDR | fest 40 dB | 8/8 (zwei Serien) |
+| CLI | RTL-SDR | fest 20 dB | 5/8 und 2/8 |
+| **Web-TRX bis Browser-Karte** | RTL-SDR | 40 dB (ADS-L-Vorgabe) | **8/8**, Marker und Felder korrekt |
+| Web-TRX bis Browser | RTL-SDR | 20 dB (vor der Korrektur) | 0/8, 9 CRC-Fehler |
 
-Bei 20 dB zeigte eine Rohaufnahme keine Lücken und kein Clipping. Alle Bursts wurden gefunden, lagen aber nur rund 10 dB über dem Rauschen und scheiterten am CRC. Das passt zur Grenze aus den synthetischen Messungen.
+**Verstärkung:** Das RTL-SDR startet in App und Web-TRX mit fest 20 dB. Das ist hier zu wenig: Eine Rohaufnahme zeigte keine Lücken und kein Clipping, alle Bursts wurden gefunden, lagen aber nur rund 10 dB über dem Rauschen und scheiterten am CRC. Deshalb setzen Desktop-App und Web-TRX beim Wechsel zu ADS-L eine unveränderte RTL-Verstärkung auf 40 dB und beim Verlassen zurück; eine selbst gewählte bleibt. Die CLI nutzt ohnehin 40 dB.
+
+**Nicht getestet:** die echte AGC des RTL-SDR. Eine frühere Fassung dieses Dokuments nannte sie „Standard-AGC", tatsächlich setzt `--gain-mode slow_attack` beim RTL-SDR fest 40 dB.
+
+**Falscher Kanal:** Bei starkem Signal auf kurze Distanz wurde dasselbe Paket auch auf dem Nachbarkanal dekodiert (dort −47,8 kHz Ablage, Korrelation 0,58 statt 0,91). Ein Filter über beide Kanäle lässt jedes Paket nur einmal durch. Es gewinnt das zuerst ausgewertete, die Spalte „MHz" kann in diesem Fall also den falschen Kanal zeigen (1 von 8 Paketen im Test). Inhalt und Position bleiben richtig, weil das CRC gilt.
 
 **Dauer-Empfang:** 39 Minuten am späten Nachmittag (16:32 bis 17:11 Uhr) auf Pluto+ und RTL-SDR ergaben kein echtes ADS-L-Paket. **Echter Flugverkehr ist also noch nicht bestätigt**, der Positionsabgleich mit OGN aus dem Plan steht noch aus.
 
