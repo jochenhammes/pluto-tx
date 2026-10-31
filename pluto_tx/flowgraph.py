@@ -1446,6 +1446,8 @@ class PlutoTxFlowgraph(gr.top_block):
             info = aprs_codec.beacon_info(self.aprs_lat, self.aprs_lon, self.aprs_symbol, self.aprs_comment)
         elif self.aprs_kind == "message":
             info = aprs_codec.message_info(self.aprs_to, self.aprs_text, self.aprs_message_id)
+        elif self.aprs_kind == "ack":
+            info = aprs_codec.ack_info(self.aprs_to, self.aprs_message_id)
         else:
             raise ValueError(f"unknown APRS kind {self.aprs_kind!r}")
         return aprs_codec.build_frame(self.aprs_callsign, config.APRS_DESTINATION, self.aprs_path, info)

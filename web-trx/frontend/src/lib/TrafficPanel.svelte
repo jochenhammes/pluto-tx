@@ -47,9 +47,9 @@
   <div class="head">
     <span class="dim">
       {#if !connected}Empfänger nicht verbunden — letzter Stand.{:else}{headline}{/if}
-      · {aircraft.length} Luftfahrzeuge
+      · {aircraft.length} {view.countLabel ?? "Luftfahrzeuge"}
     </span>
-    <span class="notice">Nur zur Beobachtung, nicht zur Navigation oder Kollisionsvermeidung.</span>
+    <span class="notice">{view.notice ?? "Nur zur Beobachtung, nicht zur Navigation oder Kollisionsvermeidung."}</span>
     <span class="buttons">
       <button class="small" on:click={() => map?.fitAll()}>Alle zeigen</button>
       <button class="small" on:click={toggleFullscreen}>{fullscreen ? "Vollbild aus" : "Vollbild"}</button>
@@ -61,6 +61,7 @@
       <TrafficMap bind:this={map} {aircraft} {station} {selected} {now} {tileSetting} rings={view.rings} tagText={view.tagText}
         onSelect={(label) => (selected = label)} />
     </div>
+    <div class="side">
     <div class="list">
       <table>
         <thead>
@@ -80,6 +81,8 @@
           {/each}
         </tbody>
       </table>
+    </div>
+    <slot />
     </div>
   </div>
 </div>
@@ -131,6 +134,18 @@
     flex: 1 1 55%;
     min-width: 0;
     isolation: isolate; /* Leaflet's z-indexes stay inside the map */
+  }
+  .side {
+    flex: 1 1 45%;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .side > .list {
+    flex: 1 1 0;
+    min-height: 0;
   }
   .list {
     flex: 1 1 45%;
@@ -190,7 +205,7 @@
       flex: 1 1 60%;
       min-height: 180px;
     }
-    .list {
+    .side {
       flex: 1 1 40%;
     }
   }

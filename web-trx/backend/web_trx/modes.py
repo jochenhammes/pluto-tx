@@ -15,6 +15,13 @@ from __future__ import annotations
 
 from . import station
 
+APRS_KINDS = ("beacon", "message")
+APRS_PATHS = ("WIDE1-1,WIDE2-1", "WIDE2-1", "none")
+APRS_PATH_DEFAULT = "WIDE1-1,WIDE2-1"
+APRS_SYMBOL_DEFAULT = "/-"
+APRS_MAX_COMMENT_LEN = 43
+APRS_MAX_TEXT_LEN = 67
+
 FM_DEVIATION_CHOICES_HZ = (2500.0, 5000.0)
 FM_DEVIATION_DEFAULT_HZ = 2500.0
 FM_PREEMPHASIS_DEFAULT = True
@@ -144,13 +151,31 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
         return {"submode": submode, "decoder": decoder}
     if mode == "js8" and direction == "tx":
         return _js8_tx(params)
-    if mode in ("adsl", "adsb") and direction == "rx":
+    if mode in ("adsl", "adsb", "aprs") and direction == "rx":
         _reject_unknown(params, set(), mode)
         return {}
+    if mode == "aprs" and direction == "tx":
+        return _aprs_tx(params)
     if mode == "rade" and direction == "tx":
         _reject_unknown(params, {"eoo"}, "rade")
         return {"eoo": _bool(params, "eoo", False)}
     return dict(params)
+
+
+def _aprs_tx(params: dict) -> dict:
+    # Callsign and position come from the station data at key time, the message number from the backend.
+    _reject_unknown(params, {"kind", "path", "symbol", "comment", "to", "text"}, "aprs")
+    kind = params.get("kind", "beacon")
+    if kind not in APRS_KINDS:
+        raise ValueError(f"aprs: kind must be one of {APRS_KINDS}")
+    path = params.get("path", APRS_PATH_DEFAULT)
+    if path not in APRS_PATHS:
+        raise ValueError(f"aprs: path must be one of {APRS_PATHS}")
+    symbol = params.get("symbol", APRS_SYMBOL_DEFAULT)
+    if not isinstance(symbol, str) or len(symbol) != 2:
+        raise ValueError("aprs: symbol must be two characters, table and code")
+    return {"kind": kind, "path": path, "symbol": symbol, "comment": _text(params, APRS_MAX_COMMENT_LEN, "aprs", "comment"),
+            "to": _text(params, 9, "aprs", "to").strip().upper(), "text": _text(params, APRS_MAX_TEXT_LEN, "aprs")}
 
 
 def _rtty(params: dict, with_text: bool) -> dict:

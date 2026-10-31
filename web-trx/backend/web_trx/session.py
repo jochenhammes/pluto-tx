@@ -113,6 +113,16 @@ class SessionBackend(abc.ABC):
         """ADS-L aircraft heard so far, for a client joining later (sent with 'hello')."""
         return {}
 
+    async def aprs_clear(self) -> None:
+        raise SessionError("APRS is not available")
+
+    async def aprs_auto_ack(self, enabled: bool) -> None:
+        raise SessionError("APRS is not available")
+
+    def aprs_snapshot(self) -> dict:
+        """APRS stations and packets heard so far, for a client joining later (sent with 'hello')."""
+        return {}
+
     async def adsb_clear(self) -> None:
         raise SessionError("ADS-B is not available")
 
@@ -191,7 +201,7 @@ class SessionManager:
 
     REQUESTS = (
         "scan", "connect", "disconnect", "select_mode", "tune", "set_gain",
-        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "adsl_clear", "adsb_clear", "hb_ack",
+        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "adsl_clear", "adsb_clear", "aprs_clear", "aprs_auto_ack", "hb_ack",
     )
 
     def __init__(self, backend: SessionBackend, tx_log=None):
@@ -339,6 +349,7 @@ class SessionManager:
                 "server_time": time.time(),
                 "adsl": self.backend.adsl_snapshot(),
                 "adsb": self.backend.adsb_snapshot(),
+                "aprs": self.backend.aprs_snapshot(),
                 **self.backend.snapshot(),
             })
             while True:
@@ -424,6 +435,11 @@ class SessionManager:
         elif request == "adsl_clear":
             await b.adsl_clear()
             await self._emit_event("adsl_cleared", {})
+        elif request == "aprs_clear":
+            await b.aprs_clear()
+            await self._emit_event("aprs_cleared", {})
+        elif request == "aprs_auto_ack":
+            await b.aprs_auto_ack(params.get("enabled") is True)
         elif request == "adsb_clear":
             await b.adsb_clear()
             await self._emit_event("adsb_cleared", {})

@@ -14,6 +14,7 @@ try:
 except RuntimeError as e:  # no pluto-tx checkout, see pluto_path.py
     pytest.skip(str(e), allow_module_level=True)
 
+from web_trx import modes
 from web_trx.session import AudioFrame, SessionError
 
 
@@ -673,3 +674,174 @@ async def test_adsb_refuses_a_too_low_rate_and_retuning(tmp_path, monkeypatch):
     with pytest.raises(SessionError, match="needs at least"):
         await b.set_gain("rx", "sample_rate", 1_000_000)
     await b.disconnect("rx")
+
+
+# -- APRS --
+
+def _aprs_iq(rate, info, source="DL1ABC-9"):
+    import numpy as np
+    from pluto_tx import aprs, aprs_codec
+
+    audio = aprs.encode_frame(aprs_codec.build_frame(source, "APRS", ("WIDE1-1",), info), sample_rate=rate)
+    iq = np.exp(2j * np.pi * 3000 / aprs.AMPLITUDE * np.cumsum(audio) / rate).astype(np.complex64)
+    pad = np.zeros(int(0.1 * rate), np.complex64)
+    return np.concatenate([pad, iq, pad])
+
+
+async def test_aprs_through_the_real_flowgraph(tmp_path, monkeypatch):
+    rate = 1_000_000
+    iq = _aprs_iq(rate, b"!5330.00N/00900.00E-TEST <b>")
+    b, events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, iq)
+    await b.select_mode("rx", "aprs", {})
+    assert b.rx.tb.nominal_freq_hz == 144_800_000
+    assert ("tuned", {"direction": "rx", "freq_hz": 144_800_000}) in events
+    await asyncio.to_thread(b.rx.tb.wait)
+    await b._emit_aprs_update(b.rx.tb)
+    update = next(f for n, f in events if n == "aprs_update")
+    json.dumps(update)
+    assert update["frames_ok"] == 1
+    assert update["packets"][0]["comment"] == "TEST <b>"
+    station = update["stations"][0]
+    assert (station["label"], station["lat"], "trail" in station) == ("DL1ABC-9", 53.5, False)
+    assert b.aprs_snapshot()["stations"][0]["trail"]
+    await b.aprs_clear()
+    assert b.aprs_snapshot()["stations"] == []
+    await b.disconnect("rx")
+
+
+async def test_aprs_frequency_is_only_a_starting_point(tmp_path, monkeypatch):
+    rate = 1_000_000
+    b, *_ = await _adsl_backend(tmp_path, monkeypatch, rate, _aprs_iq(rate, b">x"))
+    await b.select_mode("rx", "aprs", {})
+    await b.tune("rx", 432_150_000.0)
+    assert b.rx.freq_hz == 432_150_000.0
+    await b.select_mode("rx", "aprs", {})  # again: must keep what the operator chose
+    assert b.rx.freq_hz == 432_150_000.0
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.freq_hz == 433_500_000.0  # leaving brings back the frequency from before
+    await b.disconnect("rx")
+
+
+async def _aprs_tx_backend(monkeypatch, freq_hz=144_800_000.0):
+    fakes = _repo_module("fakes")
+    monkeypatch.setitem(radio_backend.tx_devices.DEVICE_REGISTRY, "fake", fakes.FakeTxDevice)
+    monkeypatch.setitem(radio_backend.DEVICE_LABELS, "fake", "fake")
+    radio_backend.PlutoTxFlowgraph._aprs_last_sent = -1e9
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    b.tx.device_type, b.tx.connection, b.tx.freq_hz = "fake", "x", freq_hz
+    b.rx.freq_hz = 144_800_000.0
+    params = modes.normalize_params("tx", "aprs", {"comment": "TEST", "path": "none"})
+    await b.select_mode("tx", "aprs", params)
+    return b, events
+
+
+MESSAGE_TO_US = {"kind": "message", "source": "DL1ABC", "addressee": "DA2JH", "message": "Hi", "message_id": "7"}
+
+
+async def _aprs_unkey(b):
+    if b.keyed:
+        await b.ptt(False)
+    await b.disconnect("tx")
+
+
+async def test_aprs_beacon_from_station_data(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
+    await b.ptt(True)
+    sent = next(f for n, f in events if n == "aprs_sent")
+    assert (sent["source"], sent["path"], sent["comment"], sent["lat"]) == ("DA2JH", [], "TEST", 53.5)
+    assert sent["automatic"] is False
+    await _aprs_unkey(b)
+    with pytest.raises(SessionError):
+        await b.ptt(True)  # disconnected
+    assert not b.keyed
+
+
+async def test_aprs_rate_limit_refuses_before_keying(monkeypatch):
+    b, _events = await _aprs_tx_backend(monkeypatch)
+    await b.ptt(True)
+    await b.ptt(False)
+    with pytest.raises(SessionError, match="wait"):
+        await b.ptt(True)
+    assert not b.keyed
+    await _aprs_unkey(b)
+
+
+async def test_aprs_refuses_outside_the_amateur_bands(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch, freq_hz=868_200_000.0)
+    with pytest.raises(SessionError, match="amateur"):
+        await b.ptt(True)
+    assert "keyed" not in [n for n, _ in events]
+    await _aprs_unkey(b)
+
+
+async def test_aprs_never_acks_with_the_switch_off(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
+    assert b.aprs_snapshot()["auto_ack"] is False
+    await b._aprs_maybe_ack(MESSAGE_TO_US)
+    assert "keyed" not in [n for n, _ in events]
+    assert "aprs_ack_result" not in [n for n, _ in events]
+    await _aprs_unkey(b)
+
+
+async def test_aprs_ack_goes_out_once_on_the_heard_frequency(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
+    await b.aprs_auto_ack(True)
+    await b._aprs_maybe_ack({**MESSAGE_TO_US, "addressee": "DL9XYZ"})  # someone else's
+    assert "keyed" not in [n for n, _ in events]
+    await b._aprs_maybe_ack(MESSAGE_TO_US)
+    sent = next(f for n, f in events if n == "aprs_sent")
+    assert (sent["kind"], sent["addressee"], sent["message_id"], sent["automatic"]) == ("ack", "DL1ABC", "7", True)
+    assert ("aprs_ack_result", {"to": "DL1ABC", "message_id": "7", "sent": True, "reason": ""}) in events
+    await b._aprs_maybe_ack(MESSAGE_TO_US)  # its digipeated copy
+    assert [n for n, _ in events].count("aprs_sent") == 1
+    assert [n for n, _ in events].count("aprs_ack_result") == 1
+    await _aprs_unkey(b)
+
+
+async def test_aprs_ack_stays_home_on_another_frequency(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch, freq_hz=432_150_000.0)
+    await b.aprs_auto_ack(True)
+    await b._aprs_maybe_ack(MESSAGE_TO_US)
+    assert "keyed" not in [n for n, _ in events]
+    result = next(f for n, f in events if n == "aprs_ack_result")
+    assert result["sent"] is False and "Empfangsfrequenz" in result["reason"]
+    await _aprs_unkey(b)
+
+
+async def test_aprs_ack_does_not_change_the_operators_next_message(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
+    await b.aprs_auto_ack(True)
+    await b._aprs_maybe_ack(MESSAGE_TO_US)
+    await b.ptt(False)
+    radio_backend.PlutoTxFlowgraph._aprs_last_sent = -1e9
+    await b.ptt(True)
+    last = [f for n, f in events if n == "aprs_sent"][-1]
+    assert (last["kind"], last["automatic"]) == ("position", False)
+    await _aprs_unkey(b)
+
+
+async def test_aprs_ack_switch_goes_off_with_the_operator_and_estop(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
+    await b.aprs_auto_ack(True)
+    b.operator_gone()
+    await asyncio.sleep(0)
+    assert b.aprs_snapshot()["auto_ack"] is False
+    assert ("aprs_auto_ack", {"enabled": False, "reason": "operator_gone"}) in events
+    await b.aprs_auto_ack(True)
+    await b.estop()
+    assert b.aprs_snapshot()["auto_ack"] is False
+    await _aprs_unkey(b)
+
+
+def test_aprs_params():
+    assert modes.normalize_params("rx", "aprs", {}) == {}
+    defaults = modes.normalize_params("tx", "aprs", {})
+    assert (defaults["kind"], defaults["path"], defaults["symbol"]) == ("beacon", "WIDE1-1,WIDE2-1", "/-")
+    assert modes.normalize_params("tx", "aprs", {"to": " dl1abc "})["to"] == "DL1ABC"
+    for bad in ({"kind": "object"}, {"path": "WIDE7-7"}, {"symbol": "x"}, {"text": "x" * 68}, {"freq": 1}):
+        with pytest.raises(ValueError):
+            modes.normalize_params("tx", "aprs", bad)
+    assert modes.APRS_MAX_TEXT_LEN == radio_backend.aprs_codec.MAX_MESSAGE_TEXT
+    assert modes.APRS_PATH_DEFAULT == ",".join(radio_backend.tx_config.APRS_DEFAULT_PATH)

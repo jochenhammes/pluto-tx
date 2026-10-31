@@ -33,8 +33,13 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
-TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8")
-RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl", "adsb")
+TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8", "aprs")
+RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl", "adsb", "aprs")
+
+# APRS receive: invented stations around the station data, built with the real codec and reported by the real
+# state class, so the fields are the ones GnuRadioBackend sends. A neighbour messages the station's own callsign.
+APRS_FREQ_HZ = 144_800_000
+APRS_SIM_PERIOD_S = 5.0
 
 # ADS-L receive: invented aircraft around the station, one packet per second each, in the event fields a real
 # packet has. Deliberately no encoder here: nothing in the application can produce an ADS-L frame.
@@ -58,7 +63,7 @@ JS8_SIM_NEIGHBOUR = ("DL1ABC", "JO62")
 FT8_SLOT_S = 15.0
 FT8_DECODE_AT_S = 14.8
 FT8_SIM_STATIONS = (("DL1ABC", "JO62"), ("G4XYZ", "IO91"), ("OK1RR", "JN79"), ("EA3AAA", "JN11"))
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext")  # auto-unkey, like GnuRadioBackend
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "aprs")  # auto-unkey, like GnuRadioBackend
 # FT8 transmit: slot timing as in pluto_tx/config.py; airtime of one frame
 # (79 symbols x 0.16 s) plus pluto-tx' tail.
 FT8_KEY_EARLY_S = 3.0
@@ -113,6 +118,11 @@ class SimBackend(SessionBackend):
         self._adsl_state = _adsl_state_module().AdslState()
         self._adsl_counts = {hz: 0 for hz in ADSL_CHANNELS_HZ}
         self._adsl_tick = 0
+        self._aprs_tick = 0
+        self._aprs_task: asyncio.Task | None = None
+        self._aprs_state = None
+        self._aprs_auto_ack = False
+        self._aprs_packets = 0
         self._adsb_tick = 0
         self._adsb_task: asyncio.Task | None = None
         self._adsb_aircraft: dict[str, dict] = {}
@@ -185,6 +195,11 @@ class SimBackend(SessionBackend):
                 if self._freq_before_fixed is None:
                     self._freq_before_fixed = st.freq_hz
                 st.freq_hz = FIXED_TUNE_HZ[mode]
+            elif mode == "aprs":  # a starting point only, the operator can retune
+                if self._freq_before_fixed is None:
+                    self._freq_before_fixed = st.freq_hz
+                if st.mode != "aprs":
+                    st.freq_hz = APRS_FREQ_HZ
             elif self._freq_before_fixed is not None:
                 st.freq_hz, self._freq_before_fixed = self._freq_before_fixed, None
             if st.freq_hz != before:
@@ -225,9 +240,13 @@ class SimBackend(SessionBackend):
                 return
             if self.keyed:
                 return
+            if self.tx.mode == "aprs":
+                self._aprs_check_tx()
             self.keyed = True
             await self._emit_event("keyed", {"mode": self.tx.mode})
-            if self.tx.mode == "pocsag":
+            if self.tx.mode == "aprs":
+                await self._emit_event("aprs_sent", self._aprs_sim_sent())
+            elif self.tx.mode == "pocsag":
                 await self._emit_event("pocsag_message", {
                     "ric": self.tx.mode_params.get("ric", 1234567),
                     "text": self.tx.mode_params.get("text", ""),
@@ -324,6 +343,7 @@ class SimBackend(SessionBackend):
             self._js8_auto.operator_active()
 
     def operator_gone(self) -> None:
+        self._aprs_auto_ack = False
         if self._js8_auto is not None:
             self._js8_auto.operator_gone()
 
@@ -392,6 +412,7 @@ class SimBackend(SessionBackend):
         await self.ptt(False)
 
     async def estop(self) -> None:
+        self._aprs_auto_ack = False
         await self._cancel_ft8("estop", device_safe=True)
         await self._cancel_js8("estop", device_safe=True)
         if self._pocsag_unkey_task is not None:
@@ -424,6 +445,8 @@ class SimBackend(SessionBackend):
         await self._cancel_js8("shutdown", device_safe=True)
         if self._adsl_task is not None:
             self._adsl_task.cancel()
+        if self._aprs_task is not None:
+            self._aprs_task.cancel()
         if self._adsb_task is not None:
             self._adsb_task.cancel()
         if self._js8_task is not None:
@@ -455,6 +478,8 @@ class SimBackend(SessionBackend):
             self._adsl_task = asyncio.create_task(self._adsl_loop())
         if self._adsb_task is None:
             self._adsb_task = asyncio.create_task(self._adsb_loop())
+        if self._aprs_task is None:
+            self._aprs_task = asyncio.create_task(self._aprs_loop())
         if self._js8_task is None:
             self._js8_task = asyncio.create_task(self._js8_loop())
         if self._js8_auto is None:
@@ -573,6 +598,80 @@ class SimBackend(SessionBackend):
                    420, 30.0, -2.0, 90.0),
             packet((0, "RND"), 0x51F0AA, "paraglider", "airborne", "none", None, None, None, None, None, None),
         ]
+
+    def _aprs(self):
+        if self._aprs_state is None:
+            from pluto_advanced_rx.aprs_state import AprsState
+            self._aprs_state = AprsState()
+        return self._aprs_state
+
+    def _aprs_check_tx(self) -> None:
+        """The refusals an operator meets on the real backend."""
+        params = self.tx.mode_params
+        if not self.station.get("call"):
+            raise SessionError("aprs: no callsign set")
+        if params.get("kind") == "beacon" and not self.station.get("locator"):
+            raise SessionError("aprs: beacon needs a position (station locator or latitude/longitude)")
+        if params.get("kind") == "message" and not (params.get("to") and params.get("text")):
+            raise SessionError("aprs: message needs an addressee and a text")
+
+    def _aprs_sim_sent(self) -> dict:
+        pluto_path.ensure_importable()
+        from pluto_tx import aprs_codec
+        params = self.tx.mode_params
+        path = () if params["path"] == "none" else tuple(params["path"].split(","))
+        if params["kind"] == "message":
+            self._aprs_tick += 1
+            info = aprs_codec.message_info(params["to"], params["text"], str(self._aprs_tick))
+        else:
+            lat, lon = station.locator_center(self.station["locator"])
+            info = aprs_codec.beacon_info(lat, lon, params["symbol"], params["comment"])
+        frame = aprs_codec.parse_frame(aprs_codec.build_frame(self.station["call"], "APZPTX", path, info))
+        return {**aprs_codec.summarize(frame), "duration_s": 0.5, "automatic": False}
+
+    async def aprs_clear(self) -> None:
+        self._aprs().clear()
+
+    async def aprs_auto_ack(self, enabled: bool) -> None:
+        self._aprs_auto_ack = enabled
+        await self._emit_event("aprs_auto_ack", {"enabled": enabled, "reason": "operator"})
+
+    def aprs_snapshot(self) -> dict:
+        return {"stations": self._aprs().get_stations(), "packets": self._aprs().get_rows(), "auto_ack": self._aprs_auto_ack}
+
+    def fake_aprs_frames(self) -> list[dict]:
+        """One round of invented traffic through the real codec: mobile, digipeater, weather, object, status."""
+        pluto_path.ensure_importable()
+        from pluto_tx import aprs_codec as c
+        lat0, lon0 = station.locator_center(self.station.get("locator", "")) or ADSL_DEFAULT_CENTER
+        self._aprs_tick += 1
+        phase = (self._aprs_tick % 720) * 0.002
+        wide = ("WIDE1-1", "WIDE2-1")
+        infos = [
+            ("DL1ABC-9", wide, c.beacon_info(lat0 + 0.2 - phase, lon0 + 0.3, "/>", "Sim mobil")),
+            ("DB0XYZ-10", ("WIDE2-1",), c.beacon_info(lat0 - 0.4, lon0 - 0.5, "/#", "Sim Digipeater")),
+            ("DK2WX", wide, f"@111111z{c.beacon_info(lat0 + 0.6, lon0 - 0.2, '/_', '').decode()[1:]}"
+                            "220/004g005t059r000p000P000h50b10132".encode()),
+            ("DB0OBJ", wide, f";438.600FM*111111z{c.beacon_info(lat0 + 0.1, lon0 + 0.7, '/r', '').decode()[1:]}Sim Relais".encode()),
+            ("DL2STA", wide, b">Sim Status <b>ohne Position</b>"),
+        ]
+        if self.station.get("call") and self._aprs_tick % 6 == 1:
+            infos.append(("DL1ABC-9", wide, c.message_info(self.station["call"], "Hallo aus dem Simulator", str(self._aprs_tick % 100))))
+        return [c.parse_frame(c.build_frame(source, "APRS", path, info)) for source, path, info in infos]
+
+    async def _aprs_loop(self) -> None:
+        while True:
+            await asyncio.sleep(APRS_SIM_PERIOD_S)
+            if self.rx.connection is None or self.rx.mode != "aprs":
+                continue
+            rows = [self._aprs().on_frame(frame) for frame in self.fake_aprs_frames()]
+            self._aprs_packets += len(rows)
+            _rows, count = self._aprs().counts()
+            await self._emit_event("aprs_update", {"stations": self._aprs().take_changed(), "packets": rows, "count": count,
+                                                   "frames_ok": self._aprs_packets})
+            for row in rows:
+                if self._aprs_auto_ack and row["kind"] == "message" and row.get("addressee") == self.station.get("call"):
+                    await self._emit_event("aprs_ack_result", {"to": row["source"], "message_id": row["message_id"], "sent": True, "reason": ""})
 
     async def adsb_clear(self) -> None:
         self._adsb_aircraft = {}

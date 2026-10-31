@@ -7,6 +7,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from web_trx import modes
 from web_trx.session import AudioFrame, SessionError
 from web_trx.sim_backend import AUDIO_SAMPLE_RATE_HZ, SimBackend
 
@@ -196,3 +197,24 @@ async def test_js8_neighbour_and_loopback_are_assembled_like_the_real_backend():
     assert b._js8_sent == []
     other = [f for n, f in events if n == "js8_message" and f["sender"] == "DL1ABC"]
     assert other and all(m["text"].startswith("DL1ABC: ") for m in other)
+
+
+@pytest.mark.asyncio
+async def test_aprs_receive_and_send():
+    b, events, _spectrum, _audio = make_backend()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    frames = b.fake_aprs_frames()
+    rows = [b._aprs().on_frame(f) for f in frames]
+    assert {r["kind"] for r in rows} >= {"position", "weather", "object", "status", "message"}
+    assert next(r for r in rows if r["kind"] == "message")["addressee"] == "DA2JH"
+    assert any(s["label"] == "438.600FM" for s in b.aprs_snapshot()["stations"])
+    await b.connect("tx", "sim", "")
+    await b.select_mode("tx", "aprs", modes.normalize_params("tx", "aprs", {"kind": "message", "to": "DL1ABC", "text": "Hi"}))
+    await b.ptt(True)
+    sent = next(f for n, f in events if n == "aprs_sent")
+    assert (sent["kind"], sent["addressee"], sent["message"]) == ("message", "DL1ABC", "Hi")
+    await b.ptt(False)
+    await b.select_mode("tx", "aprs", modes.normalize_params("tx", "aprs", {"kind": "message"}))
+    with pytest.raises(SessionError):
+        await b.ptt(True)
+    assert not b.keyed

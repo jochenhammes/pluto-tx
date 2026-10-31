@@ -7,12 +7,15 @@ export type TrafficAircraft = {
   category?: string; alt_m?: number | null; speed_mps?: number | null; climb_mps?: number | null; packets?: number;
   callsign?: string; icao?: string; alt_ft?: number | null; alt_type?: string; speed_kt?: number | null; vrate_fpm?: number | null;
   on_ground?: boolean; squawk?: string; messages?: number;
+  symbol?: string; comment?: string; heard_via?: string | null; kind?: string; course_deg?: number | null; temperature_c?: number | null;
+  humidity_pct?: number | null; pressure_hpa?: number | null;
 };
 export type TrafficColumn = {
   title: string; tooltip?: string; value: (a: TrafficAircraft, station: LatLon | null, now: number) => string;
 };
 export type TrafficView = {
   columns: TrafficColumn[]; rings: number[]; emptyText: string; tagText: (a: TrafficAircraft) => string;
+  countLabel?: string; notice?: string;
 };
 
 const fixed = (v: number | null | undefined, digits = 0, scale = 1): string => (v == null ? "" : (v * scale).toFixed(digits));
@@ -40,6 +43,33 @@ export const ADSL_VIEW: TrafficView = {
     { title: "m/s", value: (a) => signed(a.climb_mps) },
     { title: "Kurs", value: (a) => fixed(a.track_deg) },
     distance, bearing, age,
+    { title: "Pakete", value: (a) => String(a.packets ?? 0) },
+  ],
+};
+
+const weather = (a: TrafficAircraft): string => [
+  a.temperature_c == null ? "" : `${a.temperature_c.toFixed(0)} °C`,
+  a.humidity_pct == null ? "" : `${a.humidity_pct} %`,
+  a.pressure_hpa == null ? "" : `${a.pressure_hpa.toFixed(0)} hPa`,
+].filter(Boolean).join(" · ");
+
+export const APRS_VIEW: TrafficView = {
+  rings: [25, 50, 100, 200],
+  countLabel: "Stationen",
+  notice: "Nur per Funk Gehörtes, kein APRS-IS.",
+  emptyText: "Noch keine Pakete empfangen.",
+  tagText: (a) => a.label,
+  columns: [
+    { title: "Rufzeichen", value: (a) => a.label },
+    { title: "Symbol", value: (a) => a.symbol ?? "" },
+    { title: "Art", value: (a) => a.kind ?? "" },
+    { title: "Höhe ft", value: (a) => fixed(a.alt_ft) },
+    { title: "kt", value: (a) => fixed(a.speed_kt) },
+    { title: "Kurs", value: (a) => fixed(a.course_deg) },
+    distance, bearing,
+    { title: "Via", tooltip: "Letzter Digipeater, leer bei Direktempfang", value: (a) => a.heard_via ?? "" },
+    { title: "Kommentar", value: (a) => (a.kind === "weather" ? weather(a) : a.comment ?? "") },
+    age,
     { title: "Pakete", value: (a) => String(a.packets ?? 0) },
   ],
 };

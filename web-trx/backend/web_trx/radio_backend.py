@@ -42,6 +42,7 @@ from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.adsb_state import AdsbState
 from pluto_advanced_rx.adsl_state import AdslState
+from pluto_advanced_rx.aprs_state import AprsState
 from pluto_advanced_rx.flowgraph import M17_AVAILABLE as RX_M17_AVAILABLE
 from pluto_advanced_rx.flowgraph import RADE_AVAILABLE as RX_RADE_AVAILABLE
 from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph
@@ -50,7 +51,7 @@ from pluto_advanced_rx.ft8_decoder import sender_call as ft8_sender_call
 from pluto_advanced_rx.js8_assembly import Js8Assembler
 from pluto_advanced_rx.js8_decoder import available_backends as js8_rx_backends
 from pluto_advanced_rx.pocsag_state import PocsagState
-from pluto_tx import adsl_codec
+from pluto_tx import adsl_codec, aprs_codec
 from pluto_tx import config as tx_config
 from pluto_tx import devices as tx_devices
 from pluto_tx import ft8 as tx_ft8
@@ -92,9 +93,12 @@ RX_DEMOD_MODES = {
     "js8": AdvancedRxFlowgraph.MODE_SSB,
     "adsl": AdvancedRxFlowgraph.MODE_FM,  # data only: its audio is never sent anywhere
     "adsb": AdvancedRxFlowgraph.MODE_FM,  # likewise
+    "aprs": AdvancedRxFlowgraph.MODE_FM,  # unlike those two audible, like plain FM
 }
-RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl", "adsb": "adsb"}
+RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl", "adsb": "adsb", "aprs": "aprs"}
 ADSL_STATUS_S = 1.0
+APRS_UPDATE_S = 1.0
+APRS_ACK_REPEAT_S = 30.0  # digipeated copies of one message arrive within seconds; a later retry deserves a new ack
 ADSB_UPDATE_S = 1.0  # hundreds of messages a second reach the state; the browser gets one update per second
 ADSB_HALF_BAND_HZ = 1_000_000.0
 ADSL_CHANNEL_HALF_HZ = 100_000.0
@@ -110,7 +114,7 @@ def rx_bands() -> dict[str, list[float]]:
     ssb_hi = ssb_lo + rx_config.SSB_DEMOD_WIDTH_DEFAULT_HZ
     m17_half = rx_config.M17_DEVIATION_HZ + rx_config.M17_SYMBOL_RATE
     return {
-        "fm": [-fm_half, fm_half], "pocsag": [-fm_half, fm_half],
+        "fm": [-fm_half, fm_half], "pocsag": [-fm_half, fm_half], "aprs": [-fm_half, fm_half],
         "ssb": [ssb_lo, ssb_hi], "rtty": [ssb_lo, ssb_hi],
         "lsb": [-ssb_hi, -ssb_lo],
         "rade": [rx_config.RADE_OFDM_LOW_HZ, rx_config.RADE_OFDM_HIGH_HZ],
@@ -144,11 +148,12 @@ TX_MODES = {
     "digitext": PlutoTxFlowgraph.MODE_DIGITEXT,
     "ft8": PlutoTxFlowgraph.MODE_FT8,
     "js8": PlutoTxFlowgraph.MODE_JS8,
+    "aprs": PlutoTxFlowgraph.MODE_APRS,
 }
 # One-shot modes render their whole transmission at key time and unkey on
 # their own (pluto_cli.runtime.run_tx_session); all others take the
 # browser microphone while PTT is held. FT8 is one too, keyed by its series.
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8")
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8", "aprs")
 ONE_SHOT_TAIL_S = 0.3
 
 # TX audio processing (FM/SSB/LSB; M17 bypasses this chain in pluto-tx).
@@ -295,6 +300,13 @@ class GnuRadioBackend(SessionBackend):
         self._pocsag_rx_state = PocsagState()
         self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
         self._adsb_state = AdsbState()  # likewise
+        self._aprs_state = AprsState()  # likewise
+        self._aprs_lock = threading.Lock()
+        self._aprs_pending: list[dict] = []  # new packets, from the GNU Radio thread to _rx_aux_loop
+        self._aprs_auto_ack = False  # deliberately not saved: a restart never sends by itself
+        self._aprs_acked: dict[tuple[str, str], float] = {}
+        self._aprs_ack: tuple[str, str] | None = None  # what the next _key() answers, instead of the operator's settings
+        self._aprs_message_number = 0
         self._freq_before_fixed: float | None = None  # the operator's frequency while ADS-L/ADS-B hold the tuner
         self._fixed_gain_key: str | None = None  # a gain only such a mode set (not the operator): not saved, undone on leaving
         self._fixed_gain_default: float = 0.0
@@ -584,6 +596,7 @@ class GnuRadioBackend(SessionBackend):
         """Never raises, never waits for the TX lock (a key/unkey in progress
         must not delay it). shutdown_safe() unkeys, stops the flowgraph and
         forces the device's safe state (Pluto: max attenuation, TX LO off)."""
+        self._aprs_auto_ack = False  # first: nothing may answer anymore while the rest of this runs
         try:
             await self._cancel_ft8("estop", device_safe=True)
         except Exception:  # E-STOP must not raise
@@ -718,11 +731,13 @@ class GnuRadioBackend(SessionBackend):
             await self._fixed_tune_rx_gain(mode)
             self._adsb_state.set_reference(station.locator_center(self.station.get("locator", "")))
             tuning_before = st.freq_hz, self._freq_before_fixed
-            fixed_hz = rx_config.fixed_tune_frequency(mode)
+            fixed_hz = rx_config.mode_default_frequency(mode)
             if fixed_hz is not None:
                 if self._freq_before_fixed is None:
                     self._freq_before_fixed = st.freq_hz
-                st.freq_hz = fixed_hz
+                # APRS only starts there: selecting it again must not undo the operator's own frequency.
+                if rx_config.fixed_tune_frequency(mode) is not None or st.mode != mode:
+                    st.freq_hz = fixed_hz
             elif self._freq_before_fixed is not None:
                 st.freq_hz, self._freq_before_fixed = self._freq_before_fixed, None
             try:
@@ -771,6 +786,7 @@ class GnuRadioBackend(SessionBackend):
             on_pocsag_message=self._on_pocsag_message,
             on_adsl_packet=self._on_adsl_packet,
             on_adsb_message=self._adsb_state.on_message,
+            on_aprs_frame=self._on_aprs_frame,
             on_m17_fields=self._on_m17_fields,
             on_rtty_char=self._on_rtty_char,
             rtty_mark_hz=params.get("mark_hz", rx_config.RTTY_MARK_HZ_DEFAULT),
@@ -900,6 +916,72 @@ class GnuRadioBackend(SessionBackend):
     def adsl_snapshot(self) -> dict:
         return {"aircraft": self._adsl_state.get_aircraft_json()}
 
+    def _on_aprs_frame(self, frame: dict) -> None:
+        row = self._aprs_state.on_frame(frame)  # GNU Radio thread
+        with self._aprs_lock:
+            self._aprs_pending.append(row)
+
+    async def aprs_clear(self) -> None:
+        self._aprs_state.clear()
+        with self._aprs_lock:
+            self._aprs_pending = []
+
+    def aprs_snapshot(self) -> dict:
+        return {"stations": self._aprs_state.get_stations(), "packets": self._aprs_state.get_rows(),
+                "auto_ack": self._aprs_auto_ack}
+
+    async def _emit_aprs_update(self, tb) -> None:
+        with self._aprs_lock:
+            packets, self._aprs_pending = self._aprs_pending, []
+        detector = tb.aprs_deframer.detector
+        _rows, count = self._aprs_state.counts()
+        await self._emit_event("aprs_update", {
+            "stations": self._aprs_state.take_changed(), "packets": packets, "count": count,
+            "frames_ok": detector.frames_ok,
+        })
+        for row in packets:
+            await self._aprs_maybe_ack(row)
+
+    async def aprs_auto_ack(self, enabled: bool) -> None:
+        await self._set_aprs_auto_ack(enabled, "operator")
+
+    async def _set_aprs_auto_ack(self, enabled: bool, reason: str) -> None:
+        changed = self._aprs_auto_ack != enabled
+        self._aprs_auto_ack = enabled
+        if changed or reason == "operator":
+            await self._emit_event("aprs_auto_ack", {"enabled": enabled, "reason": reason})
+
+    async def _aprs_maybe_ack(self, row: dict) -> None:
+        """Answer a message addressed to this station with its ack: only with the switch on, only on the frequency
+        it was heard on, within the same rate limit as a click. What did not go out is reported, never queued."""
+        if not self._aprs_auto_ack or row["kind"] != "message" or not row.get("message_id"):
+            return
+        if row.get("addressee") != self.station.get("call"):
+            return
+        key = row["source"], row["message_id"]
+        now = time.monotonic()
+        self._aprs_acked = {k: t for k, t in self._aprs_acked.items() if now - t < APRS_ACK_REPEAT_S}
+        if key in self._aprs_acked:
+            return
+        self._aprs_acked[key] = now
+        reason = None
+        if self.tx.tb is None or self.tx.mode != "aprs":
+            reason = "Sender nicht auf APRS"
+        elif self.tx.freq_hz != self.rx.freq_hz:
+            reason = "Sender steht nicht auf der Empfangsfrequenz"
+        elif self.keyed:
+            reason = "Sender ist belegt"
+        if reason is None:
+            self._aprs_ack = key
+            try:
+                await self._key()
+            except SessionError as e:
+                reason = str(e)
+            finally:
+                self._aprs_ack = None
+        await self._emit_event("aprs_ack_result", {"to": row["source"], "message_id": row["message_id"],
+                                                   "sent": reason is None, "reason": reason or ""})
+
     async def adsb_clear(self) -> None:
         self._adsb_state.clear()
 
@@ -925,7 +1007,7 @@ class GnuRadioBackend(SessionBackend):
         (pluto_cli.runtime.run_rx_session does it in a sleep loop): RTTY
         AFC steps (nothing inside the flowgraph calls them), batched RTTY
         text, RADE sync/SNR status."""
-        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = 0.0
+        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = last_aprs = 0.0
         last_rade_state = last_ft8_state = last_js8_state = None
         while True:
             await asyncio.sleep(RTTY_FLUSH_S)
@@ -941,6 +1023,9 @@ class GnuRadioBackend(SessionBackend):
                 if mode == "rtty" and now - last_afc >= rx_config.RTTY_AFC_POLL_INTERVAL_S:
                     last_afc = now
                     await asyncio.to_thread(tb.rtty_afc_step)
+                if mode == "aprs" and tb.aprs_deframer is not None and now - last_aprs >= APRS_UPDATE_S:
+                    last_aprs = now
+                    await self._emit_aprs_update(tb)
                 if mode == "adsb" and tb.adsb_deframer is not None and now - last_adsb >= ADSB_UPDATE_S:
                     last_adsb = now
                     await self._emit_adsb_update(tb)
@@ -1119,6 +1204,9 @@ class GnuRadioBackend(SessionBackend):
                 raise SessionError("tx: not connected or no mode selected")
             if self.keyed:
                 return
+            if mode == "aprs":  # the station data can change after select_mode
+                await asyncio.to_thread(tb.set_aprs, **_aprs_settings(self.station, self.tx.mode_params, self._aprs_ack,
+                                                                      self._aprs_message_number + 1))
             problem = _tx_problem(tb, mode)
             if problem:
                 raise SessionError(f"{mode}: {problem}")
@@ -1136,7 +1224,13 @@ class GnuRadioBackend(SessionBackend):
             self.keyed = True
             self._keyed_at = self._last_mic_at = time.monotonic()
         await self._emit_event("keyed", {"mode": mode})
-        if mode == "pocsag":
+        if mode == "aprs":
+            if tb.aprs_kind == "message":
+                self._aprs_message_number += 1
+            await self._emit_event("aprs_sent", {**aprs_codec.summarize(aprs_codec.parse_frame(tb.aprs_frame)),
+                                                 "duration_s": round(tb.aprs_duration_s, 3), "automatic": self._aprs_ack is not None})
+            self._unkey_task = asyncio.create_task(self._auto_unkey_after(tb.aprs_hold_s))
+        elif mode == "pocsag":
             await self._emit_event("pocsag_message", {
                 "direction": "tx", "ric": self.tx.mode_params.get("ric"),
                 "text": self.tx.mode_params.get("text", ""), "duration_s": round(tb.pocsag_duration_s, 3),
@@ -1267,6 +1361,8 @@ class GnuRadioBackend(SessionBackend):
             self._js8_auto.operator_active()
 
     def operator_gone(self) -> None:
+        if self._aprs_auto_ack:  # nothing sends for an operator who is not there any more
+            asyncio.get_running_loop().create_task(self._set_aprs_auto_ack(False, "operator_gone"))
         if self._js8_auto is not None:
             self._js8_auto.operator_gone()
 
@@ -1601,6 +1697,17 @@ def _apply_tx_gain(tb, name: str, value) -> None:
         raise SessionError(f"unknown tx gain '{name}'")
 
 
+def _aprs_settings(station_data: dict, params: dict, ack: tuple[str, str] | None, number: int) -> dict:
+    """The flowgraph's APRS settings at key time; `ack` (addressee, message number) answers a message instead."""
+    center = station.locator_center(station_data.get("locator", ""))
+    path = () if params["path"] == "none" else tuple(params["path"].split(","))
+    settings = {"callsign": station_data.get("call", ""), "path": path, "lat": center[0] if center else None,
+                "lon": center[1] if center else None, "symbol": params["symbol"], "comment": params["comment"]}
+    if ack is not None:
+        return {**settings, "kind": "ack", "to": ack[0], "text": "", "message_id": ack[1]}
+    return {**settings, "kind": params["kind"], "to": params["to"], "text": params["text"], "message_id": str(number)}
+
+
 def _apply_tx_params(tb, mode: str, params: dict) -> None:
     # params are already validated/normalised by modes.normalize_params().
     if mode == "pocsag":
@@ -1650,6 +1757,8 @@ def _tx_problem(tb, mode: str) -> str | None:
     """Refusals before any RF action, like pluto_cli's preflight checks."""
     if mode == "pocsag":
         return tb.pocsag_problem()
+    if mode == "aprs":
+        return tb.aprs_problem()
     if mode == "ft8":
         return tb.ft8_problem()
     if mode == "js8":

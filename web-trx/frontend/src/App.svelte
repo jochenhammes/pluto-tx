@@ -3,7 +3,8 @@
   import Waterfall from "./lib/Waterfall.svelte";
   import FreqInput from "./lib/FreqInput.svelte";
   import TrafficPanel from "./lib/TrafficPanel.svelte";
-  import { ADSB_VIEW, ADSL_VIEW, type TrafficAircraft } from "./lib/trafficViews";
+  import { ADSB_VIEW, ADSL_VIEW, APRS_VIEW, type TrafficAircraft } from "./lib/trafficViews";
+  import AprsMessages, { type AprsMessage } from "./lib/AprsMessages.svelte";
   import { locatorCenter } from "./lib/geo";
   import RxDecoder, {
     type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status, type Ft8Decode,
@@ -24,7 +25,7 @@
   const MODE_LABELS: Record<string, string> = {
     fm: "FM", ssb: "SSB (USB)", lsb: "SSB (LSB)", m17: "M17", rade: "RADE",
     pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8", js8: "JS8 (JS8Call)",
-    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)",
+    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)", aprs: "APRS",
   };
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
@@ -35,7 +36,7 @@
   // whole transmission and unkeys on its own. Everything else takes the mic.
   // FT8: the click arms a series of slot-timed transmissions instead.
   // JS8: the click arms one message -- its frames go out in consecutive periods.
-  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8"];
+  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8", "aprs"];
   const isAudioMode = (mode: string) => !ONE_SHOT_MODES.includes(mode);
 
   let waterfall: Waterfall;
@@ -93,6 +94,14 @@
   let adslDirty = false;
   let adslStatus: { channels: { channel_hz: number; packets: number; crc_failures: number }[] } | null = null;
   // ADS-B: the server sends only what changed, once per second.
+  // APRS (backend aprs_update / aprs_sent)
+  const aprsStations = new Map<string, TrafficAircraft>();
+  let aprsList: TrafficAircraft[] = [];
+  let aprsMessages: AprsMessage[] = [];
+  let aprsFrames = 0;
+  let aprsAutoAck = false;
+  let aprsNotice = "";
+  let aprsTx = { kind: "beacon", path: "WIDE1-1,WIDE2-1", symbol: "/-", comment: "", to: "", text: "" };
   const adsbAircraft = new Map<string, TrafficAircraft>();
   let adsbList: TrafficAircraft[] = [];
   let adsbStatus: { messages: number; corrected: number; crc_failures: number } | null = null;
@@ -533,6 +542,7 @@
       clockSynced = features.ft8?.clock_synced ?? true;
       adslLoadSnapshot(e.adsl as { aircraft?: Record<string, unknown>[] } | undefined);
       adsbLoadSnapshot(e.adsb as { aircraft?: Record<string, unknown>[] } | undefined);
+      aprsLoadSnapshot(e.aprs as { stations?: Record<string, unknown>[]; packets?: Record<string, unknown>[]; auto_ack?: boolean } | undefined);
       if (fmOptions === null) {
         fmOptions = (e.mode_options as { fm: FmOptions }).fm;
         fmDeviationHz = fmOptions.deviation_default_hz;
@@ -638,6 +648,21 @@
     if (e.event === "rade_status") radeStatus = e as unknown as RadeStatus;
     if (e.event === "adsl_packet" && e.address_label) adslOnPacket(e);
     if (e.event === "adsl_status") adslStatus = e as unknown as typeof adslStatus;
+    if (e.event === "aprs_update") aprsOnUpdate(e);
+    if (e.event === "aprs_sent") aprsOnSent(e);
+    if (e.event === "aprs_auto_ack") {
+      aprsAutoAck = e.enabled === true;
+      if (e.reason === "operator_gone") aprsNotice = "Automatisch bestätigen wurde ausgeschaltet: kein Browser verbunden.";
+    }
+    if (e.event === "aprs_ack_result") {
+      aprsNotice = e.sent ? `Bestätigung an ${e.to} gesendet.` : `Bestätigung an ${e.to} nicht gesendet: ${e.reason}`;
+    }
+    if (e.event === "aprs_cleared") {
+      aprsStations.clear();
+      aprsList = [];
+      aprsMessages = [];
+      aprsNotice = "";
+    }
     if (e.event === "adsb_update") adsbOnUpdate(e);
     if (e.event === "adsb_cleared") {
       adsbAircraft.clear();
@@ -708,6 +733,7 @@
       void refreshTxLog();
     }
     if (e.event === "estop") {
+      aprsAutoAck = false;
       keyed = false;
       ft8Armed = null;
       js8Armed = null;
@@ -896,6 +922,69 @@
     client.request("adsl_clear", {});
   }
 
+  // -- APRS --
+  function aprsStation(a: Record<string, unknown>, old: TrafficAircraft | undefined, trail: [number, number, number][]): TrafficAircraft {
+    const time = a.position_time ? Number(a.position_time) : null;
+    return {
+      ...old, ...(a as unknown as TrafficAircraft), label: String(a.label), trail, track_deg: (a.course_deg as number | null) ?? null,
+      heard_ms: toLocalMs(Number(a.time)), position_ms: time == null ? null : toLocalMs(time),
+    };
+  }
+  function aprsMessageRow(p: Record<string, unknown>): AprsMessage {
+    return { direction: "rx", time_ms: toLocalMs(Number(p.time)), source: String(p.source), addressee: String(p.addressee ?? ""),
+             text: String(p.message ?? ""), message_id: String(p.message_id ?? "") };
+  }
+  function aprsTakeAck(p: Record<string, unknown>): void {
+    aprsMessages = aprsMessages.map((m) => (m.direction === "tx" && m.addressee === p.source && m.message_id === p.message_id
+      ? { ...m, acked: true } : m));
+  }
+  function aprsOnPackets(packets: Record<string, unknown>[]): void {
+    for (const p of packets) {
+      if (p.kind === "message" || p.kind === "bulletin") aprsMessages = [...aprsMessages, aprsMessageRow(p)].slice(-200);
+      if (p.kind === "ack") aprsTakeAck(p);
+    }
+  }
+  function aprsLoadSnapshot(snapshot: { stations?: Record<string, unknown>[]; packets?: Record<string, unknown>[]; auto_ack?: boolean } | undefined): void {
+    aprsStations.clear();
+    for (const a of snapshot?.stations ?? []) {
+      aprsStations.set(String(a.label), aprsStation(a, undefined, (a.trail ?? []) as [number, number, number][]));
+    }
+    aprsList = [...aprsStations.values()];
+    aprsMessages = aprsMessages.filter((m) => m.direction === "tx");
+    aprsOnPackets(snapshot?.packets ?? []);
+    aprsAutoAck = snapshot?.auto_ack === true;
+  }
+  function aprsOnUpdate(e: Record<string, unknown>): void {
+    aprsFrames = Number(e.frames_ok ?? 0);
+    for (const a of (e.stations ?? []) as Record<string, unknown>[]) {
+      const label = String(a.label);
+      const old = aprsStations.get(label);
+      const trail = old?.trail ?? [];
+      const time = a.position_time == null ? null : Number(a.position_time);
+      if (time != null && a.lat != null && a.lon != null && (trail.length === 0 || trail[trail.length - 1][0] !== time)) {
+        trail.push([time, Number(a.lat), Number(a.lon)]);
+        trail.splice(0, trail.length - ADSL_TRAIL_POINTS);
+      }
+      aprsStations.set(label, aprsStation(a, old, trail));
+    }
+    aprsList = [...aprsStations.values()];
+    aprsOnPackets((e.packets ?? []) as Record<string, unknown>[]);
+  }
+  function aprsOnSent(e: Record<string, unknown>): void {
+    if (e.kind === "message" || e.kind === "ack") {
+      aprsMessages = [...aprsMessages, {
+        direction: "tx" as const, time_ms: Date.now(), source: String(e.source), addressee: String(e.addressee ?? ""),
+        text: e.kind === "ack" ? `Bestätigung ${e.message_id}` : String(e.message ?? ""),
+        message_id: e.kind === "ack" ? "" : String(e.message_id ?? ""),
+      }].slice(-200);
+    }
+    if (e.kind === "message") aprsTx = { ...aprsTx, text: "" };
+  }
+  function clearAprs(): void {
+    client.request("aprs_clear", {});
+  }
+  $: aprsHeadline = `${(rxFreqHz / 1e6).toFixed(3).replace(".", ",")} MHz · ${aprsFrames} Pakete`;
+
   // -- ADS-B --
   function adsbLoadSnapshot(snapshot: { aircraft?: Record<string, unknown>[] } | undefined): void {
     adsbAircraft.clear();
@@ -971,6 +1060,7 @@
     }
     if (txMode === "m17") return { src_callsign: srcCallsign, dst_callsign: dstCallsign };
     if (txMode === "pocsag") return { ric, text: pocsagText };
+    if (txMode === "aprs") return { ...aprsTx };
     if (txMode === "rtty") return { ...txRtty, text: rttyTxText };
     if (txMode === "digitext") return { ...digitext };
     if (txMode === "rade") return { eoo: radeEoo };
@@ -1506,6 +1596,47 @@
           <label for="pocsagText">Text</label>
           <input id="pocsagText" type="text" bind:value={pocsagText} on:change={selectTxMode} />
         </div>
+      {:else if txMode === "aprs"}
+        <div class="field narrow">
+          <label for="aprsKind">Senden</label>
+          <select id="aprsKind" bind:value={aprsTx.kind} on:change={selectTxMode}>
+            <option value="beacon">Positionsbake</option>
+            <option value="message">Nachricht</option>
+          </select>
+        </div>
+        <div class="field narrow">
+          <label for="aprsPath">Pfad</label>
+          <select id="aprsPath" bind:value={aprsTx.path} on:change={selectTxMode}>
+            <option value="WIDE1-1,WIDE2-1">WIDE1-1,WIDE2-1</option>
+            <option value="WIDE2-1">WIDE2-1</option>
+            <option value="none">keiner</option>
+          </select>
+        </div>
+        {#if aprsTx.kind === "beacon"}
+          <div class="field narrow">
+            <label for="aprsSymbol">Symbol</label>
+            <input id="aprsSymbol" type="text" maxlength="2" bind:value={aprsTx.symbol} on:change={selectTxMode} />
+          </div>
+          <div class="field grow">
+            <label for="aprsComment">Kommentar</label>
+            <input id="aprsComment" type="text" maxlength="43" bind:value={aprsTx.comment} on:change={selectTxMode} />
+          </div>
+        {:else}
+          <div class="field narrow">
+            <label for="aprsTo">An</label>
+            <input id="aprsTo" type="text" maxlength="9" bind:value={aprsTx.to} on:change={selectTxMode} />
+          </div>
+          <div class="field grow">
+            <label for="aprsText">Text</label>
+            <input id="aprsText" type="text" maxlength="67" bind:value={aprsTx.text} on:change={selectTxMode} />
+          </div>
+        {/if}
+        <button class="small" title="Stellt nur die Frequenz ein; gesendet wird erst per Klick auf Aussenden." on:click={() => tuneTx(144_800_000)}>144,800 MHz</button>
+        <span class="dim">
+          {stationSaved.call || "kein Rufzeichen"}
+          {aprsTx.kind === "beacon" ? `· Position: Mitte von ${stationSaved.locator || "(kein Locator)"}` : ""}
+          · höchstens eine Sendung je 30 s
+        </span>
       {:else if txMode === "rade"}
         <label class="check" title="End-of-Over-Kennung nach dem Loslassen (in pluto-tx noch nicht auf Hardware verifiziert)">
           <input type="checkbox" bind:checked={radeEoo} on:change={selectTxMode} /> End-of-Over senden
@@ -1844,6 +1975,12 @@
     {:else if rxMode === "adsb"}
       <TrafficPanel view={ADSB_VIEW} aircraft={adsbList} headline={adsbHeadline} station={adslStation} connected={rxConnected}
         tileSetting={features.map_tile_url ?? ""} onClear={clearAdsb} />
+    {:else if rxMode === "aprs"}
+      <TrafficPanel view={APRS_VIEW} aircraft={aprsList} headline={aprsHeadline} station={adslStation} connected={rxConnected}
+        tileSetting={features.map_tile_url ?? ""} onClear={clearAprs}>
+        <AprsMessages messages={aprsMessages} myCall={stationCall} notice={aprsNotice} autoAck={aprsAutoAck} canAutoAck={!!stationCall}
+          onAutoAck={(enabled) => client.request("aprs_auto_ack", { enabled })} />
+      </TrafficPanel>
     {:else if rxMode === "js8" && rxConnected}
       <Js8Panel messages={js8Messages} periods={js8Periods} status={js8Status} myCall={stationCall}
         onPick={features.js8?.tx ? pickJs8 : null}
