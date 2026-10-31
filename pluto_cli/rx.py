@@ -19,6 +19,7 @@ from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
 from pluto_advanced_rx.filebroadcast_state import FileBroadcastState
+from pluto_tx import adsl_codec
 from pluto_advanced_rx.meshcore_state import MeshcoreState
 from pluto_advanced_rx.meshtastic_state import MeshtasticState
 from pluto_advanced_rx.pocsag_state import PocsagState
@@ -45,8 +46,9 @@ def add_common_args(parser):
         help=f"Receive frequency in Hz (default: {rx_config.DEFAULT_FREQUENCY:.0f})",
     )
     parser.add_argument(
-        "--bandwidth", type=int, choices=rx_config.RX_BANDWIDTH_PRESETS, default=None,
-        help="RX bandwidth/\"zoom\" span in Hz (device sample rate). Omit for the device's own default.",
+        "--bandwidth", type=int, default=None,
+        help="RX bandwidth/\"zoom\" span in Hz (device sample rate, must be one the --device offers, see "
+             "pluto_cli/README.md). Omit for the device's own default.",
     )
     parser.add_argument(
         "--buffer-size", type=int, choices=rx_config.PLUTO_RX_BUFFER_SIZE_PRESETS, default=None,
@@ -85,7 +87,7 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
@@ -265,6 +267,13 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                 fields[k] = row[k]
         emitter.emit("meshcore_packet", **fields)
 
+    def on_adsl_packet(info):
+        fields = {k: v for k, v in info.items() if k not in ("inverted", "signed", "address_table")}
+        if "address" in info:
+            fields["address"] = f"{info['address']:06X}"
+            fields["address_label"] = adsl_codec.address_label(info)
+        emitter.emit("adsl_packet", **fields)
+
     pocsag_state = PocsagState()
     pocsag_state.set_charset(args.pocsag_charset)
     pocsag_state.set_hide_damaged(False)  # damaged calls are filtered by on_pocsag_message()
@@ -318,6 +327,21 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         emitter.error(f"--direct-sampling is only available for --device rtlsdr, not {args.device}")
         return 1
     frequency = args.freq
+    selected_device = rx_devices.DEVICE_REGISTRY[args.device]
+    if args.bandwidth is not None and args.bandwidth not in selected_device.sample_rate_hz_choices:
+        offered = ", ".join(str(rate) for rate in selected_device.sample_rate_hz_choices)
+        emitter.error(f"--bandwidth {args.bandwidth} is not available on --device {args.device} (offered: {offered})")
+        return 1
+    if args.digimode == "adsl":
+        rate = args.bandwidth or selected_device.default_sample_rate_hz
+        if rate < rx_config.ADSL_MIN_SAMPLE_RATE_HZ:
+            emitter.error(f"--digimode adsl needs at least {rx_config.ADSL_MIN_SAMPLE_RATE_HZ} Hz of --bandwidth, got {rate}")
+            return 1
+        if selected_device.frequency_range_hz == (0.0, 0.0):
+            emitter.error(f"--digimode adsl needs an RF device, not --device {args.device}")
+            return 1
+        frequency = rx_config.ADSL_LO_HZ
+        emitter.emit("adsl_listen", channels_hz=list(rx_config.ADSL_CHANNELS_HZ), freq_hz=frequency, sample_rate_hz=rate)
     if args.digimode == "meshcore":
         from pluto_advanced_rx.flowgraph import MESHCORE_AVAILABLE
         if not MESHCORE_AVAILABLE:
@@ -364,7 +388,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             rtty_baud_rate=args.rtty_baud_rate, rtty_reverse=args.rtty_reverse,
             on_rtty_char=on_rtty_char,
             on_meshtastic_frame=on_meshtastic_frame, meshtastic_preset_index=meshtastic_preset_index,
-            on_pocsag_message=on_pocsag_message,
+            on_pocsag_message=on_pocsag_message, on_adsl_packet=on_adsl_packet,
             on_ft8_decodes=on_ft8_decodes, ft8_backend=args.ft8_decoder,
             ft8_my_call=args.ft8_mycall, ft8_my_grid=args.ft8_mygrid,
             on_js8_decodes=on_js8_decodes if args.digimode == "js8" else None,

@@ -157,12 +157,12 @@ Common flags (every mode):
 | `--direct-sampling {off,i,q}` | RTL-SDR only: bypass the tuner and sample the antenna input directly (HF up to 28.8 MHz, aliased above 14.4 MHz; `q` for the RTL-SDR Blog V3). Default `off` |
 | `--uri URI` | Connection string; ignored for `audio`. For `--device rtlsdr`: a USB serial, or `host[:port]` of an `rtl_tcp` server (e.g. `192.168.178.34:1234`, port default 1234) to use a dongle on another machine |
 | `--freq HZ` | Receive frequency in Hz |
-| `--bandwidth HZ` | One of `1000000/2500000/5000000/8000000/10000000` -- device sample rate ("zoom" span); omit for the device default |
+| `--bandwidth HZ` | Device sample rate ("zoom" span), one the `--device` offers: Pluto `1000000/2500000/5000000/8000000/10000000`, RTL-SDR `960000/1024000/1200000/1400000/1800000/1920000/2048000/2400000/2560000/3200000`, HackRF `1000000/2000000/4000000/5000000/8000000/10000000`; omit for the device default |
 | `--gain-mode {manual,slow_attack,fast_attack,hybrid}` | AGC mode |
 | `--gain DB` | Manual gain, used when `--gain-mode manual` |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
-| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
+| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8,adsl}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
 | `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency, used with `--digimode psk31` |
 | `--rtty-mark-hz HZ` | RTTY mark tone frequency, used with `--digimode rtty` |
 | `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
@@ -285,6 +285,8 @@ With `--json`, every line on stdout is exactly one JSON object with an
 | `started` | RX: flowgraph is running and unmuted | -- |
 | `repeat_wait` | TX with `--repeat-count` > 1: pause before the next transmission (`keyed` then also carries `repetition` and `of`) | `seconds`, `next`, `of` |
 | `psk31_char` | RX `--digimode psk31`: one decoded character (RX-only; TX `psk31` prints nothing) | `char` (single character string) |
+| `adsl_listen` | RX `--digimode adsl`: once at startup (`--freq` is ignored, needs an RF device and at least 1.8 MS/s) | `channels_hz`, `freq_hz`, `sample_rate_hz` |
+| `adsl_packet` | RX `--digimode adsl`: one packet that passed its CRC. Monitoring only, not for navigation or collision avoidance | `channel_hz`, `kind`, `version`, `key_index`, `raw`, `correlation`, `frequency_offset_hz`, `address`, `address_label`, `address_table_name`, `relayed`, `payload_type`; `kind` = `traffic` also `lat`, `lon`, `alt_m` (above the WGS-84 ellipsoid), `speed_mps`, `climb_mps`, `track_deg` (each null if the sender marks it invalid), `timestamp_s`, `category`, `flight_state`, `emergency` and the integrity fields |
 | `meshcore_identity` | RX `--meshcore-decrypt-dm`: once at startup | `public_key` |
 | `meshcore_listen` | RX `--digimode meshcore`: once at startup | `preset`, `freq_hz` |
 | `meshcore_packet` | TX `meshcore`: the frame about to be sent (`kind`, `route`, `bytes`, `airtime_s`, `freq_hz`, `name`/`text`/`channel`). RX: one received frame | RX: `kind` (`advert`/`group_text`/`other`), `route`, `type`, `hops`, `verified`, `raw_len`, plus `name`, `role`, `public_key`, `latitude`, `longitude`, `timestamp` (adverts) or `channel`, `sender`, `text` (group texts) |

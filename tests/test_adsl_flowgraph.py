@@ -1,6 +1,12 @@
 """ADS-L through the real RX flowgraph (GNU Radio blocks, fake device replaying synthetic IQ)."""
+import contextlib
+import io
+import json
 import os
+import signal
+import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -112,6 +118,71 @@ class FlowgraphTests(unittest.TestCase):
         self.assertTrue(rx.adsl_all_channels_in_span())
         rx.set_frequency(870e6)
         self.assertFalse(rx.adsl_all_channels_in_span())
+
+
+def run_cli(argv):
+    from pluto_cli import app
+    out = io.StringIO()
+    saved = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM), sys.excepthook)
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                code = app.main(argv)
+            except SystemExit as e:
+                code = e.code
+    finally:
+        signal.signal(signal.SIGINT, saved[0])
+        signal.signal(signal.SIGTERM, saved[1])
+        sys.excepthook = saved[2]
+    events = []
+    for line in out.getvalue().splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            pass
+    return code, events
+
+
+class CliTests(unittest.TestCase):
+    def test_packets_as_json_events(self):
+        from tests import fakes
+        rate = 2_500_000
+        iq = scene(rate, [(868_200_000, 0.0, 0x111111), (868_400_000, 0.05, 0x222222)], noise_snr_db=25, pad_s=0.3)
+        fakes.make_fake_rx(np.concatenate([iq, np.zeros(rate // 2, np.complex64)]), rate)
+        code, events = run_cli(["rx", "fm", "--device", "fake", "--uri", "x", "--freq", "433000000", "--digimode", "adsl",
+                                "--duration", "2", "--json"])
+        self.assertEqual(code, 0)
+        listen = next(e for e in events if e["event"] == "adsl_listen")
+        self.assertEqual(listen["freq_hz"], config.ADSL_LO_HZ)
+        packets = [e for e in events if e["event"] == "adsl_packet"]
+        self.assertEqual({(p["channel_hz"], p["address"]) for p in packets},
+                         {(868_200_000, "111111"), (868_400_000, "222222")})
+        self.assertEqual(packets[0]["address_label"][:6], "FANET:")
+        self.assertEqual(packets[0]["alt_m"], 1234)
+
+    def test_audio_stays_muted(self):
+        from pluto_advanced_rx import flowgraph as rxf
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(100_000, np.complex64), 2_500_000)
+        with mock.patch.object(rxf.AdvancedRxFlowgraph, "set_rx_muted") as muted:
+            run_cli(["rx", "fm", "--device", "fake", "--uri", "x", "--digimode", "adsl", "--duration", "0.2", "--json"])
+        self.assertEqual(muted.call_args_list[0], mock.call(True))
+        self.assertNotIn(mock.call(False), muted.call_args_list)
+
+    def test_bandwidth_is_checked_per_device(self):
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(100, np.complex64), 2_500_000)
+        code, events = run_cli(["rx", "fm", "--device", "fake", "--uri", "x", "--bandwidth", "2400000", "--json"])
+        self.assertEqual(code, 1)
+        self.assertIn("not available on --device fake", json.dumps(events))
+
+    def test_too_low_rate_is_refused(self):
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(100, np.complex64), 1_000_000)
+        code, events = run_cli(["rx", "fm", "--device", "fake", "--uri", "x", "--bandwidth", "1000000", "--digimode", "adsl",
+                                "--json"])
+        self.assertEqual(code, 1)
+        self.assertIn("needs at least", json.dumps(events))
 
 
 class StateTests(unittest.TestCase):

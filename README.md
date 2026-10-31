@@ -3,7 +3,7 @@
 Eigene Sende- und Empfangssoftware für den ADALM-PLUTO (Pluto+,
 Tezuka-Firmware), HackRF One und RTL-SDR, gebaut mit GNU Radio —
 FM/SSB-Sprechfunk, mehrere Digitalsprache-Modi (M17, FreeDV 2020/2020B,
-RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic/LoRa, MeshCore/LoRa) und ein wiederholender
+RADE), Digimodes (Waterfall Writer, PSK31, RTTY, POCSAG, FT8, JS8, Meshtastic/LoRa, MeshCore/LoRa, ADS-L-Empfang) und ein wiederholender
 Datei-Broadcast. Entstanden, weil vorhandene TX-Software (SDRangel) den
 AD9361-Sendezweig nach "Stop" aktiv weitersenden ließ — dieses Projekt
 legt deshalb besonderen Wert auf eine eigene, von GNU Radio unabhängige
@@ -30,7 +30,7 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 |---|---|
 | **TX-Modi** (`pluto-tx`) | FM (optional mit CTCSS/DCS), SSB (USB/LSB), M17, FreeDV 2020/2020B, RADE V1, File Broadcast, Baseband |
 | **RX-Modi** (`pluto-advanced-rx`) | FM, SSB (USB/LSB), RADE V1, M17, Baseband |
-| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, JS8 (JS8Call-kompatibel, Normal/Fast/Turbo/Slow), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte) |
+| **Digimodes** (beide Apps, eigener Reiter) | Waterfall Writer (Text im Wasserfall), PSK31-Chat, RTTY, POCSAG (Funkruf), FT8, JS8 (JS8Call-kompatibel, Normal/Fast/Turbo/Slow), Meshtastic (LoRa; nur Pluto/HackRF/RTL-SDR), MeshCore (LoRa, nur RF-Geräte), nur RX: ADS-L (Luftfahrt, 868 MHz) |
 | **Hardware** | PlutoSDR/Pluto+ (TX+RX), HackRF One (TX+RX), RTL-SDR (RX), Soundkarte/externes Funkgerät (TX+RX), AIOC-Adapter/analoges Funkgerät (TX), ESP32-S3-Board (TX, nur 13 cm, nur FM und M17, experimentell) |
 | **Automatisierung** | `pluto-cli` — dieselbe Codebasis headless, `--json`-Ausgabe |
 | **Fernbetrieb** | `web-trx` — Browser-Oberfläche (FastAPI + Svelte) auf derselben Codebasis, ein Betreiber, Login, HTTPS |
@@ -447,6 +447,25 @@ erzwingt wenigstens die 10 % Duty-Cycle pro Stunde (Sendungen werden
 sonst abgelehnt). Zum Testen `--hop-limit 0` und geringe Leistung
 verwenden, kein Rufzeichen in Text auf dem öffentlichen 868-MHz-Kanal.
 
+**ADS-L (Luftfahrt, nur Empfang).** `pluto-advanced-rx` und `pluto-cli rx --digimode adsl`
+empfangen die Positionsmeldungen von Luftfahrzeugen nach EASA ADS-L 4 SRD860 auf 868,2 und
+868,4 MHz gleichzeitig (M-Band: GFSK, 100 kchip/s, Manchester, **kein LoRa**). Der Empfänger
+stimmt selbst auf 868,85 MHz ab und braucht mindestens 1,8 MS/s; die Standardraten aller Geräte
+passen. Die Tabelle zeigt pro Luftfahrzeug Adresse, Kategorie, Position, Höhe (über dem
+WGS-84-Ellipsoid, nicht über Grund oder Meer), Tempo, Steigen, Kurs und die gemessene
+Frequenzablage; darunter steht das Paket-Log. Angezeigt wird nur, was die CRC besteht, gespeichert
+wird nichts. O-Band (LDR/HDR), FEC-Rahmen, Status- und Uplink-Inhalte sowie FLARM werden nicht
+dekodiert.
+
+**Nur zur Beobachtung, nicht zur Navigation oder Kollisionsvermeidung:** Ein Empfänger hört nur
+einen Teil des Verkehrs. Das Projekt enthält bewusst keinen ADS-L-Sender.
+
+Prüfstand: über Funk mit Testpaketen vom Pluto+ (−40 dB, Position bei 0°N 0°E, kurze Distanz)
+kamen auf Pluto+ und RTL-SDR je 8 von 8 Paketen korrekt an. Nur mit zu geringer fester
+RTL-Verstärkung (20 dB) gingen Pakete verloren; die AGC-Vorgabe oder 40 dB funktionieren. **Echter
+Flugverkehr ist noch nicht empfangen worden** (im Testzeitraum war in Reichweite keiner), und der
+**HackRF ist nur synthetisch getestet**, nicht am echten Gerät. Details: `docs/adsl/SPEC.md`.
+
 **Waterfall Writer.** Sendet eingegebenen Text so, dass er beim
 Empfänger direkt im Wasserfall/Spektrum als lesbares Bild erscheint —
 dieselbe Grundidee wie klassisches Hellschreiber. Zwei Layouts
@@ -600,6 +619,10 @@ Averaging standardmäßig 3. RX-Bandbreiten-Presets bis 10 MHz
 
 ## Bekannte Einschränkungen
 
+- **ADS-L ist noch nicht an echtem Flugverkehr bestätigt**, sondern an synthetischen Signalen und an
+  eigenen Testpaketen über Funk. Empfangen wird nur das M-Band. Am Pluto über das Netzwerk ist für
+  Dauerbetrieb ein großer RX-Puffer (262144) sinnvoll, mit dem Standardpuffer traten vereinzelt
+  Überläufe auf.
 - **Meshtastic ist ein Basis-Digimode, kein vollwertiger Mesh-Knoten**:
   gesendet wird eine Textnachricht als Broadcast (kein NodeInfo/Position,
   keine Empfangsbestätigungen, kein Weiterleiten fremder Pakete), nur der

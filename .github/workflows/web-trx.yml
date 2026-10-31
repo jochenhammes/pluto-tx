@@ -43,7 +43,7 @@ jobs:
     # stand-in server) and pluto_tx/webtrx_widget.py -- neither needs GNU Radio.
     # Also the pure JS8 codec (tables, PHY, message layer, waveform/slot plan
     # against the JS8Call reference vectors); the parts that need the js8call
-    # clone (JSC word lists, js8ref) skip themselves.
+    # clone (JSC word lists, js8ref) skip themselves. The ADS-L codec and burst demodulator are numpy only.
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
@@ -56,4 +56,5 @@ jobs:
       - run: pip install PyQt5 numpy
       - run: python -m unittest -v tests.test_webtrx_control tests.test_webtrx_widget
       - run: python -m unittest -v tests.test_js8_tables tests.test_js8_phy tests.test_js8_message tests.test_js8_codec_roundtrip
+      - run: python -m unittest -v tests.test_adsl_pure tests.test_adsl_demod
       - run: shellcheck web-trx/scripts/*.sh install-web-trx.sh install-js8.sh

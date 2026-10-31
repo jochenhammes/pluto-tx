@@ -64,3 +64,24 @@ Ein Traffic-Rahmen hat die Länge `0x18` (1 + 20 + 3 Byte), auf der Luft 432 Chi
 | Falscher Kanal bis 60 dB | keine Fehlzuordnung |
 
 Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsignal stört den Diskriminator vollständig; bei −10 dB ist er folgenlos. Das kann eigene Störlinien des Empfängers bei sehr schwachen Signalen betreffen.
+
+## Echttest (31.10.2026, JO31)
+
+**Testsendung mit deiner Freigabe:** Pluto+ bei −40 dB über Funk, kurze Distanz, 868,2/868,4 MHz abwechselnd. Fünf Serien zu je 8 Paketen, zusammen etwa 0,2 s Sendezeit. Inhalt: Zufallsadresse (Privacy-Tabelle), „am Boden", Position bei 0°N 0°E, Modellflugzeug. Der OGN-Feed um diese Position blieb bei der geprüften ersten Serie leer. Das Sendeskript ist nicht Teil des Repos.
+
+| Empfänger | Einstellung | Pakete | Korrelation |
+|---|---|---|---|
+| Pluto+ | fest 30 dB, Puffer 262144 | 8/8 | 0,89 |
+| RTL-SDR | Standard-AGC | 8/8 | 0,92 |
+| RTL-SDR | fest 40 dB | 8/8 | 0,92 |
+| RTL-SDR | fest 20 dB | 5/8 und 2/8 | 0,8 |
+
+Bei 20 dB zeigte eine Rohaufnahme keine Lücken und kein Clipping. Alle Bursts wurden gefunden, lagen aber nur rund 10 dB über dem Rauschen und scheiterten am CRC. Das passt zur Grenze aus den synthetischen Messungen.
+
+**Dauer-Empfang:** rund 45 Minuten am späten Nachmittag auf Pluto+ und RTL-SDR ergaben kein echtes ADS-L-Paket. Laut OGN-Feed war im Umkreis von 150 km um JO31 in einer 90-Sekunden-Stichprobe nur ein ADS-L-Sender aktiv. **Echter Flugverkehr ist also noch nicht bestätigt.** Der OGN-Abgleich aus dem Plan steht deshalb noch aus.
+
+**HackRF:** nicht am echten Gerät getestet, nur der synthetische Pfad bei seinen Raten.
+
+**CPU:** Der gesamte Flowgraph braucht auf dem Testrechner etwa 190 bis 220 % eines Kerns, der Großteil davon entfällt auf den Grundzweig ohne Digimode. Die beiden ADS-L-Kanäle kommen mit etwa 40 Prozentpunkten dazu.
+
+**Pluto-Puffer:** In 20 s gab es mit dem Standardpuffer 32768 einen Überlauf, mit 262144 keinen.
