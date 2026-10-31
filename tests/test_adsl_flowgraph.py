@@ -1,10 +1,12 @@
 """ADS-L through the real RX flowgraph (GNU Radio blocks, fake device replaying synthetic IQ)."""
-import time
+import os
 import unittest
 
 import numpy as np
 
-from pluto_advanced_rx import config
+from pluto_advanced_rx import adsl_state, config
+from pluto_advanced_rx.adsl_state import AdslState
+from pluto_tx import adsl_codec as c
 from tests import adsl_testgen as gen
 
 
@@ -97,6 +99,160 @@ class FlowgraphTests(unittest.TestCase):
         fakes.make_fake_rx(np.zeros(100, np.complex64), 2_500_000)
         rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=433e6, sample_rate=2_500_000, device_type="fake")
         self.assertEqual(rx.adsl_channels, [])
+
+
+    def test_tuning_away_is_refused_at_build_and_detected_later(self):
+        from pluto_advanced_rx import flowgraph as rxf
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(100, np.complex64), 2_400_000)
+        with self.assertRaisesRegex(ValueError, "outside the tuned span"):
+            rxf.AdvancedRxFlowgraph(uri="x", frequency=433e6, sample_rate=2_400_000, device_type="fake", active_digimode="adsl")
+        rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=config.ADSL_LO_HZ, sample_rate=2_400_000, device_type="fake",
+                                     active_digimode="adsl")
+        self.assertTrue(rx.adsl_all_channels_in_span())
+        rx.set_frequency(870e6)
+        self.assertFalse(rx.adsl_all_channels_in_span())
+
+
+class StateTests(unittest.TestCase):
+    def packet(self, **kw):
+        info = c.parse_frame(gen.frame(gen.traffic_clear(**kw)))
+        info.update(channel_hz=868_200_000, frequency_offset_hz=1000)
+        return info
+
+    def test_one_aircraft_several_packets(self):
+        state = AdslState()
+        state.on_packet(self.packet(alt_m=100), now=1.0)
+        state.on_packet(self.packet(alt_m=200), now=2.0)
+        state.on_packet(self.packet(address=5, alt_m=300), now=1.5)
+        aircraft = state.get_aircraft()
+        self.assertEqual([a["label"] for a in aircraft], ["FANET:123456", "FANET:000005"])
+        self.assertEqual(aircraft[0]["packets"], 2)
+        self.assertEqual(aircraft[0]["alt_m"], 200)
+
+    def test_status_packet_keeps_the_last_position(self):
+        state = AdslState()
+        state.on_packet(self.packet(), now=1.0)
+        status = c.parse_frame(gen.frame(bytes((3,)) + gen.traffic_clear()[1:]))
+        status.update(channel_hz=868_400_000, frequency_offset_hz=0)
+        state.on_packet(status, now=2.0)
+        aircraft = state.get_aircraft()[0]
+        self.assertAlmostEqual(aircraft["lat"], 48.12345, places=4)
+        self.assertEqual(aircraft["packets"], 2)
+        self.assertEqual(aircraft["kinds"], {"traffic", "status"})
+
+    def test_lost_fix_clears_the_old_position(self):
+        state = AdslState()
+        state.on_packet(self.packet(), now=1.0)
+        lost = self.packet()
+        lost.update(lat=None, lon=None)
+        state.on_packet(lost, now=2.0)
+        self.assertIsNone(state.get_aircraft()[0]["lat"])
+
+    def test_limits_and_clear(self):
+        state = AdslState()
+        for i in range(adsl_state.MAX_ROWS + 10):
+            state.on_packet(self.packet(address=i % (adsl_state.MAX_AIRCRAFT + 5)), now=float(i))
+        self.assertEqual(state.counts(), (adsl_state.MAX_ROWS, adsl_state.MAX_AIRCRAFT))
+        state.clear()
+        self.assertEqual(state.counts(), (0, 0))
+
+    def test_encrypted_packet_is_logged_without_aircraft(self):
+        state = AdslState()
+        body = bytes((1 << 5,)) + bytes(20)
+        state.on_packet(c.parse_frame(bytes((len(body) + 3,)) + body + c.crc24(body).to_bytes(3, "big")), now=1.0)
+        self.assertEqual(state.counts(), (1, 0))
+
+
+class GuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt5 import QtWidgets
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_tables_and_emergency_highlight(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("adsl"))
+        self.assertFalse(w.adsl_group_widget.isHidden())
+        self.assertTrue(w.pocsag_group_widget.isHidden())
+        info = c.parse_frame(gen.frame(gen.traffic_clear(emergency=2, climb_mps=2.0, speed_mps=25.0)))
+        info.update(channel_hz=868_400_000, frequency_offset_hz=-1500)
+        w._adsl_state.on_packet(info)
+        w._poll_digimode()
+        columns = w.ADSL_AIRCRAFT_COLUMNS
+        table = w.adsl_aircraft_table
+        cell = lambda name: table.item(0, columns.index(name)).text()
+        self.assertEqual(cell("Address"), "FANET:123456")
+        self.assertEqual(cell("Category"), "glider")
+        self.assertEqual(cell("Latitude"), "48.12345")
+        self.assertEqual(cell("Alt m"), "1234")
+        self.assertEqual(cell("km/h"), "90")
+        self.assertEqual(cell("Climb m/s"), "+2.0")
+        self.assertEqual(cell("MHz"), "868.4")
+        self.assertEqual(cell("Offset kHz"), "-1.5")
+        self.assertEqual(cell("Emergency"), "general")
+        self.assertEqual(w.adsl_table.item(0, 2).text(), "FANET:123456")
+        self.assertIn("48.12345, 8.12345", w.adsl_table.item(0, 3).text())
+        w.adsl_clear_button.click()
+        self.assertEqual(table.rowCount(), 0)
+        self.assertEqual(w.adsl_table.rowCount(), 0)
+
+    def window_on_fake_device(self, rate=2_400_000):
+        from pluto_advanced_rx import flowgraph as rxf, gui
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(4096, np.complex64), rate)
+        w = gui.MainWindow("x")
+        w.device_type_combo.blockSignals(True)
+        w.device_type_combo.addItem("fake", "fake")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("fake"))
+        w.device_type_combo.blockSignals(False)
+        w.tb = rxf.AdvancedRxFlowgraph(uri="x", frequency=433.5e6, sample_rate=rate, device_type="fake")
+        w.freq_spin.setValue(433.5)
+        return w
+
+    def test_entering_the_mode_tunes_to_the_lo_and_leaving_restores(self):
+        w = self.window_on_fake_device()
+        w._rebuild_for_digimode("adsl")
+        self.assertEqual(w.tb.active_digimode, "adsl")
+        self.assertEqual(w.tb.nominal_freq_hz, config.ADSL_LO_HZ)
+        self.assertAlmostEqual(w.freq_spin.value(), 868.85)
+        self.assertEqual(len(w.tb.adsl_channels), 2)
+        self.assertIsNone(w.tb.filebroadcast_deframer)
+        w._update_adsl_signal_label()
+        self.assertIn("868.2 + 868.4 MHz", w.adsl_signal_label.text())
+        w._poll_digimode()  # includes the file transfer poll, whose deframer is absent in this mode
+        w._rebuild_for_digimode(None)
+        self.assertEqual(w.tb.nominal_freq_hz, 433.5e6)
+        self.assertAlmostEqual(w.freq_spin.value(), 433.5)
+        self.assertIsNotNone(w.tb.filebroadcast_deframer)
+        w.tb.shutdown()
+
+    def test_too_low_rate_reports_and_keeps_the_old_flowgraph(self):
+        w = self.window_on_fake_device(rate=1_000_000)
+        old = w.tb
+        w._rebuild_for_digimode("adsl")
+        self.assertIs(w.tb, old)
+        self.assertIn("too low for ADS-L", w.status_label.text())
+        self.assertIsNone(w._active_digimode)
+
+    def test_tuning_away_shows_a_warning(self):
+        w = self.window_on_fake_device()
+        w._rebuild_for_digimode("adsl")
+        w.tb.set_frequency(870e6)
+        w._update_adsl_signal_label()
+        self.assertIn("Tuned away", w.adsl_signal_label.text())
+        w.tb.shutdown()
+
+    def test_soundcard_cannot_select_adsl(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("adsl"))
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("audio"))
+        self.assertNotEqual(w.digimode_combo.currentData(), "adsl")
+        item = w.digimode_combo.model().item(w.digimode_combo.findData("adsl"))
+        self.assertFalse(item.isEnabled())
 
 
 if __name__ == "__main__":

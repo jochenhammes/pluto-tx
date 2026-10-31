@@ -22,7 +22,7 @@ import threading
 import time
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pluto_tx import audio_devices
 from pluto_tx import freq_correction
@@ -36,6 +36,8 @@ from .flowgraph import AdvancedRxFlowgraph, RADE_AVAILABLE, M17_AVAILABLE, LORA_
 from .meshcore_state import MeshcoreState
 from .meshtastic_state import MeshtasticState
 from .pocsag_state import PocsagState
+from pluto_tx import adsl_codec
+from .adsl_state import AdslState, summarize as adsl_summarize
 from .ft8_rx import Ft8State
 from .js8_rx import Js8State
 from pluto_tx import js8_phy
@@ -115,6 +117,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshcore_rendered_version = -1
         self._meshcore_last_frames = 0
         self._meshcore_last_activity_time = 0.0
+        # ADS-L traffic (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._adsl_state = AdslState()
+        self._adsl_rendered_version = -1
+        self._adsl_rendered_time = 0.0
+        self._adsl_last_activity_time = 0.0
+        self._adsl_last_packets = 0
         # POCSAG paging calls -- same "constructed ONCE, survives rebuilds" reasoning.
         self._pocsag_state = PocsagState()
         self._pocsag_rendered_version = -1
@@ -299,6 +307,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item.setEnabled(False)
             ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
         self.digimode_combo.addItem("JS8 (JS8Call)", "js8")
+        self.digimode_combo.addItem("ADS-L (Aircraft, 868 MHz)", "adsl")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
         self.digimode_combo.addItem("MeshCore (LoRa)", "meshcore")
         if not MESHCORE_AVAILABLE:
@@ -624,6 +633,46 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(pocsag_group, 1)
         self.pocsag_group_widget = pocsag_group
         self._update_pocsag_signal_label()
+
+        # --- ADS-L RX: aircraft conspicuity broadcasts on 868.2 + 868.4 MHz, both received at once. Entering the mode
+        # tunes to one LO between the channels; only packets that pass their CRC ever reach these tables.
+        adsl_group = QtWidgets.QWidget()
+        adsl_layout = QtWidgets.QVBoxLayout(adsl_group)
+        adsl_layout.setContentsMargins(0, 0, 0, 0)
+        self.adsl_notice_label = QtWidgets.QLabel(
+            "<b>Monitoring only.</b> Not for navigation or collision avoidance: a receiver hears only part of the traffic, "
+            "and this one is not certified for anything.")
+        self.adsl_notice_label.setWordWrap(True)
+        adsl_layout.addWidget(self.adsl_notice_label)
+        self.adsl_signal_label = QtWidgets.QLabel("")
+        self.adsl_signal_label.setWordWrap(True)
+        adsl_layout.addWidget(self.adsl_signal_label)
+        self.adsl_aircraft_table = QtWidgets.QTableWidget(0, len(self.ADSL_AIRCRAFT_COLUMNS))
+        self.adsl_aircraft_table.setHorizontalHeaderLabels(self.ADSL_AIRCRAFT_COLUMNS)
+        self.adsl_aircraft_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.adsl_aircraft_table.verticalHeader().setVisible(False)
+        self.adsl_aircraft_table.horizontalHeader().setStretchLastSection(True)
+        self.adsl_aircraft_table.setMinimumHeight(120)
+        self.adsl_aircraft_table.setToolTip(
+            "Altitude is GNSS height above the WGS-84 ellipsoid, not above sea level or ground. "
+            "Offset = measured frequency error of the last packet (your receiver's plus the sender's).")
+        adsl_layout.addWidget(self.adsl_aircraft_table, 2)
+        adsl_row = QtWidgets.QHBoxLayout()
+        adsl_row.addWidget(QtWidgets.QLabel("Packets:"))
+        adsl_row.addStretch(1)
+        self.adsl_clear_button = QtWidgets.QPushButton("Clear")
+        self.adsl_clear_button.clicked.connect(self._on_adsl_clear_clicked)
+        adsl_row.addWidget(self.adsl_clear_button)
+        adsl_layout.addLayout(adsl_row)
+        self.adsl_table = QtWidgets.QTableWidget(0, 5)
+        self.adsl_table.setHorizontalHeaderLabels(["Time", "MHz", "Address", "Content", "Offset kHz"])
+        self.adsl_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.adsl_table.verticalHeader().setVisible(False)
+        self.adsl_table.setMinimumHeight(100)
+        adsl_layout.addWidget(self.adsl_table, 1)
+        digimodes_tab_layout.addWidget(adsl_group, 1)
+        self.adsl_group_widget = adsl_group
+        self._update_adsl_signal_label()
 
         # --- FT8: decode list per 15 s UTC slot (USB at the tuned dial frequency, e.g. 14.074 /
         # 144.174 MHz). Double-click a row to copy the sending station's call for the TX app.
@@ -1274,6 +1323,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.meshtastic_group_widget.setVisible(selected == "meshtastic")
         self.meshcore_group_widget.setVisible(selected == "meshcore")
         self.pocsag_group_widget.setVisible(selected == "pocsag")
+        self.adsl_group_widget.setVisible(selected == "adsl")
         self.ft8_group_widget.setVisible(selected == "ft8")
         self.js8_group_widget.setVisible(selected == "js8")
 
@@ -1377,6 +1427,11 @@ class MainWindow(QtWidgets.QMainWindow):
             lora_item.setToolTip("LoRa needs an RF device, not a soundcard")
             if self.digimode_combo.currentData() == "meshtastic":
                 self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
+        adsl_item = self.digimode_combo.model().item(self.digimode_combo.findData("adsl"))
+        adsl_item.setEnabled(has_frequency)
+        adsl_item.setToolTip("" if has_frequency else "ADS-L needs an RF device, not a soundcard")
+        if not has_frequency and self.digimode_combo.currentData() == "adsl":
+            self.digimode_combo.setCurrentIndex(self.digimode_combo.findData("psk31"))
         mc_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshcore"))
         mc_item.setEnabled(MESHCORE_AVAILABLE and has_frequency)
         if MESHCORE_AVAILABLE and not has_frequency:
@@ -1563,6 +1618,7 @@ class MainWindow(QtWidgets.QMainWindow):
             on_meshcore_packet=self._meshcore_state.on_frame,
             meshcore_preset_index=self._meshcore_preset_index(),
             on_pocsag_message=self._pocsag_state.on_message,
+            on_adsl_packet=self._adsl_state.on_packet,
             on_ft8_decodes=self._ft8_state.on_decodes,
             ft8_my_call=self._ft8_tx_setting("my_call"), ft8_my_grid=self._ft8_tx_setting("locator"),
             on_js8_decodes=self._js8_state.on_decodes, js8_submodes=self.js8_speed_combo.currentData(),
@@ -1922,6 +1978,74 @@ class MainWindow(QtWidgets.QMainWindow):
             self._meshcore_state.set_identity(None)
             self.meshcore_own_key_label.setText("")
             self.meshcore_own_key_label.setToolTip("")
+
+    ADSL_AIRCRAFT_COLUMNS = ["Address", "Category", "Latitude", "Longitude", "Alt m", "km/h", "Climb m/s", "Track",
+                             "State", "Emergency", "Packets", "MHz", "Offset kHz", "Age s"]
+
+    def _on_adsl_clear_clicked(self):
+        self._adsl_state.clear()
+        self._render_adsl_tables()
+
+    def _update_adsl_signal_label(self):
+        if self.tb is None:
+            self.adsl_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "adsl":
+            self.adsl_signal_label.setText("Not listening.")
+            return
+        deframers = [channel[3] for channel in self.tb.adsl_channels]
+        packets = sum(d.packets for d in deframers)
+        if packets > self._adsl_last_packets:
+            self._adsl_last_packets = packets
+            self._adsl_last_activity_time = time.time()
+        if not self.tb.adsl_all_channels_in_span():
+            self.adsl_signal_label.setText(f"<b>Tuned away:</b> a channel is outside the received span. Set the frequency "
+                                           f"back to {config.ADSL_LO_HZ / 1e6:.2f} MHz.")
+            return
+        recent = self._adsl_last_activity_time > 0 and time.time() - self._adsl_last_activity_time < 10.0
+        channels = " + ".join(f"{hz / 1e6:.1f}" for hz in config.ADSL_CHANNELS_HZ)
+        _rows, aircraft = self._adsl_state.counts()
+        self.adsl_signal_label.setText(
+            f"{'Packet received' if recent else 'Listening'} on {channels} MHz -- {packets} packet(s) since connecting, "
+            f"{sum(d.crc_failures for d in deframers)} failed CRC, {aircraft} aircraft in the list.")
+
+    def _render_adsl_tables(self):
+        version, rows = self._adsl_state.get_snapshot()
+        self._adsl_rendered_version = version
+        self._adsl_rendered_time = time.time()
+        table = self.adsl_table
+        scrollbar = table.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            label = adsl_codec.address_label(row) if "address" in row else ""
+            cells = [time.strftime("%H:%M:%S", time.localtime(row["time"])), f"{row.get('channel_hz', 0) / 1e6:.1f}", label,
+                     adsl_summarize(row), f"{row.get('frequency_offset_hz', 0) / 1e3:+.1f}"]
+            for c, text in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+        table.resizeColumnsToContents()
+        if at_bottom:
+            table.scrollToBottom()
+        aircraft = self._adsl_state.get_aircraft()
+        table = self.adsl_aircraft_table
+        table.setRowCount(len(aircraft))
+
+        def shown(value, fmt="{}", scale=1.0):
+            return "" if value is None else fmt.format(value * scale)
+        now = time.time()
+        for r, a in enumerate(aircraft):
+            cells = [a["label"], a.get("category", ""), shown(a.get("lat"), "{:.5f}"), shown(a.get("lon"), "{:.5f}"),
+                     shown(a.get("alt_m"), "{:.0f}"), shown(a.get("speed_mps"), "{:.0f}", 3.6), shown(a.get("climb_mps"), "{:+.1f}"),
+                     shown(a.get("track_deg"), "{:.0f}"), a.get("flight_state", ""), a.get("emergency", ""), str(a["packets"]),
+                     shown(a.get("channel_hz"), "{:.1f}", 1e-6), shown(a.get("frequency_offset_hz"), "{:+.1f}", 1e-3),
+                     f"{max(0.0, now - a['time']):.0f}"]
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c == self.ADSL_AIRCRAFT_COLUMNS.index("Emergency") and text not in ("", "none", "undefined"):
+                    item.setBackground(QtGui.QColor("#c62828"))
+                    item.setForeground(QtGui.QColor("white"))
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
 
     def _on_meshcore_clear_clicked(self):
         self._meshcore_state.clear()
@@ -2352,6 +2476,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._meshcore_state.version != self._meshcore_rendered_version:
             self._render_meshcore_table()
         self._update_pocsag_signal_label()
+        self._update_adsl_signal_label()
+        if self._adsl_state.version != self._adsl_rendered_version or (
+                self.digimode_combo.currentData() == "adsl" and time.time() - self._adsl_rendered_time >= 1.0):
+            self._render_adsl_tables()  # the age column moves on without any new packet
         if self._meshtastic_state.version != self._meshtastic_rendered_version:
             self._render_meshtastic_table()
         if self._pocsag_state.version != self._pocsag_rendered_version:
@@ -3059,14 +3187,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._autotune_cancel()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         freq = self.tb.nominal_freq_hz
-        # Meshtastic presets retune the receiver to the preset's carrier; the
-        # previous frequency comes back when leaving the mode again.
-        lora_digimodes = ("meshtastic", "meshcore")
-        if new_digimode in lora_digimodes:
-            if self.tb.active_digimode not in lora_digimodes:
+        # Meshtastic presets retune the receiver to the preset's carrier, ADS-L to
+        # its fixed LO; the previous frequency comes back when leaving the mode again.
+        fixed_freq_digimodes = ("meshtastic", "meshcore", "adsl")
+        if new_digimode in fixed_freq_digimodes:
+            if self.tb.active_digimode not in fixed_freq_digimodes:
                 self._freq_before_lora = freq
-            freq = (self._meshtastic_preset() if new_digimode == "meshtastic" else self._meshcore_preset()).frequency_hz
-        elif self.tb.active_digimode in lora_digimodes and self._freq_before_lora is not None:
+            if new_digimode == "adsl":
+                freq = config.ADSL_LO_HZ
+            else:
+                freq = (self._meshtastic_preset() if new_digimode == "meshtastic" else self._meshcore_preset()).frequency_hz
+        elif self.tb.active_digimode in fixed_freq_digimodes and self._freq_before_lora is not None:
             freq = self._freq_before_lora
             self._freq_before_lora = None
         fine = self.tb.fine_offset_hz
@@ -3109,6 +3240,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshcore_last_frames = 0
         self._meshcore_last_activity_time = 0.0
         self._meshtastic_last_activity_time = 0.0
+        self._adsl_last_packets = 0
+        self._adsl_last_activity_time = 0.0
         self.tb.shutdown()
         self.tb = new_tb
         if abs(self.freq_spin.value() - freq / 1e6) > 1e-9:
@@ -3294,6 +3427,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # from whatever device was previously selected, so don't trust it
         # for a device with no frequency concept at all.
         frequency_hz = 0.0 if device_cls.frequency_range_hz == (0.0, 0.0) else self.freq_spin.value() * 1e6
+        if self._active_digimode == "adsl":  # connecting with ADS-L already selected: same LO as entering the mode
+            if abs(frequency_hz - config.ADSL_LO_HZ) > 1:
+                self._freq_before_lora = frequency_hz
+            frequency_hz = config.ADSL_LO_HZ
+            self.freq_spin.blockSignals(True)
+            self.freq_spin.setValue(frequency_hz / 1e6)
+            self.freq_spin.blockSignals(False)
         try:
             new_tb = AdvancedRxFlowgraph(
                 uri=connection,

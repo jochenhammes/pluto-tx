@@ -861,6 +861,10 @@ class AdvancedRxFlowgraph(gr.top_block):
             if self.sample_rate < config.ADSL_MIN_SAMPLE_RATE_HZ:
                 raise ValueError(f"RX bandwidth {self.sample_rate / 1e6:g} MS/s is too low for ADS-L -- "
                                  f"pick at least {config.ADSL_MIN_SAMPLE_RATE_HZ / 1e6:g} MS/s")
+            for channel_hz in config.ADSL_CHANNELS_HZ:
+                if not self._adsl_channel_in_span(channel_hz):
+                    raise ValueError(f"{channel_hz / 1e6:.1f} MHz is outside the tuned span -- ADS-L needs the receiver "
+                                     f"on {config.ADSL_LO_HZ / 1e6:.2f} MHz")
             adsl_decim = max(1, round(self.sample_rate / adsl_demod.WORKING_RATE_HZ))
             adsl_rate = self.sample_rate / adsl_decim
             adsl_taps = firdes.low_pass(1.0, self.sample_rate, adsl_demod.CHANNEL_CUTOFF_HZ,
@@ -958,6 +962,13 @@ class AdvancedRxFlowgraph(gr.top_block):
         __init__'s gain_values."""
         agc_stage = next(s for s in self.device.gain_stages if s.controls_agc)
         self.device.set_gain(agc_stage.name, gain_db)
+
+    def _adsl_channel_in_span(self, channel_hz):
+        offset = abs(channel_hz - (self.nominal_freq_hz + self.fine_offset_hz))
+        return offset + adsl_demod.CHANNEL_CUTOFF_HZ + adsl_demod.CHANNEL_TRANS_HZ / 2 <= self.sample_rate / 2
+
+    def adsl_all_channels_in_span(self):
+        return all(self._adsl_channel_in_span(channel[0]) for channel in self.adsl_channels)
 
     def _wire_lora_rx(self, lp, deframer):
         """Tap the full-rate device source, resample to 4 x the preset's LoRa bandwidth with EXPLICIT taps and
