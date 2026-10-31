@@ -501,3 +501,9 @@ JS8_RX_LATENCY_S = FT8_RX_LATENCY_S
 JS8_DECODER_BACKEND = "auto"
 # Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)
 JS8_DEFAULT_SUBMODES = (0,)
+
+# --- ADS-L RX (EASA ADS-L 4 SRD860, M-band, docs/adsl/SPEC.md). One LO for both channels, placed so that neither lands
+# on the DC spike HackRF and RTL-SDR do not correct, and the O-band channel (869.525 MHz) still fits later.
+ADSL_LO_HZ = 868_850_000
+ADSL_CHANNELS_HZ = (868_200_000, 868_400_000)
+ADSL_MIN_SAMPLE_RATE_HZ = 1_800_000  # the farther channel is 650 kHz off the LO; device filters roll off near the edge

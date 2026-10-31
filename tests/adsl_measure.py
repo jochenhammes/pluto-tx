@@ -5,11 +5,10 @@ import time
 
 import numpy as np
 
-from pluto_advanced_rx.adsl_demod import AdslBurstDetector, DEVIATION_HZ
+from pluto_advanced_rx.adsl_demod import (AdslBurstDetector, CHANNEL_CUTOFF_HZ, CHANNEL_TRANS_HZ as CHANNEL_TRANSITION_HZ,
+                                          DEVIATION_HZ, WORKING_RATE_HZ)
 from tests import adsl_testgen as gen
 
-CHANNEL_CUTOFF_HZ = 110_000  # best trade-off of a sweep: passes +-50 kHz error, rejects the neighbour 200 kHz away
-CHANNEL_TRANSITION_HZ = 40_000
 NOISE_BW_HZ = 200_000  # the SNR below is referred to the 200 kHz channel of the specification
 
 
@@ -21,7 +20,7 @@ def lowpass(rate):
 
 
 def decimation(rate):
-    return max(1, round(rate / 400_000))
+    return max(1, round(rate / WORKING_RATE_HZ))
 
 
 def channelize(iq, rate):

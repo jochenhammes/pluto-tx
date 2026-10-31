@@ -15,6 +15,10 @@ from pluto_tx import adsl_codec
 
 CHIP_RATE = 100_000
 DEVIATION_HZ = 50_000
+WORKING_RATE_HZ = 400_000  # target discriminator rate, about 4 samples per chip; any nearby rate works
+# Chosen by sweep (tests/adsl_measure.py): passes a +-50 kHz frequency error, rejects the neighbour 200 kHz away.
+CHANNEL_CUTOFF_HZ = 110_000
+CHANNEL_TRANS_HZ = 40_000
 MAX_FRAME_LENGTH = 96  # longer frames use Reed-Solomon parity by recommendation, which is not decoded yet
 DEFAULT_THRESHOLD = 0.5  # normalised correlation; only limits how many candidates reach the CRC
 _PEAK_SEARCH_CHIPS = 8
