@@ -14,12 +14,14 @@ und Stoppen geht per `web-trx start|stop`, mit den Skripten unter
 
 **Stand:**
 - **Empfang:** FM, SSB (USB/LSB) und M17 mit Audio im Browser. POCSAG wird dekodiert.
+- **APRS:** Stationen auf der Karte und Nachrichten, nur über Funk.
 - **Wasserfall:** echtes Zoom-FFT, Mittelung, automatischer Pegel.
 - **Senden:** FM, SSB (USB/LSB) und M17 mit Audio aus dem Browser, mit Audio-Aufbereitung und Leistungsregler.
   - **Quelle wählbar:** jeder Eingang des Browser-Rechners (Mikrofon, Line-in, USB-Soundkarte, virtuelles Kabel;
     Sprachverarbeitung des Browsers abschaltbar) oder eine Audiodatei, die am Ende von selbst enttastet.
   - Details: [`docs/BROWSER_AUDIO.md`](docs/BROWSER_AUDIO.md).
 - **POCSAG senden:** eine Nachricht an eine RIC.
+- **APRS senden:** Bake oder Nachricht, ein Paket je Klick.
 - **Sicherheit:**
   - NOTAUS;
   - automatisches Enttasten, wenn das Browser-Audio abreißt;
@@ -237,6 +239,19 @@ einem NOTAUS bleibt der Sender aus. Unter `run/` liegen Log (`web-trx.log`), PID
 (`web_trx_tx_log.sqlite3`), die Bedien-Einstellungen (`settings.json`:
 Frequenzen, Modi, Leistung, Audio-Aufbereitung, Wasserfall) und das
 Zertifikat.
+
+### APRS mit Live-Karte und Nachrichten
+
+Der Modus **APRS** startet auf 144,800 MHz, die Frequenz bleibt änderbar, das Audio bleibt wie bei FM verfügbar. Die Karte zeigt
+Stationen mit Position, die Tabelle alle Gehörten, daneben stehen die Nachrichten. Es läuft nur über Funk, ohne APRS-IS.
+
+Beim Senden kommen Rufzeichen und Locator aus den Stationsdaten, die Position ist die Mitte des Locators. „Aussenden“ schickt ein
+Paket, höchstens eines in 30 s. Die Sendefrequenz ändert sich nicht von selbst; die Taste „144,800 MHz“ stellt sie nur ein.
+**Automatisch bestätigen** sendet ohne Klick. Der Schalter ist aus, wird nicht gespeichert, geht mit dem letzten Browser und dem
+NOTAUS aus und antwortet nur, wenn der Sender auf APRS und auf der Empfangsfrequenz steht. Was nicht rausging, steht im Panel.
+
+Sendeweg und Empfang sind einzeln über Funk geprüft (`docs/aprs/SPEC.md`). Stehen Rechner, Pluto und RTL-SDR nebeneinander, senkt die
+Störstrahlung des Rechners die Empfindlichkeit deutlich: Die eigene Testsendung mit −40 dB wurde dann einzeln nicht dekodiert.
 
 ### ADS-B mit Live-Karte
 

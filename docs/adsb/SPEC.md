@@ -73,5 +73,7 @@ Pluto+, 2,5 MS/s, die vorhandene Behelfsantenne (nicht für 1090 MHz ausgelegt).
 
 **Einordnung:** Empfangen wurden nur tief anfliegende Flugzeuge im Raum Hamburg, von rund 150 gleichzeitig gemeldeten. Dass nur nahe Flugzeuge durchkommen, spricht für die Antenne als Grenze, belegt ist das aber erst mit einer passenden Antenne. Das spiegeln auch die wenigen, schwachen Pulse in der Rohaufnahme wider.
 
-**Nicht getestet:** RTL-SDR (am Testabend wegen eines USB-Fehlers nicht erreichbar) und HackRF am echten Signal. Die Vorgabe 40 dB für das RTL-SDR ist von ADS-L übernommen, nicht auf 1090 MHz gemessen. Eine Übersteuerung durch nahe Sender ist damit ebenfalls ungeprüft.
+**RTL-SDR (31.10.2026, später Abend):** bei 40 dB ein echtes Flugzeug (`51119B`) mit 13 Nachrichten. Es stand nicht im OGN-Feed, ein Abgleich fehlt also; das ist nur ein kurzer Nachweis, kein Vergleich mit dem Pluto.
+
+**Nicht getestet:** HackRF am echten Signal. Eine Übersteuerung des RTL-SDR durch nahe Sender ist ebenfalls ungeprüft.
 

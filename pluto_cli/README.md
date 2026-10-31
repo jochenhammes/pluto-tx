@@ -162,7 +162,7 @@ Common flags (every mode):
 | `--gain DB` | Manual gain, used when `--gain-mode manual` |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
-| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8,adsl,adsb}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
+| `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8,adsl,adsb,aprs}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |
 | `--psk31-tone-hz HZ` | PSK31 tone-filter center frequency, used with `--digimode psk31` |
 | `--rtty-mark-hz HZ` | RTTY mark tone frequency, used with `--digimode rtty` |
 | `--rtty-shift-hz HZ` | RTTY mark/space shift, used with `--digimode rtty` (presets: 170/425/850) |
@@ -375,6 +375,19 @@ and the matching `--rtty-mark-hz`/`--rtty-shift-hz`/`--rtty-baud-rate` on
 RX. Any RX mode works alongside `--digimode rtty` (`fm` above is just a
 placeholder primary mode -- RTTY decodes from the IF stage independently
 of it, same as PSK31).
+
+### APRS
+
+```bash
+pluto-cli rx fm --device rtlsdr --digimode aprs --json          # starts on 144.800 MHz; --freq wins if given
+pluto-cli tx aprs --freq 144800000 --call DA2JH-9 --locator JO43 --comment "Hello" --yes --json
+pluto-cli tx aprs --freq 144800000 --call DA2JH --kind message --to DL1ABC --text "Hello" --message-id 1 --yes
+```
+
+Receiving stays muted and prints `aprs_listen` once and `aprs_packet` per packet. `tx aprs` sends one packet per call and has no
+default frequency on purpose. `--path` takes `WIDE1-1,WIDE2-1` (default), `WIDE2-1` or `none`. It refuses before keying without a
+valid callsign, outside the amateur bands or with text that is too long. The 30 s limit only holds within one process, so a shell
+loop has to keep its own pause. Nothing has been sent on 144.800 MHz yet; see `docs/aprs/SPEC.md`.
 
 ### ADS-B reception (aircraft, 1090 MHz)
 
