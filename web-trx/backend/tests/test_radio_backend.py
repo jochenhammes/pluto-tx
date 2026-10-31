@@ -584,3 +584,42 @@ async def test_a_gain_changed_during_adsl_becomes_the_operators(tmp_path, monkey
     assert b.rx.gains["stage:TUNER"] == 30.0
     await b.disconnect("rx")
 
+
+async def test_adsl_picks_its_view_and_leaves_the_saved_zoom_alone(tmp_path, monkeypatch):
+    b, events = await _rtl_adsl_backend(tmp_path, monkeypatch)
+    b.rx.gains["fft_zoom"] = 16
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.tb.fft_probe.zoom == 4
+    assert abs(b.rx.tb.fft_probe.view_offset_hz + 550_000) < 1000  # to a whole FFT bin
+    assert ("rx_fft_zoom", {"value": 4}) in events
+    await b.set_gain("rx", "fft_zoom", 8)
+    assert b.rx.tb.fft_probe.zoom == 8
+    assert b.rx.gains["fft_zoom"] == 16
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.tb.fft_probe.zoom == 16
+    assert b.rx.tb.fft_probe.view_offset_hz == 0
+    assert ("rx_fft_zoom", {"value": 16}) in events
+    await b.disconnect("rx")
+
+
+async def test_spectrum_rows_carry_the_center_of_the_view(tmp_path, monkeypatch):
+    monkeypatch.setattr(radio_backend, "SPECTRUM_POLL_HZ", 200)
+    b, _events = await _rtl_adsl_backend(tmp_path, monkeypatch)
+    frames = []
+
+    async def on_spectrum(frame):
+        frames.append(frame)
+
+    b._on_spectrum = on_spectrum
+    task = asyncio.create_task(b._spectrum_loop())
+    await b.select_mode("rx", "adsl", {})
+    for _ in range(200):
+        if frames:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    assert frames, "no spectrum rows"
+    assert abs(frames[-1].center_hz - 868_300_000) < 1000
+    assert frames[-1].span_hz == 600_000
+    await b.disconnect("rx")
+

@@ -246,7 +246,8 @@ Kollisionsvermeidung.** Protokoll und Messwerte: [`docs/adsl/SPEC.md`](../docs/a
 
 - **Einstellung:** Der Modus stimmt den Empfänger selbst auf 868,85 MHz ab und braucht mindestens 1,8 MS/s; die
   Frequenz ist so lange gesperrt, beim Verlassen kommt die vorige zurück. Ton gibt es hier nicht. Ein RTL-SDR
-  mit unveränderter Verstärkung läuft in diesem Modus mit 40 dB statt 20 dB.
+  mit unveränderter Verstärkung läuft in diesem Modus mit 40 dB statt 20 dB. Der Wasserfall zeigt die beiden
+  Kanäle links und rechts seiner Mitte; einzelne Pakete (rund 5 ms) sieht man dort nicht zuverlässig.
 - **Karte:** eigene Station und Ringe von 25, 50 und 100 km aus dem Stations-Locator (Locator oben eintragen);
   Pfeil nach Kurs, Spur der letzten Positionen, Notfall rot. Nach 60 s ohne Position wird ein Marker blass, nach
   5 Minuten verschwindet er; in der Tabelle bleibt der Eintrag. Die Höhe gilt über dem WGS-84-Ellipsoid,

@@ -146,6 +146,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # active tab, so nothing should be decoding yet at startup.
         self._active_digimode = None
         self._adsl_gain_undo = None
+        self._zoom_before_adsl = None
 
         # M17 RX status -- same "constructed ONCE, survives every flowgraph
         # rebuild" reasoning as _psk31_state above. Just the most recent
@@ -1667,7 +1668,7 @@ class MainWindow(QtWidgets.QMainWindow):
             positive_span = zoomed_span / 2
             self.waterfall.set_frequency_range(positive_span / 2, positive_span)
         else:
-            self.waterfall.set_frequency_range(freq, zoomed_span)
+            self.waterfall.set_frequency_range(freq + self.tb.fft_probe.view_offset_hz, zoomed_span)
         self.waterfall.set_tuned_frequency(freq)
         # Exactly one digimode (or none) is ever active at a time (see
         # AdvancedRxFlowgraph.active_digimode) -- show that one's
@@ -2739,6 +2740,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_gain_mode(mode)
         self.gain_slider.setEnabled(mode == "manual")
 
+    def _apply_adsl_view(self, digimode):
+        """The waterfall on the two channels while in ADS-L (the flowgraph centres its rows there); the operator's
+        zoom comes back when leaving the mode."""
+        if digimode == "adsl" and self._zoom_before_adsl is None:
+            self._zoom_before_adsl = self.zoom_slider.value()
+            self._set_zoom_slider_quietly(config.adsl_view_zoom(self.bandwidth_combo.currentData()))
+        elif digimode != "adsl" and self._zoom_before_adsl is not None:
+            self._set_zoom_slider_quietly(self._zoom_before_adsl)
+            self._zoom_before_adsl = None
+        self.waterfall.clear()  # rows of the old view would be the wrong frequencies
+
+    def _set_zoom_slider_quietly(self, value):
+        self.zoom_slider.blockSignals(True)  # the flowgraph being built right now takes the value from the slider
+        self.zoom_slider.setValue(value)
+        self.zoom_slider.blockSignals(False)
+        value = self.zoom_slider.value()
+        span = self.bandwidth_combo.currentData() / value
+        self.zoom_label.setText(f"{value}x (full span)" if value == 1 else f"{value}x ({self._format_hz(span)})")
+
     def _apply_adsl_gain(self, digimode):
         """ADS-L on an RTL-SDR left at its 20 dB default: a usable value instead, visible on the slider and undone
         when leaving the mode. A gain the operator chose stays untouched."""
@@ -3061,6 +3081,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_waterfall_clicked(self, freq_hz):
         if self.tb is None:
             return
+        if self.tb.active_digimode == "adsl":  # the mode holds its own tuning: a click would lose the channels
+            return
         # Route through the spin box rather than calling tb.set_frequency()
         # directly, so a click reuses the exact same retune/marker-update
         # path as manual entry, including the spin box's own range clamping.
@@ -3209,6 +3231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._autotune_cancel()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
         self._apply_adsl_gain(new_digimode)
+        self._apply_adsl_view(new_digimode)
         freq = self.tb.nominal_freq_hz
         # Meshtastic presets retune the receiver to the preset's carrier, ADS-L to
         # its fixed LO; the previous frequency comes back when leaving the mode again.
@@ -3247,6 +3270,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText(f"Could not switch digimode: {e}")
             self._active_digimode = old_digimode
             self._apply_adsl_gain(old_digimode)
+            self._apply_adsl_view(old_digimode)
             return
 
         new_tb.set_fine_offset(fine)
@@ -3453,6 +3477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         frequency_hz = 0.0 if device_cls.frequency_range_hz == (0.0, 0.0) else self.freq_spin.value() * 1e6
         if self._active_digimode == "adsl":  # connecting with ADS-L already selected: same LO as entering the mode
             self._apply_adsl_gain("adsl")
+            self._apply_adsl_view("adsl")
             if abs(frequency_hz - config.ADSL_LO_HZ) > 1:
                 self._freq_before_lora = frequency_hz
             frequency_hz = config.ADSL_LO_HZ

@@ -20,6 +20,8 @@ Issue 2 erklärt die O-Band-Werte aus Issue 1 ausdrücklich für überholt.
 
 Beide M-Kanäle kommen aus einem Empfangsbereich um 868,85 MHz: So liegt keiner auf dem DC-Spike, und 869,525 MHz passt später dazu. Der entferntere Kanal liegt 650 kHz daneben. Dazu kommen 130 kHz für das Kanalfilter und Reserve zum Rand, daher mindestens 1,8 MS/s. Von dort an hing der Empfang in den Messungen nicht mehr von der Rate ab (gemessen bis 5 MS/s).
 
+Warum nicht genau zwischen die Kanäle (868,3 MHz)? Dann läge der DC-Spike 100 kHz neben beiden Kanalmitten, also in beiden Kanalfiltern. Gemessen (synthetisch): Ein Träger an dieser Stelle lässt bei −10 dB zum Nutzsignal noch alles durch, ab gleicher Stärke praktisch nichts mehr; bei der gewählten Abstimmung stört selbst +20 dB nicht. Der Wasserfall zeigt trotzdem 868,3 MHz in der Mitte, denn das ist nur ein Ausschnitt der Anzeige (`FftProbe.set_view_offset`), der Empfang bleibt davon unberührt.
+
 Benutzung und Empfangstipps: `README.md`, Abschnitt ADS-L; CLI-Ereignisse: `pluto_cli/README.md`.
 
 ## M-Band-Rahmen

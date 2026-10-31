@@ -9,6 +9,7 @@
   export let value: number; // Hz
   export let onCommit: (hz: number) => void;
   export let disabled = false;
+  export let hint = ""; // replaces the usage tooltip, e.g. why the field is locked
   export let size: "large" | "normal" = "normal";
 
   const DIGITS = 10; // up to 9.999.999.999 Hz
@@ -94,7 +95,7 @@
     class:disabled
     role="button"
     tabindex="0"
-    title="Mausrad über einer Ziffer: ändern · Klick: eingeben"
+    title={hint || "Mausrad über einer Ziffer: ändern · Klick: eingeben"}
     on:click={startEdit}
     on:keydown={(e) => e.key === "Enter" && startEdit()}
   >

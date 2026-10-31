@@ -99,6 +99,36 @@ class FlowgraphTests(unittest.TestCase):
         out, _rx = run(iq, 2_400_000)
         self.assertEqual(sorted(p["address"] for p in out), [0x111111, 0x222222])
 
+    def test_waterfall_shows_both_channels_around_its_middle(self):
+        from pluto_advanced_rx import flowgraph as rxf
+        from tests import fakes
+        for rate in (1_800_000, 1_920_000, 2_000_000, 2_048_000, 2_400_000, 2_500_000, 3_200_000, 4_000_000, 5_000_000, 10_000_000):
+            with self.subTest(rate=rate):
+                fakes.make_fake_rx(np.zeros(100, np.complex64), rate)
+                rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=config.ADSL_LO_HZ, sample_rate=rate, device_type="fake",
+                                             active_digimode="adsl")
+                span = rate / rx.fft_probe.zoom
+                center = rx.nominal_freq_hz + rx.fft_probe.view_offset_hz
+                self.assertLess(abs(center - config.ADSL_VIEW_CENTER_HZ), rate / rx.fft_probe._eff_size)
+                self.assertLessEqual(center - span / 2, 868_100_000)
+                self.assertGreaterEqual(center + span / 2, 868_500_000)
+
+    def test_retune_keeps_the_view_on_the_channels(self):
+        from pluto_advanced_rx import flowgraph as rxf
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(100, np.complex64), 2_400_000)
+        rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=config.ADSL_LO_HZ, sample_rate=2_400_000, device_type="fake",
+                                     active_digimode="adsl")
+        rx.set_frequency(868_800_000)
+        self.assertAlmostEqual(rx.nominal_freq_hz + rx.fft_probe.view_offset_hz, config.ADSL_VIEW_CENTER_HZ, delta=1000)
+
+    def test_other_modes_keep_the_centred_view(self):
+        from pluto_advanced_rx import flowgraph as rxf
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(100, np.complex64), 2_500_000)
+        rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=433e6, sample_rate=2_500_000, device_type="fake")
+        self.assertEqual((rx.fft_probe.zoom, rx.fft_probe.view_offset_hz), (1, 0))
+
     def test_too_low_sample_rate_is_refused(self):
         from pluto_advanced_rx import flowgraph as rxf
         from tests import fakes
@@ -299,6 +329,9 @@ class GuiTests(unittest.TestCase):
         self.assertAlmostEqual(w.freq_spin.value(), 868.85)
         self.assertEqual(len(w.tb.adsl_channels), 2)
         self.assertIsNone(w.tb.filebroadcast_deframer)
+        self.assertEqual(w.zoom_slider.value(), 4)
+        self.assertEqual(w.tb.fft_probe.zoom, 4)
+        self.assertAlmostEqual(w.waterfall._center_hz, config.ADSL_VIEW_CENTER_HZ, delta=1000)  # to a whole FFT bin
         w._update_adsl_signal_label()
         self.assertIn("868.2 + 868.4 MHz", w.adsl_signal_label.text())
         w._poll_digimode()  # includes the file transfer poll, whose deframer is absent in this mode
@@ -306,6 +339,16 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.tb.nominal_freq_hz, 433.5e6)
         self.assertAlmostEqual(w.freq_spin.value(), 433.5)
         self.assertIsNotNone(w.tb.filebroadcast_deframer)
+        self.assertEqual(w.zoom_slider.value(), 1)
+        self.assertEqual(w.tb.fft_probe.zoom, 1)
+        self.assertEqual(w.waterfall._center_hz, 433.5e6)
+        w.tb.shutdown()
+
+    def test_click_in_the_waterfall_does_not_retune(self):
+        w = self.window_on_fake_device()
+        w._rebuild_for_digimode("adsl")
+        w._on_waterfall_clicked(868_200_000.0)
+        self.assertEqual(w.tb.nominal_freq_hz, config.ADSL_LO_HZ)
         w.tb.shutdown()
 
     def test_too_low_rate_reports_and_keeps_the_old_flowgraph(self):

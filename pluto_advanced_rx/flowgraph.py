@@ -865,6 +865,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                 if not self._adsl_channel_in_span(channel_hz):
                     raise ValueError(f"{channel_hz / 1e6:.1f} MHz is outside the tuned span -- ADS-L needs the receiver "
                                      f"on {config.ADSL_LO_HZ / 1e6:.2f} MHz")
+            self.fft_probe.set_zoom(config.adsl_view_zoom(self.sample_rate))
+            self.fft_probe.set_view_offset(config.ADSL_VIEW_CENTER_HZ - self.nominal_freq_hz)
             adsl_filter = adsl_demod.DuplicateFilter(on_adsl_packet or (lambda info: None))
             adsl_decim = max(1, round(self.sample_rate / adsl_demod.WORKING_RATE_HZ))
             adsl_rate = self.sample_rate / adsl_decim
@@ -933,6 +935,8 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.device.set_frequency(actual)
         for channel_hz, xlate, _demod, _deframer in self.adsl_channels:
             xlate.set_center_freq(channel_hz - actual)
+        if self.adsl_channels:
+            self.fft_probe.set_view_offset(config.ADSL_VIEW_CENTER_HZ - actual)
 
     def set_frequency(self, freq_hz: float):
         self.nominal_freq_hz = freq_hz

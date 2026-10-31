@@ -33,7 +33,9 @@ decimating the time-domain signal by `zoom` through a perfect brick-wall
 low-pass filter first (a standard technique for spectral zooming) --
 without needing a separate filter design, a GNU Radio block, or (crucially)
 a flowgraph rebuild: zoom can change live, on every slider tick, at
-whatever rate the GUI thread calls set_zoom().
+whatever rate the GUI thread calls set_zoom(). set_view_offset() moves that
+crop away from the centre, so a display can follow something off the tuned
+frequency without the tuner moving.
 
 Averaging (set_avg_count): a rolling mean of the last N computed spectra,
 in POWER (not dB, and not raw amplitude) -- averaging in the dB domain is
@@ -76,6 +78,7 @@ class FftProbe(gr.sync_block):
         # (Web-TRX sends every row to the browser) doesn't have to drop any, see get_rows_since().
         self._recent_rows = collections.deque(maxlen=self.RECENT_ROWS)
         self._zoom = 1
+        self._view_offset_hz = 0.0
         self._avg_history = collections.deque(maxlen=1)
         self._configure(fft_size, sample_rate)
 
@@ -102,9 +105,13 @@ class FftProbe(gr.sync_block):
         # reasoning; eff_size (not fft_size) is what actually gates a
         # zoomed-in FFT's minimum cadence.
         self._compute_stride = max(eff_size, int(sample_rate / self._compute_rate_hz))
-        # Center fft_size bins of the eff_size-point FFT -- see the module
+        # fft_size bins of the eff_size-point FFT, around the centre plus the
+        # view offset as far as it stays inside the spectrum -- see the module
         # docstring's zoom-FFT explanation.
-        self._crop_lo = (eff_size - fft_size) // 2
+        margin = (eff_size - fft_size) // 2
+        shift = int(round(self._view_offset_hz * eff_size / sample_rate))
+        self._crop_shift = max(-margin, min(margin, shift))
+        self._crop_lo = margin + self._crop_shift
         self._crop_hi = self._crop_lo + fft_size
         self._avg_history.clear()
         self._recent_rows.clear()  # older rows may have another size/span
@@ -186,6 +193,20 @@ class FftProbe(gr.sync_block):
                 return
             self._zoom = zoom
             self._configure(self._fft_size, self._sample_rate)
+
+    def set_view_offset(self, offset_hz: float):
+        """Centre of the zoomed crop relative to the tuned frequency. A display setting only. At zoom 1 there
+        is nothing to shift; otherwise it is limited to what the sample rate covers, see view_offset_hz."""
+        with self._lock:
+            if offset_hz != self._view_offset_hz:
+                self._view_offset_hz = offset_hz
+                self._configure(self._fft_size, self._sample_rate)
+
+    @property
+    def view_offset_hz(self):
+        """The centre of the rows actually produced, relative to the tuned frequency."""
+        with self._lock:
+            return self._crop_shift * self._sample_rate / self._eff_size
 
     def set_avg_count(self, n: int):
         """1 = no averaging (each row is a single fresh spectrum)."""

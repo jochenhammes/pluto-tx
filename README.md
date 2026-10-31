@@ -466,6 +466,10 @@ Die Standardwerte passen, mehr Bandbreite bringt keine bessere Empfangsquote:
 | Pluto+ | 2,5 MS/s | 2,5 MS/s |
 | HackRF | 4 MS/s | 2 MS/s |
 
+Der Wasserfall zeigt in diesem Modus 868,3 MHz in der Mitte mit den beiden Kanälen links und rechts davon;
+das ändert nur die Anzeige, der Zoom der anderen Modi kommt danach zurück. Ein Paket dauert nur etwa 5 ms und
+erscheint deshalb nicht zuverlässig im Wasserfall. Verlässlich sind Tabelle und Zähler.
+
 Die Tabelle zeigt pro Luftfahrzeug Adresse, Kategorie, Position, Höhe (über dem
 WGS-84-Ellipsoid, nicht über Grund oder Meer), Tempo, Steigen, Kurs und die gemessene
 Frequenzablage; darunter steht das Paket-Log. Angezeigt wird nur, was die CRC besteht, gespeichert

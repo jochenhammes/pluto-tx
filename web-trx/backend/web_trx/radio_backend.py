@@ -400,6 +400,10 @@ class GnuRadioBackend(SessionBackend):
         if direction == "tx" and name.startswith("stage:"):
             await self._set_tx_secondary_stage(name[6:], value)
             return
+        if direction == "rx" and name == "fft_zoom" and st.mode == "adsl":
+            if st.tb is not None:  # only for now: the zoom saved for the other modes stays as it is
+                await asyncio.to_thread(_apply_rx_gain, st.tb, name, value)
+            return
         if direction == "rx" and name == self._adsl_gain_key:
             self._adsl_gain_key = None  # the operator's own choice from here on
         if name == "freq_correction_ppm":
@@ -722,6 +726,7 @@ class GnuRadioBackend(SessionBackend):
             st.mode_params = dict(params)
             if st.freq_hz != tuning_before[0]:
                 await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
+            await self._emit_event("rx_fft_zoom", {"value": st.tb.fft_probe.zoom})
 
     async def _adsl_rx_gain(self, mode: str) -> None:
         """ADS-L on an RTL-SDR whose operator never chose a gain: a usable value instead of the 20 dB default, shown
@@ -787,7 +792,7 @@ class GnuRadioBackend(SessionBackend):
             tb.web_trx_level_probe = probe
             tb.set_fft_size(int(st.gains.get("fft_size", DEFAULT_FFT_SIZE)))
             for name in ("fft_zoom", "fft_avg"):
-                if name in st.gains:
+                if name in st.gains and not (name == "fft_zoom" and mode == "adsl"):  # it picks its own view
                     _apply_rx_gain(tb, name, st.gains[name])
             tb.start()
             tb.set_rx_muted(mode == "adsl" or not self._rx_local_audio)
@@ -830,7 +835,7 @@ class GnuRadioBackend(SessionBackend):
                 span_hz = tb.sample_rate / probe.zoom
                 for row in rows:
                     await self._on_spectrum(SpectrumFrame(
-                        row=row, center_hz=tb.nominal_freq_hz, span_hz=span_hz, generation=generation,
+                        row=row, center_hz=tb.nominal_freq_hz + probe.view_offset_hz, span_hz=span_hz, generation=generation,
                     ))
             except Exception:  # keep the loop alive across rebuilds
                 logger.exception("spectrum poll failed")

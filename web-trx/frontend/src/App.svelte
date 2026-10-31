@@ -629,6 +629,7 @@
     if (e.event === "rade_status") radeStatus = e as unknown as RadeStatus;
     if (e.event === "adsl_packet" && e.address_label) adslOnPacket(e);
     if (e.event === "adsl_status") adslStatus = e as unknown as AdslStatus;
+    if (e.event === "rx_fft_zoom") zoomIndex = Math.max(0, ZOOM_STEPS.indexOf(Number(e.value)));
     if (e.event === "rx_gain") rxStageValues = { ...rxStageValues, [String(e.name)]: e.value as number | boolean };
     if (e.event === "adsl_cleared") {
       adslAircraft.clear();
@@ -1150,7 +1151,11 @@
     </div>
 
     <div class="row rx-freq-row">
-      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxMode === "adsl" && rxConnected} />
+      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxMode === "adsl" && rxConnected}
+        hint={rxMode === "adsl" && rxConnected ? "Von ADS-L festgelegt. Zum Ändern den Modus wechseln." : ""} />
+      {#if rxMode === "adsl" && rxConnected}
+        <span class="freq-locked">Von ADS-L festgelegt.<br />Zum Ändern den Modus wechseln.</span>
+      {/if}
       {#if features.rx_direct_sampling?.includes(rxDeviceType)}
         <div class="field narrow">
           <label for="rxDirect" title="RTL-SDR ohne Tuner direkt abtasten: KW bis 28,8 MHz (über 14,4 MHz gespiegelt). RTL-SDR Blog V3: Q">Direct Sampling</label>
@@ -2258,6 +2263,12 @@
   }
   .splitter:hover span {
     background: var(--accent);
+  }
+  .freq-locked {
+    font-size: 0.72rem;
+    line-height: 1.25;
+    color: var(--text-dim);
+    align-self: center;
   }
   .bottom-panel {
     flex: none;
