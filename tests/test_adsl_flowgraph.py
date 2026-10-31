@@ -91,6 +91,14 @@ class FlowgraphTests(unittest.TestCase):
         self.assertEqual(out[0]["channel_hz"], 868_200_000)
         self.assertLess(abs(out[0]["frequency_offset_hz"]), 3000)
 
+    def test_same_frame_on_both_channels_counts_once(self):
+        """A strong sender also decodes on the neighbour channel (seen on air at close range). The stand-in here is
+        the same frame transmitted on both, which is what the receiver sees afterwards."""
+        iq = scene(2_400_000, [(868_200_000, 0.0, 0x111111), (868_400_000, 0.0, 0x111111), (868_200_000, 0.05, 0x222222)],
+                   noise_snr_db=30)
+        out, _rx = run(iq, 2_400_000)
+        self.assertEqual(sorted(p["address"] for p in out), [0x111111, 0x222222])
+
     def test_too_low_sample_rate_is_refused(self):
         from pluto_advanced_rx import flowgraph as rxf
         from tests import fakes
@@ -315,6 +323,40 @@ class GuiTests(unittest.TestCase):
         w._update_adsl_signal_label()
         self.assertIn("Tuned away", w.adsl_signal_label.text())
         w.tb.shutdown()
+
+    def test_untouched_rtl_gain_is_raised_and_restored(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("rtlsdr"))
+        self.assertEqual(w.gain_slider.value(), 20)
+        w._apply_adsl_gain("adsl")
+        self.assertEqual(w.gain_slider.value(), int(config.ADSL_RTL_TUNER_GAIN_DB))
+        self.assertEqual(w.gain_label.text(), "40 dB")
+        self.assertEqual(w._current_gain_kwargs(gui.devices.DEVICE_REGISTRY["rtlsdr"])["manual_gain_db"], 40.0)
+        w._apply_adsl_gain(None)
+        self.assertEqual(w.gain_slider.value(), 20)
+
+    def test_a_gain_the_operator_chose_stays(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("rtlsdr"))
+        w.gain_slider.setValue(33)
+        w._apply_adsl_gain("adsl")
+        self.assertEqual(w.gain_slider.value(), 33)
+        w._apply_adsl_gain(None)
+        self.assertEqual(w.gain_slider.value(), 33)
+        w.gain_slider.setValue(20)
+        w._apply_adsl_gain("adsl")
+        w.gain_slider.setValue(38)  # changed while in the mode: no longer ours to undo
+        w._apply_adsl_gain(None)
+        self.assertEqual(w.gain_slider.value(), 38)
+
+    def test_other_devices_keep_their_gain(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("x")
+        before = w.gain_slider.value()
+        w._apply_adsl_gain("adsl")
+        self.assertEqual(w.gain_slider.value(), before)
 
     def test_soundcard_cannot_select_adsl(self):
         from pluto_advanced_rx import gui

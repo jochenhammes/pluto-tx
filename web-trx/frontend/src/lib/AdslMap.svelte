@@ -23,6 +23,7 @@
   const GONE_MS = 300_000; // off the map after this long; the table keeps the entry
   const RINGS_KM = [25, 50, 100];
   const KM_PER_DEGREE_LAT = 111.2;
+  const RING_LABELS_MIN_ZOOM = 7; // zoomed out further they all fall on top of the station
   const DEFAULT_VIEW: [LatLon, number] = [[51.2, 10.4], 6];
 
   type Drawn = { marker: L.Marker; trail: L.Polyline; html: string };
@@ -143,6 +144,9 @@
       }).addTo(map);
     }
     map.on("click", () => onSelect(null));
+    const showRingLabels = () => container.classList.toggle("far", (map?.getZoom() ?? 0) < RING_LABELS_MIN_ZOOM);
+    map.on("zoomend", showRingLabels);
+    showRingLabels();
     observer = new ResizeObserver(() => map?.invalidateSize());
     observer.observe(container);
     drawStation();
@@ -233,6 +237,9 @@
     background: var(--ok);
     border: 2px solid #0a0c11;
     border-radius: 50%;
+  }
+  .map:global(.far) :global(.adsl-ring-label) {
+    display: none;
   }
   .map :global(.adsl-ring-label) {
     display: block;

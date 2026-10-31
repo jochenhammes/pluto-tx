@@ -9,6 +9,9 @@ of sample rate to chip rate, so no resampler is needed. Protocol parsing: pluto_
 Each Manchester bit is decided from the difference of its two chips, so a constant frequency error (up to
 what the channel filter lets through) has no effect at all and is reported rather than corrected.
 """
+import threading
+import time
+
 import numpy as np
 
 from pluto_tx import adsl_codec
@@ -24,6 +27,7 @@ DEFAULT_THRESHOLD = 0.5  # normalised correlation; only limits how many candidat
 _PEAK_SEARCH_CHIPS = 8
 _BLOCK_SAMPLES = 1 << 14
 _MIN_ENERGY = 1e-9
+_DUPLICATE_WINDOW_S = 0.25  # well above one search block's delay, far below a sender's packet spacing
 
 
 def _manchester_chips(data: bytes):
@@ -36,6 +40,27 @@ def _manchester_chips(data: bytes):
 
 # The minimum preamble every valid sender transmits, then the Manchester-coded sync word.
 SYNC_PATTERN_CHIPS = [0, 1] * 5 + [1, 0, 0, 1, 1, 0, 0, 1] + _manchester_chips(adsl_codec.SYNC_BYTES)
+
+
+class DuplicateFilter:
+    """Passes each frame once across all channels. A strong sender also decodes on the neighbour channel, with its
+    frequency error showing the true distance (seen on air at close range); both channels' threads call this."""
+
+    def __init__(self, on_packet):
+        self._on_packet = on_packet
+        self._lock = threading.Lock()
+        self._seen = {}
+        self.duplicates = 0
+
+    def __call__(self, info, now=None):
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            self._seen = {raw: t for raw, t in self._seen.items() if now - t < _DUPLICATE_WINDOW_S}
+            if info["raw"] in self._seen:
+                self.duplicates += 1
+                return
+            self._seen[info["raw"]] = now
+        self._on_packet(info)
 
 
 class AdslBurstDetector:

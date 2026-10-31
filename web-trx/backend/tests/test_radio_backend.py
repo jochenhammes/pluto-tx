@@ -521,3 +521,66 @@ async def test_adsl_tuning_and_too_low_rates(tmp_path, monkeypatch):
     with pytest.raises(SessionError, match="needs at least"):
         await b.set_gain("rx", "sample_rate", 1_000_000)
     await b.disconnect("rx")
+
+
+def _as_rtl(monkeypatch):
+    fake = radio_backend.rx_devices.DEVICE_REGISTRY["fake"]
+    real = radio_backend.rx_devices.DEVICE_REGISTRY["rtlsdr"]
+    monkeypatch.setattr(fake, "gain_stages", real.gain_stages)
+    monkeypatch.setattr(fake, "agc_modes", real.agc_modes)
+    monkeypatch.setattr(fake, "default_gain_mode", real.default_gain_mode)
+    monkeypatch.setitem(radio_backend.rx_devices.DEVICE_REGISTRY, "rtlsdr", fake)
+
+
+async def _rtl_adsl_backend(tmp_path, monkeypatch):
+    rate = 2_400_000
+    b, events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, _adsl_iq(rate, [(868_200_000, 0.0, 1)]))
+    _as_rtl(monkeypatch)
+    b.rx.device_type = "rtlsdr"
+    b._settings_path = str(tmp_path / "settings.json")
+    return b, events
+
+
+async def test_adsl_raises_an_untouched_rtl_gain_and_undoes_it(tmp_path, monkeypatch):
+    b, events = await _rtl_adsl_backend(tmp_path, monkeypatch)
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.gains["stage:TUNER"] == radio_backend.rx_config.ADSL_RTL_TUNER_GAIN_DB
+    assert ("rx_gain", {"name": "TUNER", "value": 40.0}) in events
+    assert radio_backend._rx_gain_build_args(radio_backend.rx_devices.DEVICE_REGISTRY["rtlsdr"], b.rx.gains)[:2] == ("manual", 40.0)
+    assert "stage:TUNER" not in _read_json(b._settings_path)["rx"]["gains"]
+    await b.select_mode("rx", "adsl", {})  # a rebuild in the mode changes nothing
+    assert b.rx.gains["stage:TUNER"] == 40.0
+    await b.select_mode("rx", "fm", {})
+    assert "stage:TUNER" not in b.rx.gains
+    assert ("rx_gain", {"name": "TUNER", "value": 20.0}) in events
+    await b.disconnect("rx")
+
+
+async def test_adsl_keeps_a_gain_the_operator_chose(tmp_path, monkeypatch):
+    b, events = await _rtl_adsl_backend(tmp_path, monkeypatch)
+    b.rx.gains["stage:TUNER"] = 12.5
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.gains["stage:TUNER"] == 12.5
+    assert not [e for e in events if e[0] == "rx_gain"]
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.gains["stage:TUNER"] == 12.5
+    await b.disconnect("rx")
+
+
+async def test_adsl_leaves_agc_alone(tmp_path, monkeypatch):
+    b, _events = await _rtl_adsl_backend(tmp_path, monkeypatch)
+    b.rx.gains["gain_mode"] = "agc"
+    await b.select_mode("rx", "adsl", {})
+    assert "stage:TUNER" not in b.rx.gains
+    await b.disconnect("rx")
+
+
+async def test_a_gain_changed_during_adsl_becomes_the_operators(tmp_path, monkeypatch):
+    b, _events = await _rtl_adsl_backend(tmp_path, monkeypatch)
+    await b.select_mode("rx", "adsl", {})
+    await b.set_gain("rx", "stage:TUNER", 30.0)
+    assert _read_json(b._settings_path)["rx"]["gains"]["stage:TUNER"] == 30.0
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.gains["stage:TUNER"] == 30.0
+    await b.disconnect("rx")
+

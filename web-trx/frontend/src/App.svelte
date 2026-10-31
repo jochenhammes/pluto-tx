@@ -123,7 +123,7 @@
   const BOTTOM_DEFAULT_PX = 220;
   const BOTTOM_MIN_PX = 110;
   // The ADS-L map needs more room than a decoder list: a height of its own, kept separately.
-  const ADSL_BOTTOM_DEFAULT_PX = 460;
+  const ADSL_BOTTOM_DEFAULT_PX = 360; // leaves the RX controls and a usable waterfall on a 1000 px window
   let bottomHeight = BOTTOM_DEFAULT_PX;
   let adslBottomHeight = ADSL_BOTTOM_DEFAULT_PX;
   try {
@@ -629,6 +629,7 @@
     if (e.event === "rade_status") radeStatus = e as unknown as RadeStatus;
     if (e.event === "adsl_packet" && e.address_label) adslOnPacket(e);
     if (e.event === "adsl_status") adslStatus = e as unknown as AdslStatus;
+    if (e.event === "rx_gain") rxStageValues = { ...rxStageValues, [String(e.name)]: e.value as number | boolean };
     if (e.event === "adsl_cleared") {
       adslAircraft.clear();
       adslDirty = true;

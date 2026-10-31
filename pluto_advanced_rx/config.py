@@ -506,4 +506,6 @@ JS8_DEFAULT_SUBMODES = (0,)
 # on the DC spike HackRF and RTL-SDR do not correct, and the O-band channel (869.525 MHz) still fits later.
 ADSL_LO_HZ = 868_850_000
 ADSL_CHANNELS_HZ = (868_200_000, 868_400_000)
+# The RTL-SDR's general default of 20 dB loses most packets of a weak sender (measured, docs/adsl/SPEC.md).
+ADSL_RTL_TUNER_GAIN_DB = 40.0
 ADSL_MIN_SAMPLE_RATE_HZ = 1_800_000  # the farther channel is 650 kHz off the LO; device filters roll off near the edge

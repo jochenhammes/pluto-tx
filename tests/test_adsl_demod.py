@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from pluto_advanced_rx.adsl_demod import AdslBurstDetector
+from pluto_advanced_rx.adsl_demod import AdslBurstDetector, DuplicateFilter
 from pluto_tx import adsl_codec as c
 from tests import adsl_measure as m
 from tests import adsl_testgen as gen
@@ -100,6 +100,24 @@ class DemodTests(unittest.TestCase):
         got, detector = detect(one_burst(2_400_000, bytes(frame)), 2_400_000)
         self.assertEqual(got, [])
         self.assertEqual(detector.frames_bad, 1)
+
+
+class DuplicateFilterTests(unittest.TestCase):
+    def test_same_frame_once_within_the_window(self):
+        got = []
+        f = DuplicateFilter(got.append)
+        f({"raw": "aa", "channel_hz": 1}, now=10.0)
+        f({"raw": "aa", "channel_hz": 2}, now=10.1)
+        f({"raw": "bb", "channel_hz": 2}, now=10.1)
+        self.assertEqual([(p["raw"], p["channel_hz"]) for p in got], [("aa", 1), ("bb", 2)])
+        self.assertEqual(f.duplicates, 1)
+
+    def test_a_later_identical_frame_is_a_new_packet(self):
+        got = []
+        f = DuplicateFilter(got.append)
+        f({"raw": "aa"}, now=10.0)
+        f({"raw": "aa"}, now=11.0)
+        self.assertEqual(len(got), 2)
 
 
 class NeighbourTests(unittest.TestCase):

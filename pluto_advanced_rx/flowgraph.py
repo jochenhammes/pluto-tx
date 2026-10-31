@@ -865,6 +865,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                 if not self._adsl_channel_in_span(channel_hz):
                     raise ValueError(f"{channel_hz / 1e6:.1f} MHz is outside the tuned span -- ADS-L needs the receiver "
                                      f"on {config.ADSL_LO_HZ / 1e6:.2f} MHz")
+            adsl_filter = adsl_demod.DuplicateFilter(on_adsl_packet or (lambda info: None))
             adsl_decim = max(1, round(self.sample_rate / adsl_demod.WORKING_RATE_HZ))
             adsl_rate = self.sample_rate / adsl_decim
             adsl_taps = firdes.low_pass(1.0, self.sample_rate, adsl_demod.CHANNEL_CUTOFF_HZ,
@@ -873,7 +874,7 @@ class AdvancedRxFlowgraph(gr.top_block):
                 xlate = filter.freq_xlating_fir_filter_ccf(adsl_decim, adsl_taps,
                                                            channel_hz - self.nominal_freq_hz, self.sample_rate)
                 demod = analog.quadrature_demod_cf(adsl_rate / (2 * math.pi * adsl_demod.DEVIATION_HZ))
-                deframer = AdslDeframer(on_adsl_packet or (lambda info: None), channel_hz, adsl_rate)
+                deframer = AdslDeframer(adsl_filter, channel_hz, adsl_rate)
                 self.connect(self.pluto_source, xlate)
                 self.connect(xlate, demod)
                 self.connect(demod, deframer)

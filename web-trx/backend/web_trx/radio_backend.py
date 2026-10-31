@@ -290,6 +290,8 @@ class GnuRadioBackend(SessionBackend):
         self._pocsag_rx_state = PocsagState()
         self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
         self._freq_before_adsl: float | None = None  # the operator's frequency while ADS-L holds its fixed LO
+        self._adsl_gain_key: str | None = None  # a gain only ADS-L set (not the operator): not saved, undone on leaving
+        self._adsl_gain_default: float = 0.0
         self._squelch_open = True
         self._rtty_lock = threading.Lock()
         self._rtty_pending: list[str] = []
@@ -398,6 +400,8 @@ class GnuRadioBackend(SessionBackend):
         if direction == "tx" and name.startswith("stage:"):
             await self._set_tx_secondary_stage(name[6:], value)
             return
+        if direction == "rx" and name == self._adsl_gain_key:
+            self._adsl_gain_key = None  # the operator's own choice from here on
         if name == "freq_correction_ppm":
             value = float(value)
             if not PPM_RANGE[0] <= value <= PPM_RANGE[1]:
@@ -502,7 +506,8 @@ class GnuRadioBackend(SessionBackend):
                 # While ADS-L has the receiver on its fixed LO, the operator's frequency is the one to keep.
                 "freq_hz": self._freq_before_adsl if st is self.rx and self._freq_before_adsl is not None else st.freq_hz,
                 "mode": st.mode, "mode_params": st.mode_params,
-                "device_type": st.device_type, "gains": st.gains,
+                "device_type": st.device_type,
+                "gains": {k: v for k, v in st.gains.items() if not (st is self.rx and k == self._adsl_gain_key)},
                 # restored on the next server start; "" is a valid connection
                 # (auto-detect, e.g. RTL-SDR/HackRF), hence the explicit flag
                 "connected": st.connection is not None, "connection": st.connection,
@@ -700,6 +705,7 @@ class GnuRadioBackend(SessionBackend):
             # mode change is a rebuild, exactly like the CLI's one-flowgraph-
             # per-invocation model.
             await self._teardown_rx()
+            await self._adsl_rx_gain(mode)
             tuning_before = st.freq_hz, self._freq_before_adsl
             if mode == "adsl":
                 if self._freq_before_adsl is None:
@@ -716,6 +722,23 @@ class GnuRadioBackend(SessionBackend):
             st.mode_params = dict(params)
             if st.freq_hz != tuning_before[0]:
                 await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
+
+    async def _adsl_rx_gain(self, mode: str) -> None:
+        """ADS-L on an RTL-SDR whose operator never chose a gain: a usable value instead of the 20 dB default, shown
+        in the browser like any other setting and undone when leaving the mode."""
+        st = self.rx
+        cls = rx_devices.DEVICE_REGISTRY[st.device_type]
+        stage = next((g for g in cls.gain_stages if g.controls_agc), None)
+        if mode == "adsl" and st.device_type == "rtlsdr" and stage is not None and self._adsl_gain_key is None:
+            key = f"stage:{stage.name}"
+            if key not in st.gains and st.gains.get("gain_mode") != "agc":
+                st.gains[key] = rx_config.ADSL_RTL_TUNER_GAIN_DB
+                self._adsl_gain_key, self._adsl_gain_default = key, stage.default_value
+                await self._emit_event("rx_gain", {"name": stage.name, "value": st.gains[key]})
+        elif mode != "adsl" and self._adsl_gain_key is not None:
+            key, self._adsl_gain_key = self._adsl_gain_key, None
+            st.gains.pop(key, None)
+            await self._emit_event("rx_gain", {"name": key.removeprefix("stage:"), "value": self._adsl_gain_default})
 
     def _build_rx(self, mode: str, params: dict):
         st = self.rx

@@ -145,6 +145,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # toggle). Starts None: the Digimodes tab isn't the default
         # active tab, so nothing should be decoding yet at startup.
         self._active_digimode = None
+        self._adsl_gain_undo = None
 
         # M17 RX status -- same "constructed ONCE, survives every flowgraph
         # rebuild" reasoning as _psk31_state above. Just the most recent
@@ -2738,7 +2739,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb.set_gain_mode(mode)
         self.gain_slider.setEnabled(mode == "manual")
 
+    def _apply_adsl_gain(self, digimode):
+        """ADS-L on an RTL-SDR left at its 20 dB default: a usable value instead, visible on the slider and undone
+        when leaving the mode. A gain the operator chose stays untouched."""
+        device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        stage = next((g for g in device_cls.gain_stages if g.controls_agc), None)
+        if digimode == "adsl" and device_cls.device_type == "rtlsdr" and stage is not None:
+            default = int(round(stage.default_value))
+            if self.gain_slider.value() == default and self.gain_mode_combo.currentData() == "manual":
+                self._set_gain_slider_quietly(int(config.ADSL_RTL_TUNER_GAIN_DB))
+                self._adsl_gain_undo = default
+        elif digimode != "adsl" and self._adsl_gain_undo is not None:
+            self._set_gain_slider_quietly(self._adsl_gain_undo)
+            self._adsl_gain_undo = None
+
+    def _set_gain_slider_quietly(self, value):
+        self.gain_slider.blockSignals(True)  # the flowgraph being built right now takes the value from the slider
+        self.gain_slider.setValue(value)
+        self.gain_slider.blockSignals(False)
+        self.gain_label.setText(f"{value} dB")
+
     def _on_gain_changed(self, value):
+        self._adsl_gain_undo = None  # the operator's own choice from here on
         if self.tb is not None:
             self.tb.set_manual_gain(float(value))
         self.gain_label.setText(f"{value} dB")
@@ -3186,6 +3208,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._autotune_cancel()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
+        self._apply_adsl_gain(new_digimode)
         freq = self.tb.nominal_freq_hz
         # Meshtastic presets retune the receiver to the preset's carrier, ADS-L to
         # its fixed LO; the previous frequency comes back when leaving the mode again.
@@ -3223,6 +3246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.status_label.setText(f"Could not switch digimode: {e}")
             self._active_digimode = old_digimode
+            self._apply_adsl_gain(old_digimode)
             return
 
         new_tb.set_fine_offset(fine)
@@ -3428,6 +3452,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # for a device with no frequency concept at all.
         frequency_hz = 0.0 if device_cls.frequency_range_hz == (0.0, 0.0) else self.freq_spin.value() * 1e6
         if self._active_digimode == "adsl":  # connecting with ADS-L already selected: same LO as entering the mode
+            self._apply_adsl_gain("adsl")
             if abs(frequency_hz - config.ADSL_LO_HZ) > 1:
                 self._freq_before_lora = frequency_hz
             frequency_hz = config.ADSL_LO_HZ
