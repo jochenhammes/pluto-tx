@@ -623,3 +623,53 @@ async def test_spectrum_rows_carry_the_center_of_the_view(tmp_path, monkeypatch)
     assert frames[-1].span_hz == 600_000
     await b.disconnect("rx")
 
+
+# -- ADS-B through the real flowgraph --
+
+async def test_adsb_through_the_real_flowgraph_stays_silent_and_batches(tmp_path, monkeypatch):
+    import numpy as np
+
+    gen = _repo_module("adsb_testgen")
+    rate = 2_400_000
+    rng = np.random.default_rng(1)
+    parts = [np.zeros(int(0.03 * rate), np.complex128)]
+    for m in (gen.callsign_message(0x3C6444, "DLH123"), gen.position_message(0x3C6444, 53.5, 9.5, 35000, 0),
+              gen.position_message(0x3C6444, 53.5, 9.5, 35000, 1)):
+        parts += [gen.iq(m, rate, delay_us=float(rng.random())), np.zeros(int(0.001 * rate), np.complex128)]
+    x = np.concatenate(parts + [np.zeros(int(0.03 * rate), np.complex128)])
+    x = (x + 0.03 * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))).astype(np.complex64)
+    b, events, audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, x)
+    b.station = {"call": "", "locator": "JO43"}
+    await b.select_mode("rx", "adsb", {})
+    assert b.rx.tb.nominal_freq_hz == 1_090_000_000
+    assert b.rx.tb.fft_probe.zoom == 1
+    assert ("tuned", {"direction": "rx", "freq_hz": 1_090_000_000}) in events
+    await asyncio.to_thread(b.rx.tb.wait)
+    b.rx.tb.adsb_deframer.detector.flush()
+    await b._emit_adsb_update(b.rx.tb)
+    update = next(f for n, f in events if n == "adsb_update")
+    assert update["count"] == 1
+    a = update["aircraft"][0]
+    assert (a["icao"], a["callsign"], a["alt_ft"]) == ("3C6444", "DLH123", 35000)
+    assert abs(a["lat"] - 53.5) < 0.01
+    assert "trail" not in a
+    json.dumps(update)
+    assert audio == []
+    assert b.adsb_snapshot()["aircraft"][0]["trail"]
+    assert b._adsb_state.reference == (53.5, 9.0)
+    await b.adsb_clear()
+    assert b.adsb_snapshot() == {"aircraft": []}
+    await b.disconnect("rx")
+
+
+async def test_adsb_refuses_a_too_low_rate_and_retuning(tmp_path, monkeypatch):
+    rate = 2_400_000
+    b, _e, _a, _b = await _adsl_backend(tmp_path, monkeypatch, rate, _adsl_iq(rate, [(868_200_000, 0.0, 1)]))
+    b.rx.gains["sample_rate"] = 1_000_000
+    await b.select_mode("rx", "adsb", {})
+    assert b.rx.tb.sample_rate == rate
+    with pytest.raises(SessionError, match="ADSB tunes itself"):
+        await b.tune("rx", 145e6)
+    with pytest.raises(SessionError, match="needs at least"):
+        await b.set_gain("rx", "sample_rate", 1_000_000)
+    await b.disconnect("rx")

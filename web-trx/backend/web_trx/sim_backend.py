@@ -34,7 +34,7 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
 TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8")
-RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl")
+RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl", "adsb")
 
 # ADS-L receive: invented aircraft around the station, one packet per second each, in the event fields a real
 # packet has. Deliberately no encoder here: nothing in the application can produce an ADS-L frame.
@@ -113,6 +113,10 @@ class SimBackend(SessionBackend):
         self._adsl_state = _adsl_state_module().AdslState()
         self._adsl_counts = {hz: 0 for hz in ADSL_CHANNELS_HZ}
         self._adsl_tick = 0
+        self._adsb_tick = 0
+        self._adsb_task: asyncio.Task | None = None
+        self._adsb_aircraft: dict[str, dict] = {}
+        self._adsb_messages = 0
         self._freq_before_fixed: float | None = None
         self._js8_task: asyncio.Task | None = None
         self._js8_series: js8_series.Js8Series | None = None
@@ -420,6 +424,8 @@ class SimBackend(SessionBackend):
         await self._cancel_js8("shutdown", device_safe=True)
         if self._adsl_task is not None:
             self._adsl_task.cancel()
+        if self._adsb_task is not None:
+            self._adsb_task.cancel()
         if self._js8_task is not None:
             self._js8_task.cancel()
         if self._spectrum_task is not None:
@@ -447,6 +453,8 @@ class SimBackend(SessionBackend):
             self._ft8_task = asyncio.create_task(self._ft8_loop())
         if self._adsl_task is None:
             self._adsl_task = asyncio.create_task(self._adsl_loop())
+        if self._adsb_task is None:
+            self._adsb_task = asyncio.create_task(self._adsb_loop())
         if self._js8_task is None:
             self._js8_task = asyncio.create_task(self._js8_loop())
         if self._js8_auto is None:
@@ -565,6 +573,55 @@ class SimBackend(SessionBackend):
                    420, 30.0, -2.0, 90.0),
             packet((0, "RND"), 0x51F0AA, "paraglider", "airborne", "none", None, None, None, None, None, None),
         ]
+
+    async def adsb_clear(self) -> None:
+        self._adsb_aircraft = {}
+
+    def adsb_snapshot(self) -> dict:
+        return {"aircraft": [dict(a, trail=list(a["trail"])) for a in self._adsb_aircraft.values()]}
+
+    def fake_adsb_step(self, now: float) -> list[dict]:
+        """One second of invented traffic in the fields AdsbState reports: airliners crossing, one in distress, one on
+        the ground, one not located yet. Deliberately no encoder: nothing in the application can produce a message."""
+        lat0, lon0 = station.locator_center(self.station.get("locator", "")) or ADSL_DEFAULT_CENTER
+        scale = math.cos(math.radians(lat0))
+        t = self._adsb_tick
+        self._adsb_tick += 1
+        phase = (t % 1800) * 0.0016
+        fields = {
+            "3C6444": {"callsign": "DLH4KA", "alt_ft": 36000, "alt_type": "baro", "speed_kt": 445.0, "track_deg": 85.0, "vrate_fpm": 0, "on_ground": False,
+                           "lat": lat0 + 0.6, "lon": lon0 - 1.2 + phase / scale},
+            "4CA7B5": {"callsign": "RYR82LM", "alt_ft": 24500, "alt_type": "baro", "speed_kt": 390.0, "track_deg": 205.0, "vrate_fpm": -1408, "on_ground": False,
+                           "lat": lat0 + 1.0 - phase, "lon": lon0 + 0.5 - phase * 0.4 / scale},
+            "406B21": {"callsign": "BAW912", "alt_ft": 7000, "alt_type": "baro", "speed_kt": 250.0, "track_deg": 120.0, "vrate_fpm": -640, "on_ground": False,
+                           "lat": lat0 - 0.4 - phase * 0.3, "lon": lon0 - 0.6 + phase * 0.5 / scale, "emergency": "general", "squawk": "7700"},
+            "3D1234": {"callsign": "DEABC", "alt_ft": None, "speed_kt": 12.0, "speed_type": "ground", "track_deg": 40.0, "on_ground": True,
+                           "lat": lat0 + 0.02, "lon": lon0 + 0.05},
+            "4B1A22": {"callsign": "SWR7", "alt_ft": 38000, "alt_type": "baro", "lat": None, "lon": None},
+        }
+        changed = []
+        for icao, values in fields.items():
+            a = self._adsb_aircraft.setdefault(icao, {"icao": icao, "messages": 0, "trail": [], "position_time": None})
+            a.update(values)
+            a["messages"] += 4
+            a["time"] = now
+            self._adsb_messages += 4
+            if a["lat"] is not None:
+                a["position_time"] = now
+                a["trail"].append([now, a["lat"], a["lon"]])
+                del a["trail"][:-200]
+            changed.append({k: v for k, v in a.items() if k != "trail"})
+        return changed
+
+    async def _adsb_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            if self.rx.connection is None or self.rx.mode != "adsb":
+                continue
+            changed = self.fake_adsb_step(time.time())
+            await self._emit_event("adsb_update", {"aircraft": changed, "count": len(self._adsb_aircraft),
+                                                    "messages": self._adsb_messages, "corrected": 0, "crc_failures": 0,
+                                                    "positions_rejected": 0})
 
     async def _adsl_loop(self) -> None:
         while True:

@@ -40,6 +40,7 @@ from gnuradio import analog, gr
 from gnuradio import filter as gr_filter
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
+from pluto_advanced_rx.adsb_state import AdsbState
 from pluto_advanced_rx.adsl_state import AdslState
 from pluto_advanced_rx.flowgraph import M17_AVAILABLE as RX_M17_AVAILABLE
 from pluto_advanced_rx.flowgraph import RADE_AVAILABLE as RX_RADE_AVAILABLE
@@ -90,9 +91,12 @@ RX_DEMOD_MODES = {
     "ft8": AdvancedRxFlowgraph.MODE_SSB,
     "js8": AdvancedRxFlowgraph.MODE_SSB,
     "adsl": AdvancedRxFlowgraph.MODE_FM,  # data only: its audio is never sent anywhere
+    "adsb": AdvancedRxFlowgraph.MODE_FM,  # likewise
 }
-RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl"}
+RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl", "adsb": "adsb"}
 ADSL_STATUS_S = 1.0
+ADSB_UPDATE_S = 1.0  # hundreds of messages a second reach the state; the browser gets one update per second
+ADSB_HALF_BAND_HZ = 1_000_000.0
 ADSL_CHANNEL_HALF_HZ = 100_000.0
 
 
@@ -113,6 +117,7 @@ def rx_bands() -> dict[str, list[float]]:
         "m17": [-m17_half, m17_half],
         "adsl": [min(rx_config.ADSL_CHANNELS_HZ) - rx_config.ADSL_LO_HZ - ADSL_CHANNEL_HALF_HZ,
                  max(rx_config.ADSL_CHANNELS_HZ) - rx_config.ADSL_LO_HZ + ADSL_CHANNEL_HALF_HZ],
+        "adsb": [-ADSB_HALF_BAND_HZ, ADSB_HALF_BAND_HZ],
     }
 SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8", "js8")  # squelch probe after the SSB filter
 FT8_STATUS_S = 15.0  # ft8_status at least once per slot, and on every change
@@ -289,6 +294,7 @@ class GnuRadioBackend(SessionBackend):
         self._tx_lock = asyncio.Lock()
         self._pocsag_rx_state = PocsagState()
         self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
+        self._adsb_state = AdsbState()  # likewise
         self._freq_before_fixed: float | None = None  # the operator's frequency while ADS-L/ADS-B hold the tuner
         self._fixed_gain_key: str | None = None  # a gain only such a mode set (not the operator): not saved, undone on leaving
         self._fixed_gain_default: float = 0.0
@@ -710,6 +716,7 @@ class GnuRadioBackend(SessionBackend):
             # per-invocation model.
             await self._teardown_rx()
             await self._fixed_tune_rx_gain(mode)
+            self._adsb_state.set_reference(station.locator_center(self.station.get("locator", "")))
             tuning_before = st.freq_hz, self._freq_before_fixed
             fixed_hz = rx_config.fixed_tune_frequency(mode)
             if fixed_hz is not None:
@@ -763,6 +770,7 @@ class GnuRadioBackend(SessionBackend):
             active_digimode=RX_DIGIMODES.get(mode),
             on_pocsag_message=self._on_pocsag_message,
             on_adsl_packet=self._on_adsl_packet,
+            on_adsb_message=self._adsb_state.on_message,
             on_m17_fields=self._on_m17_fields,
             on_rtty_char=self._on_rtty_char,
             rtty_mark_hz=params.get("mark_hz", rx_config.RTTY_MARK_HZ_DEFAULT),
@@ -892,6 +900,22 @@ class GnuRadioBackend(SessionBackend):
     def adsl_snapshot(self) -> dict:
         return {"aircraft": self._adsl_state.get_aircraft_json()}
 
+    async def adsb_clear(self) -> None:
+        self._adsb_state.clear()
+
+    def adsb_snapshot(self) -> dict:
+        return {"aircraft": self._adsb_state.get_aircraft()}
+
+    async def _emit_adsb_update(self, tb) -> None:
+        detector = tb.adsb_deframer.detector
+        aircraft, rejected = self._adsb_state.counts()
+        await self._emit_event("adsb_update", {
+            # Trails stay here: the browser extends its own from position_time, or gets them all with 'hello'.
+            "aircraft": [{k: v for k, v in a.items() if k != "trail"} for a in self._adsb_state.take_changed()],
+            "count": aircraft, "messages": detector.messages_ok, "corrected": detector.corrected,
+            "crc_failures": detector.crc_failures, "positions_rejected": rejected,
+        })
+
     def _on_rtty_char(self, char: str) -> None:
         with self._rtty_lock:  # GNU Radio thread; flushed by _rx_aux_loop
             self._rtty_pending.append(char)
@@ -901,7 +925,7 @@ class GnuRadioBackend(SessionBackend):
         (pluto_cli.runtime.run_rx_session does it in a sleep loop): RTTY
         AFC steps (nothing inside the flowgraph calls them), batched RTTY
         text, RADE sync/SNR status."""
-        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = 0.0
+        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = 0.0
         last_rade_state = last_ft8_state = last_js8_state = None
         while True:
             await asyncio.sleep(RTTY_FLUSH_S)
@@ -917,6 +941,9 @@ class GnuRadioBackend(SessionBackend):
                 if mode == "rtty" and now - last_afc >= rx_config.RTTY_AFC_POLL_INTERVAL_S:
                     last_afc = now
                     await asyncio.to_thread(tb.rtty_afc_step)
+                if mode == "adsb" and tb.adsb_deframer is not None and now - last_adsb >= ADSB_UPDATE_S:
+                    last_adsb = now
+                    await self._emit_adsb_update(tb)
                 if mode == "adsl" and now - last_adsl >= ADSL_STATUS_S:
                     last_adsl = now
                     await self._emit_event("adsl_status", {"channels": [

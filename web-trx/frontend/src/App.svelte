@@ -2,7 +2,8 @@
   import { onDestroy, onMount } from "svelte";
   import Waterfall from "./lib/Waterfall.svelte";
   import FreqInput from "./lib/FreqInput.svelte";
-  import AdslPanel, { type AdslAircraft, type AdslStatus } from "./lib/AdslPanel.svelte";
+  import TrafficPanel from "./lib/TrafficPanel.svelte";
+  import { ADSB_VIEW, ADSL_VIEW, type TrafficAircraft } from "./lib/trafficViews";
   import { locatorCenter } from "./lib/geo";
   import RxDecoder, {
     type PocsagCall, type RadeStatus, type Ft8Slot, type Ft8Status, type Ft8Decode,
@@ -23,7 +24,7 @@
   const MODE_LABELS: Record<string, string> = {
     fm: "FM", ssb: "SSB (USB)", lsb: "SSB (LSB)", m17: "M17", rade: "RADE",
     pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8", js8: "JS8 (JS8Call)",
-    adsl: "ADS-L (Luftfahrt, 868 MHz)",
+    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)",
   };
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
@@ -87,10 +88,17 @@
   let ft8Slots: Ft8Slot[] = [];
   // ADS-L aircraft: collected as packets arrive, drawn at most once per second (adslFlush below).
   const ADSL_TRAIL_POINTS = 200;
-  const adslAircraft = new Map<string, AdslAircraft>();
-  let adslList: AdslAircraft[] = [];
+  const adslAircraft = new Map<string, TrafficAircraft>();
+  let adslList: TrafficAircraft[] = [];
   let adslDirty = false;
-  let adslStatus: AdslStatus | null = null;
+  let adslStatus: { channels: { channel_hz: number; packets: number; crc_failures: number }[] } | null = null;
+  // ADS-B: the server sends only what changed, once per second.
+  const adsbAircraft = new Map<string, TrafficAircraft>();
+  let adsbList: TrafficAircraft[] = [];
+  let adsbStatus: { messages: number; corrected: number; crc_failures: number } | null = null;
+  // Modes that hold the tuner themselves: no frequency entry, no audio, room for the map.
+  const FIXED_TUNE_MODES = ["adsl", "adsb"];
+  $: rxFixedTune = FIXED_TUNE_MODES.includes(rxMode);
   let ft8Status: Ft8Status | null = null;
   // JS8 receive (backend js8_frames / js8_message / js8_status)
   let rxJs8 = { submode: "normal", decoder: "auto" };
@@ -132,7 +140,7 @@
   } catch {
     /* storage unavailable: default height */
   }
-  $: adslView = rxMode === "adsl" && bottomTab === "rx";
+  $: adslView = FIXED_TUNE_MODES.includes(rxMode) && bottomTab === "rx";
   $: shownBottomHeight = adslView ? clampBottom(adslBottomHeight) : bottomHeight;
   function clampBottom(px: number): number {
     // Keep at least ~260 px for header, RX controls and a usable waterfall.
@@ -524,6 +532,7 @@
       if (typeof e.server_time === "number") serverOffsetS = e.server_time - Date.now() / 1000;
       clockSynced = features.ft8?.clock_synced ?? true;
       adslLoadSnapshot(e.adsl as { aircraft?: Record<string, unknown>[] } | undefined);
+      adsbLoadSnapshot(e.adsb as { aircraft?: Record<string, unknown>[] } | undefined);
       if (fmOptions === null) {
         fmOptions = (e.mode_options as { fm: FmOptions }).fm;
         fmDeviationHz = fmOptions.deviation_default_hz;
@@ -628,7 +637,12 @@
     }
     if (e.event === "rade_status") radeStatus = e as unknown as RadeStatus;
     if (e.event === "adsl_packet" && e.address_label) adslOnPacket(e);
-    if (e.event === "adsl_status") adslStatus = e as unknown as AdslStatus;
+    if (e.event === "adsl_status") adslStatus = e as unknown as typeof adslStatus;
+    if (e.event === "adsb_update") adsbOnUpdate(e);
+    if (e.event === "adsb_cleared") {
+      adsbAircraft.clear();
+      adsbList = [];
+    }
     if (e.event === "rx_fft_zoom") zoomIndex = Math.max(0, ZOOM_STEPS.indexOf(Number(e.value)));
     if (e.event === "rx_gain") rxStageValues = { ...rxStageValues, [String(e.name)]: e.value as number | boolean };
     if (e.event === "adsl_cleared") {
@@ -847,7 +861,7 @@
     for (const a of snapshot?.aircraft ?? []) {
       const trail = (a.trail ?? []) as [number, number, number][];
       adslAircraft.set(String(a.label), {
-        ...(a as unknown as AdslAircraft),
+        ...(a as unknown as TrafficAircraft),
         heard_ms: toLocalMs(Number(a.time)),
         position_ms: trail.length ? toLocalMs(trail[trail.length - 1][0]) : null,
       });
@@ -866,7 +880,7 @@
     }
     // Same rule as AdslState: a field marked invalid (null) replaces the old value, an absent one keeps it.
     adslAircraft.set(label, {
-      ...old, ...(e as unknown as Partial<AdslAircraft>), label, trail, packets: (old?.packets ?? 0) + 1,
+      ...old, ...(e as unknown as Partial<TrafficAircraft>), label, trail, packets: (old?.packets ?? 0) + 1,
       heard_ms: Date.now(), position_ms: hasPosition ? Date.now() : (old?.position_ms ?? null),
     });
     adslDirty = true;
@@ -882,12 +896,53 @@
     client.request("adsl_clear", {});
   }
 
+  // -- ADS-B --
+  function adsbLoadSnapshot(snapshot: { aircraft?: Record<string, unknown>[] } | undefined): void {
+    adsbAircraft.clear();
+    for (const a of snapshot?.aircraft ?? []) {
+      adsbAircraft.set(String(a.icao), {
+        ...(a as unknown as TrafficAircraft), label: String(a.icao),
+        heard_ms: toLocalMs(Number(a.time)),
+        position_ms: a.position_time ? toLocalMs(Number(a.position_time)) : null,
+      });
+    }
+    adsbList = [...adsbAircraft.values()];
+  }
+  const ADSB_REMOVE_MS = 15 * 60 * 1000; // as the server does, which only ever reports what changed
+  function adsbOnUpdate(e: Record<string, unknown>): void {
+    adsbStatus = e as unknown as typeof adsbStatus;
+    for (const a of (e.aircraft ?? []) as Record<string, unknown>[]) {
+      const label = String(a.icao);
+      const old = adsbAircraft.get(label);
+      const trail = old?.trail ?? [];
+      const time = a.position_time == null ? null : Number(a.position_time);
+      if (time != null && a.lat != null && a.lon != null && (trail.length === 0 || trail[trail.length - 1][0] !== time)) {
+        trail.push([time, Number(a.lat), Number(a.lon)]);
+        trail.splice(0, trail.length - ADSL_TRAIL_POINTS);
+      }
+      adsbAircraft.set(label, {
+        ...old, ...(a as unknown as TrafficAircraft), label, trail,
+        heard_ms: Date.now(), position_ms: time == null ? null : toLocalMs(time),
+      });
+    }
+    const now = Date.now();
+    for (const [label, a] of adsbAircraft) if (now - a.heard_ms > ADSB_REMOVE_MS) adsbAircraft.delete(label);
+    adsbList = [...adsbAircraft.values()];
+  }
+  function clearAdsb(): void {
+    client.request("adsb_clear", {});
+  }
+  const sum = (channels: { packets: number; crc_failures: number }[] | undefined, key: "packets" | "crc_failures"): number =>
+    channels?.reduce((total, c) => total + c[key], 0) ?? 0;
+  $: adslHeadline = `868,2 + 868,4 MHz · ${sum(adslStatus?.channels, "packets")} Pakete · ${sum(adslStatus?.channels, "crc_failures")} CRC-Fehler`;
+  $: adsbHeadline = `1090 MHz · ${adsbStatus?.messages ?? 0} Nachrichten · ${adsbStatus?.corrected ?? 0} korrigiert · ${adsbStatus?.crc_failures ?? 0} CRC-Fehler`;
+
   function tuneRx(hz: number): void {
     rxFreqHz = hz;
     if (rxConnected) client.request("tune", { direction: "rx", freq_hz: hz });
   }
   function onWaterfallClick(freqHz: number): void {
-    if (rxMode === "adsl") return; // the mode tunes itself
+    if (rxFixedTune) return; // the mode tunes itself
     tuneRx(Math.round(freqHz / 100) * 100);
   }
   function toggleAudio(): void {
@@ -1151,10 +1206,10 @@
     </div>
 
     <div class="row rx-freq-row">
-      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxMode === "adsl" && rxConnected}
-        hint={rxMode === "adsl" && rxConnected ? "Von ADS-L festgelegt. Zum Ändern den Modus wechseln." : ""} />
-      {#if rxMode === "adsl" && rxConnected}
-        <span class="freq-locked">Von ADS-L festgelegt.<br />Zum Ändern den Modus wechseln.</span>
+      <FreqInput value={rxFreqHz} onCommit={tuneRx} size="large" disabled={rxFixedTune && rxConnected}
+        hint={rxFixedTune && rxConnected ? "Vom Modus festgelegt. Zum Ändern den Modus wechseln." : ""} />
+      {#if rxFixedTune && rxConnected}
+        <span class="freq-locked">Vom Modus festgelegt.<br />Zum Ändern den Modus wechseln.</span>
       {/if}
       {#if features.rx_direct_sampling?.includes(rxDeviceType)}
         <div class="field narrow">
@@ -1190,8 +1245,8 @@
       </div>
       <div class="field narrow">
         <label for="rxAudioBtn">Audio</label>
-        <button id="rxAudioBtn" on:click={toggleAudio} disabled={rxMode === "adsl"}
-          title={rxMode === "adsl" ? "ADS-L ist ein reiner Datenmodus, ohne Ton" : ""}>{audioOn ? "\u{1F50A} RX-Audio an" : "\u{1F507} RX-Audio aus"}</button>
+        <button id="rxAudioBtn" on:click={toggleAudio} disabled={rxFixedTune}
+          title={rxFixedTune ? "Dieser Modus empfängt nur Daten, ohne Ton" : ""}>{audioOn ? "\u{1F50A} RX-Audio an" : "\u{1F507} RX-Audio aus"}</button>
       </div>
       <div class="field narrow volume">
         <label for="rxVolume">Lautstärke {volumePct} %</label>
@@ -1784,8 +1839,11 @@
 
   <div class="tab-body" class:hidden={bottomTab !== "rx"}>
     {#if rxMode === "adsl"}
-      <AdslPanel aircraft={adslList} status={adslStatus} station={adslStation} connected={rxConnected}
+      <TrafficPanel view={ADSL_VIEW} aircraft={adslList} headline={adslHeadline} station={adslStation} connected={rxConnected}
         tileSetting={features.map_tile_url ?? ""} onClear={clearAdsl} />
+    {:else if rxMode === "adsb"}
+      <TrafficPanel view={ADSB_VIEW} aircraft={adsbList} headline={adsbHeadline} station={adslStation} connected={rxConnected}
+        tileSetting={features.map_tile_url ?? ""} onClear={clearAdsb} />
     {:else if rxMode === "js8" && rxConnected}
       <Js8Panel messages={js8Messages} periods={js8Periods} status={js8Status} myCall={stationCall}
         onPick={features.js8?.tx ? pickJs8 : null}

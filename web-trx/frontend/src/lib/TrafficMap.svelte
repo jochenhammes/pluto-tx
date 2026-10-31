@@ -2,13 +2,15 @@
   import L from "leaflet";
   import "leaflet/dist/leaflet.css";
   import { onDestroy, onMount } from "svelte";
-  import type { AdslAircraft } from "./AdslPanel.svelte";
+  import type { TrafficAircraft } from "./trafficViews";
   import type { LatLon } from "./geo";
 
-  // Live map of the aircraft heard. Leaflet is bundled; only the background tiles come from outside
+  // Live map of the aircraft heard, for ADS-L and ADS-B. Leaflet is bundled; only the background tiles come from outside
   // (from the browser, see tileSetting), and everything drawn here works without them.
 
-  export let aircraft: AdslAircraft[] = [];
+  export let aircraft: TrafficAircraft[] = [];
+  export let rings: number[] = [];
+  export let tagText: (a: TrafficAircraft) => string = (a) => a.label;
   export let station: LatLon | null = null;
   export let selected: string | null = null;
   export let onSelect: (label: string | null) => void = () => {};
@@ -21,7 +23,6 @@
   const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>';
   const STALE_MS = 60_000; // faded after this long without a position
   const GONE_MS = 300_000; // off the map after this long; the table keeps the entry
-  const RINGS_KM = [25, 50, 100];
   const KM_PER_DEGREE_LAT = 111.2;
   const RING_LABELS_MIN_ZOOM = 7; // zoomed out further they all fall on top of the station
   const DEFAULT_VIEW: [LatLon, number] = [[51.2, 10.4], 6];
@@ -39,22 +40,22 @@
   const escapeHtml = (s: string): string =>
     s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 
-  function visible(a: AdslAircraft): boolean {
+  function visible(a: TrafficAircraft): boolean {
     return a.lat != null && a.lon != null && a.position_ms != null && now - a.position_ms < GONE_MS;
   }
 
-  function iconHtml(a: AdslAircraft): string {
-    const classes = ["adsl-craft"];
+  function iconHtml(a: TrafficAircraft): string {
+    const classes = ["traffic-craft"];
     if (a.emergency && a.emergency !== "none" && a.emergency !== "undefined") classes.push("emergency");
     if (now - (a.position_ms ?? 0) >= STALE_MS) classes.push("stale");
     if (a.label === selected) classes.push("selected");
-    const altitude = a.alt_m == null ? "" : ` · ${Math.round(a.alt_m)} m`;
-    // Without a track (not moving) a dot instead of an arrow pointing nowhere.
-    const glyph = a.track_deg == null
+    // Without a direction (not moving) a dot instead of an arrow pointing nowhere.
+    const direction = a.track_deg ?? a.heading_deg;
+    const glyph = direction == null
       ? '<circle cx="12" cy="12" r="5"/>'
-      : `<path transform="rotate(${Math.round(a.track_deg)} 12 12)" d="M12 2 L19 21 L12 17 L5 21 Z"/>`;
+      : `<path transform="rotate(${Math.round(direction)} 12 12)" d="M12 2 L19 21 L12 17 L5 21 Z"/>`;
     return `<div class="${classes.join(" ")}"><svg width="24" height="24" viewBox="0 0 24 24">${glyph}</svg>`
-      + `<span class="adsl-tag">${escapeHtml(a.label)}${altitude}</span></div>`;
+      + `<span class="traffic-tag">${escapeHtml(tagText(a))}</span></div>`;
   }
 
   function refresh(): void {
@@ -103,16 +104,16 @@
     stationLayer = undefined;
     if (!station) return;
     const layer = L.layerGroup();
-    for (const km of RINGS_KM) {
+    for (const km of rings) {
       L.circle(station, { radius: km * 1000, color: "#8993a8", weight: 1, dashArray: "4 6", fill: false, interactive: false })
         .addTo(layer);
       L.marker([station[0] + km / KM_PER_DEGREE_LAT, station[1]], {
-        icon: L.divIcon({ html: `<span class="adsl-ring-label">${km} km</span>`, className: "", iconSize: [50, 14], iconAnchor: [25, 7] }),
+        icon: L.divIcon({ html: `<span class="traffic-ring-label">${km} km</span>`, className: "", iconSize: [50, 14], iconAnchor: [25, 7] }),
         interactive: false,
       }).addTo(layer);
     }
     L.marker(station, {
-      icon: L.divIcon({ html: '<div class="adsl-station"></div>', className: "", iconSize: [14, 14], iconAnchor: [7, 7] }),
+      icon: L.divIcon({ html: '<div class="traffic-station"></div>', className: "", iconSize: [14, 14], iconAnchor: [7, 7] }),
       title: "Eigene Station",
       interactive: false,
     }).addTo(layer);
@@ -198,29 +199,29 @@
     color: var(--text);
     border-color: var(--border);
   }
-  .map :global(.adsl-craft) {
+  .map :global(.traffic-craft) {
     position: relative;
     width: 24px;
     height: 24px;
     color: #3ea6ff;
     cursor: pointer;
   }
-  .map :global(.adsl-craft svg) {
+  .map :global(.traffic-craft svg) {
     fill: currentColor;
     stroke: #0a0c11;
     stroke-width: 1.2;
     display: block;
   }
-  .map :global(.adsl-craft.emergency) {
+  .map :global(.traffic-craft.emergency) {
     color: #ff4d4d;
   }
-  .map :global(.adsl-craft.stale) {
+  .map :global(.traffic-craft.stale) {
     opacity: 0.45;
   }
-  .map :global(.adsl-craft.selected) {
+  .map :global(.traffic-craft.selected) {
     color: #ffd166;
   }
-  .map :global(.adsl-tag) {
+  .map :global(.traffic-tag) {
     position: absolute;
     left: 26px;
     top: 3px;
@@ -231,17 +232,17 @@
     background: rgba(10, 12, 17, 0.75);
     border-radius: 3px;
   }
-  .map :global(.adsl-station) {
+  .map :global(.traffic-station) {
     width: 14px;
     height: 14px;
     background: var(--ok);
     border: 2px solid #0a0c11;
     border-radius: 50%;
   }
-  .map:global(.far) :global(.adsl-ring-label) {
+  .map:global(.far) :global(.traffic-ring-label) {
     display: none;
   }
-  .map :global(.adsl-ring-label) {
+  .map :global(.traffic-ring-label) {
     display: block;
     text-align: center;
     color: var(--text-dim);

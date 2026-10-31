@@ -137,3 +137,62 @@ def test_protocol_over_websocket_and_reload():
             receive_until(ws, "adsl_cleared")
             ws.send_json({"request": "select_mode", "direction": "rx", "mode": "fm", "params": {}})
             assert receive_until(ws, "tuned")["freq_hz"] != ADSL_LO_HZ
+
+
+# -- ADS-B, same handling --
+
+async def test_adsb_tunes_and_restores():
+    b, events = await connected_backend()
+    await b.select_mode("rx", "adsb", {})
+    assert b.rx.freq_hz == 1_090_000_000
+    with pytest.raises(SessionError, match="ADSB tunes itself"):
+        await b.tune("rx", 145e6)
+    await b.select_mode("rx", "adsl", {})
+    assert b.rx.freq_hz == ADSL_LO_HZ
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.freq_hz == 433_500_000.0
+    assert events[-1] == ("tuned", {"direction": "rx", "freq_hz": 433_500_000.0})
+
+
+def test_adsb_mode_parameters():
+    assert modes.normalize_params("rx", "adsb", {}) == {}
+    with pytest.raises(ValueError):
+        modes.normalize_params("rx", "adsb", {"anything": 1})
+
+
+async def test_adsb_simulation():
+    b, _ = await connected_backend()
+    changed = b.fake_adsb_step(100.0)
+    json.dumps(changed)
+    assert all("trail" not in a for a in changed)
+    assert {a["callsign"] for a in changed} >= {"DLH4KA", "BAW912"}
+    assert any(a["lat"] is None for a in changed)
+    b.fake_adsb_step(101.0)
+    snapshot = {a["icao"]: a for a in b.adsb_snapshot()["aircraft"]}
+    json.dumps(snapshot)
+    assert len(snapshot["3C6444"]["trail"]) == 2
+    assert snapshot["4B1A22"]["trail"] == []
+    await b.adsb_clear()
+    assert b.adsb_snapshot() == {"aircraft": []}
+
+
+def test_adsb_protocol_over_websocket_and_reload():
+    with make_client() as client:
+        login(client)
+        with client.websocket_connect("/ws") as ws:
+            hello = receive_until(ws, "hello")
+            assert hello["adsb"] == {"aircraft": []}
+            assert "adsb" in hello["features"]["rx_modes"]
+            ws.send_json({"request": "connect", "direction": "rx", "device_type": "sim", "connection": "sim:0"})
+            ws.send_json({"request": "select_mode", "direction": "rx", "mode": "adsb", "params": {}})
+            assert receive_until(ws, "tuned")["freq_hz"] == 1_090_000_000
+            update = receive_until(ws, "adsb_update")
+            assert update["count"] >= 1
+            assert all("trail" not in a for a in update["aircraft"])
+        with client.websocket_connect("/ws") as ws:
+            hello = receive_until(ws, "hello")
+            assert len(hello["adsb"]["aircraft"]) >= 1
+            assert "trail" in hello["adsb"]["aircraft"][0]
+            ws.send_json({"request": "adsb_clear"})
+            receive_until(ws, "adsb_cleared")
+

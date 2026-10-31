@@ -1,24 +1,15 @@
-<script context="module" lang="ts">
-  // adsl_packet / hello events (web_trx/radio_backend.py, pluto_tx/adsl_codec.py event_fields()).
-  export type AdslAircraft = {
-    label: string; packets: number; heard_ms: number; position_ms: number | null;
-    trail: [number, number, number][];
-    lat?: number | null; lon?: number | null; alt_m?: number | null; speed_mps?: number | null;
-    climb_mps?: number | null; track_deg?: number | null; category?: string; flight_state?: string;
-    emergency?: string; channel_hz?: number; frequency_offset_hz?: number;
-  };
-  export type AdslStatus = { channels: { channel_hz: number; packets: number; crc_failures: number }[] };
-</script>
-
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import AdslMap from "./AdslMap.svelte";
-  import { bearingDeg, distanceKm, type LatLon } from "./geo";
+  import TrafficMap from "./TrafficMap.svelte";
+  import type { LatLon } from "./geo";
+  import type { TrafficAircraft, TrafficView } from "./trafficViews";
 
-  // ADS-L receive view: live map plus the list of aircraft. A click on a row or marker selects that aircraft.
+  // Aircraft receive view for ADS-L and ADS-B: live map plus the list of aircraft. A click on a row or marker selects
+  // that aircraft. What the columns show comes from the mode's TrafficView.
 
-  export let aircraft: AdslAircraft[] = [];
-  export let status: AdslStatus | null = null;
+  export let view: TrafficView;
+  export let aircraft: TrafficAircraft[] = [];
+  export let headline = "";
   export let station: LatLon | null = null;
   export let connected = false;
   export let tileSetting = "";
@@ -27,28 +18,13 @@
   let selected: string | null = null;
   let fullscreen = false;
   let now = Date.now();
-  let map: AdslMap;
+  let map: TrafficMap;
   let timer: ReturnType<typeof setInterval>;
 
-  const isEmergency = (a: AdslAircraft): boolean => !!a.emergency && a.emergency !== "none" && a.emergency !== "undefined";
+  const isEmergency = (a: TrafficAircraft): boolean => !!a.emergency && a.emergency !== "none" && a.emergency !== "undefined";
   // Emergencies on top, otherwise a stable order: rows must not jump while being read.
   $: rows = [...aircraft].sort((a, b) => Number(isEmergency(b)) - Number(isEmergency(a)) || a.label.localeCompare(b.label));
-  $: packets = status?.channels.reduce((sum, c) => sum + c.packets, 0) ?? 0;
-  $: crcFailures = status?.channels.reduce((sum, c) => sum + c.crc_failures, 0) ?? 0;
-
-  const fixed = (v: number | null | undefined, digits = 0, scale = 1): string => (v == null ? "" : (v * scale).toFixed(digits));
-  const signed = (v: number | null | undefined): string => (v == null ? "" : `${v > 0 ? "+" : ""}${v.toFixed(1)}`);
-  function position(a: AdslAircraft): LatLon | null {
-    return a.lat != null && a.lon != null ? [a.lat, a.lon] : null;
-  }
-  function distance(a: AdslAircraft): string {
-    const p = position(a);
-    return p && station ? distanceKm(station, p).toFixed(1) : "";
-  }
-  function bearing(a: AdslAircraft): string {
-    const p = position(a);
-    return p && station ? bearingDeg(station, p).toFixed(0) : "";
-  }
+  const hasPosition = (a: TrafficAircraft): boolean => a.lat != null && a.lon != null;
 
   async function toggleFullscreen(): Promise<void> {
     fullscreen = !fullscreen;
@@ -67,10 +43,10 @@
 
 <svelte:window on:keydown={onKey} />
 
-<div class="adsl" class:fullscreen>
+<div class="traffic" class:fullscreen>
   <div class="head">
     <span class="dim">
-      {#if !connected}Empfänger nicht verbunden — letzter Stand.{:else}868,2 + 868,4 MHz · {packets} Pakete · {crcFailures} CRC-Fehler{/if}
+      {#if !connected}Empfänger nicht verbunden — letzter Stand.{:else}{headline}{/if}
       · {aircraft.length} Luftfahrzeuge
     </span>
     <span class="notice">Nur zur Beobachtung, nicht zur Navigation oder Kollisionsvermeidung.</span>
@@ -82,28 +58,25 @@
   </div>
   <div class="body">
     <div class="map-box">
-      <AdslMap bind:this={map} {aircraft} {station} {selected} {now} {tileSetting} onSelect={(label) => (selected = label)} />
+      <TrafficMap bind:this={map} {aircraft} {station} {selected} {now} {tileSetting} rings={view.rings} tagText={view.tagText}
+        onSelect={(label) => (selected = label)} />
     </div>
     <div class="list">
       <table>
         <thead>
-          <tr>
-            <th>Adresse</th><th>Kategorie</th><th title="Über dem WGS-84-Ellipsoid, nicht über Grund oder Meer">Höhe m (Ellipsoid)</th>
-            <th>km/h</th><th>m/s</th><th>Kurs</th><th>km</th><th>Peilung</th><th>Alter s</th><th>Pakete</th>
-          </tr>
+          <tr>{#each view.columns as column}<th title={column.tooltip ?? ""}>{column.title}</th>{/each}</tr>
         </thead>
         <tbody>
           {#each rows as a (a.label)}
-            <tr class:selected={a.label === selected} class:emergency={isEmergency(a)} class:no-position={!position(a)}
+            <tr class:selected={a.label === selected} class:emergency={isEmergency(a)} class:no-position={!hasPosition(a)}
               on:click={() => (selected = selected === a.label ? null : a.label)}
-              title={isEmergency(a) ? `Notfall: ${a.emergency}` : position(a) ? "" : "Keine Position gemeldet: nicht auf der Karte"}>
-              <td class="mono">{a.label}</td><td>{a.category ?? ""}</td><td>{fixed(a.alt_m)}</td>
-              <td>{fixed(a.speed_mps, 0, 3.6)}</td><td>{signed(a.climb_mps)}</td><td>{fixed(a.track_deg)}</td>
-              <td>{distance(a)}</td><td>{bearing(a)}</td><td>{Math.max(0, Math.round((now - a.heard_ms) / 1000))}</td>
-              <td>{a.packets}</td>
+              title={isEmergency(a) ? `Notfall: ${a.emergency}` : hasPosition(a) ? "" : "Keine Position bekannt: nicht auf der Karte"}>
+              {#each view.columns as column, i}
+                <td class:mono={i === 0}>{column.value(a, station, now)}</td>
+              {/each}
             </tr>
           {:else}
-            <tr><td colspan="10" class="dim">Noch keine Pakete empfangen.</td></tr>
+            <tr><td colspan={view.columns.length} class="dim">{view.emptyText}</td></tr>
           {/each}
         </tbody>
       </table>
@@ -112,14 +85,14 @@
 </div>
 
 <style>
-  .adsl {
+  .traffic {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
-  .adsl.fullscreen {
+  .traffic.fullscreen {
     position: fixed;
     inset: 0;
     z-index: 2000;
