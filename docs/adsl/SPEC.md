@@ -48,3 +48,19 @@ Ein Traffic-Rahmen hat die Länge `0x18` (1 + 20 + 3 Byte), auf der Luft 432 Chi
 - Status-, Uplink- und Remote-ID-Payload: Es werden nur Typ und Absender angezeigt.
 - Reed-Solomon-Rahmen (Error-Control-Bit gesetzt): werden verworfen, weil sie ohne RS-Dekoder nicht prüfbar sind. Die Spezifikation empfiehlt sie erst ab 64 Byte, also vor allem für HDR-Uplinks.
 - Digitale Signatur: wird ignoriert.
+
+## Messwerte Demodulator (synthetisch)
+
+`python3 -m tests.adsl_measure`: Numpy-Nachbau des Kanalpfads, kein Funk und noch nicht durch GNU Radio. SNR bezogen auf den 200-kHz-Kanal, Kanalfilter 110 kHz / 40 kHz Übergang.
+
+| Größe | Ergebnis |
+|---|---|
+| Empfangsquote | 6 dB: 21 %, 8 dB: 89 %, 10 dB: 99 %, ab 12 dB: 100 % |
+| Frequenzablage bei 14 dB | ±50 kHz: 100 %, −60 kHz: 90 %, +60 kHz: 77 % |
+| Geräteraten 1,8–5 MS/s | jeweils 100 % bei 14 und 20 dB |
+| Rauschen, 40 s | 0 Kandidaten, 0 falsche Pakete |
+| CPU | rund 2 % eines Kerns je Kanal, unter Dauerlast 3,5 % (nur Detektor, ohne Filter) |
+| Starkes Signal 200 kHz daneben | +20 dB: 95 %; +40 dB: 22 %, weil dann überlappende Pakete verloren gehen |
+| Falscher Kanal bis 60 dB | keine Fehlzuordnung |
+
+Bekannte Grenze: Ein Dauerträger im Kanal in gleicher Stärke wie das Nutzsignal stört den Diskriminator vollständig; bei −10 dB ist er folgenlos. Das kann eigene Störlinien des Empfängers bei sehr schwachen Signalen betreffen.
