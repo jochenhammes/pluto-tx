@@ -17,7 +17,6 @@ from pluto_tx import js8 as tx_js8
 from pluto_tx import js8_message as tx_js8_message
 from pluto_tx import config as tx_config
 from pluto_tx import dcs as tx_dcs
-from pluto_tx import adsb_codec as tx_adsb_codec
 from pluto_tx import aprs_codec as tx_aprs_codec
 from pluto_tx import pocsag_codec as tx_pocsag
 from pluto_tx import devices as tx_devices
@@ -440,7 +439,7 @@ def run_aprs(args):
         return 1
     lat, lon = args.position if args.position else (None, None)
     if args.locator:
-        center = tx_adsb_codec.locator_center(args.locator)
+        center = tx_aprs_codec.locator_center(args.locator)
         if center is None:
             emitter.error(f"invalid --locator {args.locator}")
             return 1

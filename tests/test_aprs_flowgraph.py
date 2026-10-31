@@ -243,5 +243,105 @@ class CliTransmitTests(unittest.TestCase):
         self.assertNotIn("keyed", [e["event"] for e in events])
 
 
+class GuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt5 import QtWidgets
+        from tests import fakes
+        fakes.register_tx()
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def tx_window(self):
+        from pluto_tx import flowgraph as txf
+        from pluto_tx import gui
+        txf.PlutoTxFlowgraph._aprs_last_sent = -1e9
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData(txf.PlutoTxFlowgraph.MODE_APRS))
+        w.mode_tab_widget.setCurrentIndex(1)
+        self.assertEqual(w._current_mode, txf.PlutoTxFlowgraph.MODE_APRS)
+        w.tb = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_APRS, frequency=144.8e6)
+        self.addCleanup(lambda: setattr(w, "tb", None))
+        return w
+
+    def test_tx_shows_exactly_what_will_go_out(self):
+        w = self.tx_window()
+        self.assertTrue(w.aprs_group_widget.isVisibleTo(w))
+        w.aprs_call_edit.setText("da2jh-9")
+        w.aprs_locator_edit.setText("JO43")
+        w.aprs_comment_edit.setText("TEST")
+        self.assertIn("DA2JH-9 via WIDE1-1,WIDE2-1: !5330.00N/00900.00E-TEST", w.aprs_info_label.text())
+        w.aprs_path_combo.setCurrentIndex(2)
+        self.assertEqual(w.tb.aprs_path, ())
+        self.assertIn("no digipeaters", w.aprs_info_label.text())
+        w.aprs_kind_combo.setCurrentIndex(1)
+        self.assertTrue(w.aprs_message_widget.isVisibleTo(w))
+        self.assertFalse(w.aprs_beacon_widget.isVisibleTo(w))
+        w.aprs_to_edit.setText("dl1abc")
+        w.aprs_text_edit.setText("Hallo")
+        self.assertIn(":DL1ABC   :Hallo{1", w.aprs_info_label.text())
+
+    def test_tx_refuses_before_keying(self):
+        w = self.tx_window()
+        w.aprs_call_edit.setText("")
+        self.assertFalse(w._aprs_ptt_allowed())
+        self.assertIn("no callsign", w.status_label.text())
+        self.assertFalse(w.tb.keyed)
+
+    def test_tx_message_number_advances_only_when_sent(self):
+        w = self.tx_window()
+        w.aprs_call_edit.setText("DA2JH")
+        w.aprs_kind_combo.setCurrentIndex(1)
+        w.aprs_to_edit.setText("DL1ABC")
+        w.aprs_text_edit.setText("Hi")
+        self.assertEqual(w.tb.aprs_message_id, "1")
+        w.tb._ensure_aprs_audio()
+        w._log_aprs_sent()
+        self.assertEqual(w.tb.aprs_message_id, "2")
+        self.assertIn("Hi{1", w.aprs_sent_log.toPlainText())
+
+    def rx_window(self):
+        from pluto_advanced_rx import gui
+        w = gui.MainWindow("")
+        self.addCleanup(w.close)
+        w.mode_tab_widget.setCurrentIndex(w._digimodes_tab_index)
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("aprs"))
+        return w
+
+    def feed(self, w, source, info, path=("WIDE1-1",)):
+        w._aprs_state.on_frame(c.parse_frame(c.build_frame(source, "APRS", path, info.encode("latin-1"))))
+        w._render_aprs_tables()
+
+    def test_rx_tables(self):
+        w = self.rx_window()
+        self.assertTrue(w.aprs_group_widget.isVisibleTo(w))
+        self.feed(w, "DA2JH-9", "!5330.00N/00900.00E-TEST")
+        self.feed(w, "DB0ABC", ">just a status")
+        self.feed(w, "DL1ABC", ":DA2JH    :Hallo{7")
+        self.feed(w, "DL1ABC", ":DA2JH    :ack7")
+        row = {w.aprs_station_table.item(r, 0).text(): r for r in range(w.aprs_station_table.rowCount())}
+        self.assertEqual(sorted(row), ["DA2JH-9", "DB0ABC", "DL1ABC"])
+        cell = lambda r, col: w.aprs_station_table.item(row[r], w.APRS_STATION_COLUMNS.index(col)).text()
+        self.assertEqual((cell("DA2JH-9", "Latitude"), cell("DA2JH-9", "Comment")), ("53.5000", "TEST"))
+        self.assertEqual(cell("DB0ABC", "Latitude"), "")
+        messages = w.aprs_message_table
+        self.assertEqual([messages.item(0, i).text() for i in (1, 2, 3, 4)], ["DL1ABC", "DA2JH", "Hallo", "7"])
+        self.assertEqual(messages.item(1, 3).text(), "ack")
+        self.assertEqual(w.aprs_packet_table.rowCount(), 4)
+        self.assertEqual(w.aprs_packet_table.item(1, 4).text(), "just a status")
+        w._on_aprs_clear_clicked()
+        self.assertEqual(w.aprs_station_table.rowCount(), 0)
+
+    def test_rx_hostile_text_is_plain_text(self):
+        w = self.rx_window()
+        self.feed(w, "DA2JH", ">" + "<b>x</b>")
+        self.assertEqual(w.aprs_packet_table.item(0, 4).text(), "<b>x</b>")
+
+    def test_rx_frequency_is_a_default_not_a_lock(self):
+        from pluto_advanced_rx import config as rxc
+        self.assertEqual(rxc.mode_default_frequency("aprs"), 144.8e6)
+        self.assertIsNone(rxc.fixed_tune_frequency("aprs"))
+
+
 if __name__ == "__main__":
     unittest.main()

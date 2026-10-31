@@ -18,6 +18,7 @@ from . import devices
 from . import digitext
 from . import filebroadcast
 from . import pocsag
+from . import aprs_codec
 from . import pocsag_codec
 from . import ft8
 from . import js8, js8_message, js8_phy
@@ -95,7 +96,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                   PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
                                   PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE,
                                   PlutoTxFlowgraph.MODE_POCSAG, PlutoTxFlowgraph.MODE_FT8,
-                                  PlutoTxFlowgraph.MODE_JS8)
+                                  PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -630,6 +631,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.digimode_combo.addItem("PSK31 (BPSK31 Chat)", PlutoTxFlowgraph.MODE_PSK31)
         self.digimode_combo.addItem("RTTY", PlutoTxFlowgraph.MODE_RTTY)
         self.digimode_combo.addItem("POCSAG (Paging)", PlutoTxFlowgraph.MODE_POCSAG)
+        self.digimode_combo.addItem("APRS", PlutoTxFlowgraph.MODE_APRS)
         self.digimode_combo.addItem("FT8", PlutoTxFlowgraph.MODE_FT8)
         if not FT8_AVAILABLE:
             ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_FT8))
@@ -957,6 +959,80 @@ class MainWindow(QtWidgets.QMainWindow):
         pocsag_layout.addWidget(self.pocsag_sent_log)
         digimodes_tab_layout.addWidget(pocsag_group)
         self.pocsag_group_widget = pocsag_group
+        # --- APRS: one position beacon or text message per PTT press; nothing here repeats by itself.
+        aprs_group = QtWidgets.QWidget()
+        aprs_layout = QtWidgets.QVBoxLayout(aprs_group)
+        aprs_layout.setContentsMargins(0, 0, 0, 0)
+        aprs_row1 = QtWidgets.QHBoxLayout()
+        aprs_row1.addWidget(QtWidgets.QLabel("Call:"))
+        self.aprs_call_edit = QtWidgets.QLineEdit(self._ft8_setting("my_call"))
+        self.aprs_call_edit.setMaxLength(9)
+        self.aprs_call_edit.setFixedWidth(90)
+        aprs_row1.addWidget(self.aprs_call_edit)
+        aprs_row1.addWidget(QtWidgets.QLabel("Send:"))
+        self.aprs_kind_combo = QtWidgets.QComboBox()
+        self.aprs_kind_combo.addItem("Position beacon", "beacon")
+        self.aprs_kind_combo.addItem("Message", "message")
+        aprs_row1.addWidget(self.aprs_kind_combo)
+        aprs_row1.addWidget(QtWidgets.QLabel("Path:"))
+        self.aprs_path_combo = QtWidgets.QComboBox()
+        for path in config.APRS_PATHS:
+            self.aprs_path_combo.addItem(",".join(path) or "none", path)
+        aprs_row1.addWidget(self.aprs_path_combo)
+        self.aprs_channel_button = QtWidgets.QPushButton(f"Tune {config.APRS_FREQ_HZ / 1e6:.3f} MHz")
+        self.aprs_channel_button.setToolTip("Sets the frequency only; nothing is sent until you press PTT.")
+        self.aprs_channel_button.clicked.connect(lambda: self.freq_spin.setValue(config.APRS_FREQ_HZ / 1e6))
+        aprs_row1.addWidget(self.aprs_channel_button)
+        aprs_row1.addStretch(1)
+        aprs_layout.addLayout(aprs_row1)
+        self.aprs_beacon_widget = QtWidgets.QWidget()
+        aprs_row2 = QtWidgets.QHBoxLayout(self.aprs_beacon_widget)
+        aprs_row2.setContentsMargins(0, 0, 0, 0)
+        aprs_row2.addWidget(QtWidgets.QLabel("Locator:"))
+        self.aprs_locator_edit = QtWidgets.QLineEdit(self._ft8_setting("locator"))
+        self.aprs_locator_edit.setMaxLength(6)
+        self.aprs_locator_edit.setFixedWidth(70)
+        self.aprs_locator_edit.setToolTip("The beacon reports the middle of this square, deliberately not your exact position.")
+        aprs_row2.addWidget(self.aprs_locator_edit)
+        aprs_row2.addWidget(QtWidgets.QLabel("Symbol:"))
+        self.aprs_symbol_edit = QtWidgets.QLineEdit(config.APRS_DEFAULT_SYMBOL)
+        self.aprs_symbol_edit.setMaxLength(2)
+        self.aprs_symbol_edit.setFixedWidth(40)
+        aprs_row2.addWidget(self.aprs_symbol_edit)
+        aprs_row2.addWidget(QtWidgets.QLabel("Comment:"))
+        self.aprs_comment_edit = QtWidgets.QLineEdit()
+        self.aprs_comment_edit.setMaxLength(43)
+        aprs_row2.addWidget(self.aprs_comment_edit, 1)
+        aprs_layout.addWidget(self.aprs_beacon_widget)
+        self.aprs_message_widget = QtWidgets.QWidget()
+        aprs_row3 = QtWidgets.QHBoxLayout(self.aprs_message_widget)
+        aprs_row3.setContentsMargins(0, 0, 0, 0)
+        aprs_row3.addWidget(QtWidgets.QLabel("To:"))
+        self.aprs_to_edit = QtWidgets.QLineEdit()
+        self.aprs_to_edit.setMaxLength(9)
+        self.aprs_to_edit.setFixedWidth(90)
+        aprs_row3.addWidget(self.aprs_to_edit)
+        aprs_row3.addWidget(QtWidgets.QLabel("Text:"))
+        self.aprs_text_edit = QtWidgets.QLineEdit()
+        self.aprs_text_edit.setMaxLength(aprs_codec.MAX_MESSAGE_TEXT)
+        aprs_row3.addWidget(self.aprs_text_edit, 1)
+        aprs_layout.addWidget(self.aprs_message_widget)
+        self.aprs_info_label = QtWidgets.QLabel("")
+        self.aprs_info_label.setWordWrap(True)
+        self.aprs_info_label.setTextFormat(QtCore.Qt.PlainText)
+        aprs_layout.addWidget(self.aprs_info_label)
+        self.aprs_sent_log = QtWidgets.QTextEdit()
+        self.aprs_sent_log.setReadOnly(True)
+        self.aprs_sent_log.setMaximumHeight(90)
+        aprs_layout.addWidget(self.aprs_sent_log)
+        digimodes_tab_layout.addWidget(aprs_group)
+        self.aprs_group_widget = aprs_group
+        self._aprs_message_number = 0
+        self._aprs_ptt_epoch = 0
+        for signal_ in (self.aprs_call_edit.textChanged, self.aprs_kind_combo.currentIndexChanged, self.aprs_path_combo.currentIndexChanged,
+                        self.aprs_locator_edit.textChanged, self.aprs_symbol_edit.textChanged, self.aprs_comment_edit.textChanged,
+                        self.aprs_to_edit.textChanged, self.aprs_text_edit.textChanged):
+            signal_.connect(self._on_aprs_changed)
         self.pocsag_kind_combo.currentIndexChanged.connect(self._on_pocsag_kind_changed)
         for signal_ in (self.pocsag_function_combo.currentIndexChanged, self.pocsag_baud_combo.currentIndexChanged,
                         self.pocsag_ric_spin.valueChanged, self.pocsag_text_edit.textChanged,
@@ -1359,6 +1435,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
+        self._update_aprs_controls()
         self._update_pocsag_info()
         self._on_ft8_fields_changed()
         self._update_ft8_controls_enabled()
@@ -1620,7 +1697,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31,
                                     PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
                                     PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_FT8,
-                                    PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_JS8):
+                                    PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS):
             self.mode_tab_widget.setCurrentIndex(1)
         # Connected AFTER the initial sync above (and after every widget it
         # touches exists) -- bidirectional counterpart to _on_mode_changed()/
@@ -1706,6 +1783,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_meshtastic_controls_enabled()
         self._pocsag_connected = enabled
         self._update_pocsag_controls_enabled()
+        self._update_aprs_controls()
         self._ft8_connected = enabled
         self._update_ft8_controls_enabled()
         self._update_js8_controls_enabled()
@@ -1965,6 +2043,76 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finish_one_shot()
         QtCore.QTimer.singleShot(300, self._update_meshcore_info)
 
+    def _update_aprs_controls(self):
+        self.aprs_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_APRS)
+        beacon = self.aprs_kind_combo.currentData() == "beacon"
+        self.aprs_beacon_widget.setVisible(beacon)
+        self.aprs_message_widget.setVisible(not beacon)
+        self._update_aprs_info()
+
+    def _aprs_settings(self):
+        center = aprs_codec.locator_center(self.aprs_locator_edit.text())
+        return dict(kind=self.aprs_kind_combo.currentData(), callsign=self.aprs_call_edit.text().strip().upper(),
+                    path=self.aprs_path_combo.currentData(), lat=center[0] if center else None, lon=center[1] if center else None,
+                    symbol=self.aprs_symbol_edit.text(), comment=self.aprs_comment_edit.text(),
+                    to=self.aprs_to_edit.text().strip().upper(), text=self.aprs_text_edit.text(),
+                    message_id=str(self._aprs_message_number + 1))
+
+    def _apply_aprs(self, tb):
+        tb.set_aprs(**self._aprs_settings())
+
+    def _on_aprs_changed(self, *_):
+        if self.tb is not None:
+            self._apply_aprs(self.tb)
+        self._update_aprs_controls()
+
+    def _update_aprs_info(self):
+        """Exactly what the next press would send, and to whom, before it is pressed."""
+        if self.tb is None:
+            self.aprs_info_label.setText("")
+            return
+        try:
+            frame = aprs_codec.parse_frame(self.tb._aprs_build_frame())
+            path = ",".join(frame["path"]) or "no digipeaters"
+            self.aprs_info_label.setText(f"{frame['source']} via {path}: {frame['info'].decode('ascii')}")
+        except ValueError as e:
+            self.aprs_info_label.setText(f"Not ready: {e}")
+
+    def _aprs_ptt_allowed(self):
+        """Pre-flight for an APRS PTT press (True outside APRS mode): refuses BEFORE any RF action."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_APRS:
+            return True
+        self._apply_aprs(self.tb)
+        problem = self.tb.aprs_problem()
+        if problem:
+            self.status_label.setText(f"Not sent: {problem}")
+        return problem is None
+
+    def _log_aprs_sent(self):
+        if self._current_mode != PlutoTxFlowgraph.MODE_APRS or self.tb is None or self.tb.aprs_frame is None:
+            return
+        frame = aprs_codec.parse_frame(self.tb.aprs_frame)
+        self.aprs_sent_log.append(f"[{time.strftime('%H:%M:%S')}] {frame['info'].decode('ascii')}")
+        if self.aprs_kind_combo.currentData() == "message":
+            self._aprs_message_number += 1
+            self._on_aprs_changed()
+
+    def _schedule_aprs_auto_unkey(self):
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_APRS:
+            return
+        token = self.tb
+        self._aprs_ptt_epoch += 1
+        epoch = self._aprs_ptt_epoch
+        hold_s = self.tb.aprs_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._finish_aprs_auto_unkey(token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.POCSAG_AUTO_UNKEY_WATCHDOG_S) * 1000),
+                                 lambda: self._finish_aprs_auto_unkey(token, epoch))
+
+    def _finish_aprs_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._aprs_ptt_epoch or not self.tb.keyed:
+            return
+        self._finish_one_shot()
+
     def _update_pocsag_controls_enabled(self):
         self.pocsag_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_POCSAG)
         connected = getattr(self, "_pocsag_connected", True)
@@ -2003,6 +2151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pocsag_function_combo.setCurrentIndex(0 if kind == "numeric" else 3 if kind == "alpha" else 0)
         self.pocsag_function_combo.blockSignals(False)
         self._update_pocsag_controls_enabled()
+        self._update_aprs_controls()
         self._on_pocsag_changed()
 
     def _on_pocsag_changed(self, *_):
@@ -2692,7 +2841,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _AUDIO_ONLY_CAPABLE_MODES = (
         PlutoTxFlowgraph.MODE_FM, PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
         PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
-        PlutoTxFlowgraph.MODE_FT8, PlutoTxFlowgraph.MODE_JS8,
+        PlutoTxFlowgraph.MODE_FT8, PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS,
     )
     _LORA_MODES = (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE)
 
@@ -2888,6 +3037,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_psk31_controls_enabled()
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
+        self._update_aprs_controls()
         self._update_ft8_controls_enabled()
         self._update_js8_controls_enabled()
         self._update_baseband_controls_enabled()
@@ -3280,7 +3430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._release_ptt()
 
     def _all_ptt_allowed(self):
-        return (self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._meshcore_ptt_allowed()
+        return (self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._aprs_ptt_allowed() and self._meshcore_ptt_allowed()
                 and self._ft8_ptt_allowed() and self._js8_ptt_allowed())
 
     def _key_and_schedule(self):
@@ -3302,7 +3452,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._schedule_meshtastic_auto_unkey()
         self._log_meshtastic_sent()
         self._schedule_pocsag_auto_unkey()
+        self._schedule_aprs_auto_unkey()
         self._log_pocsag_sent()
+        self._log_aprs_sent()
         self._schedule_meshcore_auto_unkey()
         self._log_meshcore_sent()
 
@@ -3763,6 +3915,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pocsag_text=self.pocsag_text_edit.text(),
                 pocsag_baud=self.pocsag_baud_combo.currentData(),
                 pocsag_charset="de" if self.pocsag_charset_checkbox.isChecked() else "ascii",
+                **{f"aprs_{name}": value for name, value in self._aprs_settings().items()},
                 ft8_text=self.ft8_message_edit.text(),
                 ft8_tone_hz=float(self.ft8_offset_spin.value()),
                 meshcore_preset_index=max(0, self.meshcore_preset_combo.currentData() or 0),

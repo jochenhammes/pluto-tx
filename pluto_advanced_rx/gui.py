@@ -39,6 +39,7 @@ from .pocsag_state import PocsagState
 from pluto_tx import adsl_codec
 from .adsl_state import AdslState, summarize as adsl_summarize
 from .adsb_state import AdsbState
+from .aprs_state import AprsState
 from .ft8_rx import Ft8State
 from .js8_rx import Js8State
 from pluto_tx import js8_phy
@@ -118,6 +119,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshcore_rendered_version = -1
         self._meshcore_last_frames = 0
         self._meshcore_last_activity_time = 0.0
+        # APRS stations and messages (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._aprs_state = AprsState()
+        self._aprs_rendered_version = -1
+        self._aprs_rendered_time = 0.0
         # ADS-B aircraft (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
         self._adsb_state = AdsbState()
         self._adsb_rendered_version = -1
@@ -314,6 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item.setEnabled(False)
             ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
         self.digimode_combo.addItem("JS8 (JS8Call)", "js8")
+        self.digimode_combo.addItem("APRS (144.8 MHz)", "aprs")
         self.digimode_combo.addItem("ADS-L (Aircraft, 868 MHz)", "adsl")
         self.digimode_combo.addItem("ADS-B (Aircraft, 1090 MHz)", "adsb")
         self.digimode_combo.addItem("Meshtastic (LoRa)", "meshtastic")
@@ -641,6 +647,44 @@ class MainWindow(QtWidgets.QMainWindow):
         digimodes_tab_layout.addWidget(pocsag_group, 1)
         self.pocsag_group_widget = pocsag_group
         self._update_pocsag_signal_label()
+
+        # --- APRS RX: stations, the packet log and text messages. Only what came in over the air, no APRS-IS.
+        aprs_group = QtWidgets.QWidget()
+        aprs_layout = QtWidgets.QVBoxLayout(aprs_group)
+        aprs_layout.setContentsMargins(0, 0, 0, 0)
+        aprs_row = QtWidgets.QHBoxLayout()
+        self.aprs_signal_label = QtWidgets.QLabel("")
+        self.aprs_signal_label.setWordWrap(True)
+        aprs_row.addWidget(self.aprs_signal_label, 1)
+        self.aprs_clear_button = QtWidgets.QPushButton("Clear")
+        self.aprs_clear_button.clicked.connect(self._on_aprs_clear_clicked)
+        aprs_row.addWidget(self.aprs_clear_button)
+        aprs_layout.addLayout(aprs_row)
+        self.aprs_station_table = QtWidgets.QTableWidget(0, len(self.APRS_STATION_COLUMNS))
+        self.aprs_station_table.setHorizontalHeaderLabels(self.APRS_STATION_COLUMNS)
+        self.aprs_station_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.aprs_station_table.verticalHeader().setVisible(False)
+        self.aprs_station_table.setMinimumHeight(120)
+        aprs_layout.addWidget(self.aprs_station_table, 2)
+        aprs_layout.addWidget(QtWidgets.QLabel("Messages:"))
+        self.aprs_message_table = QtWidgets.QTableWidget(0, 5)
+        self.aprs_message_table.setHorizontalHeaderLabels(["Time", "From", "To", "Text", "No."])
+        self.aprs_message_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.aprs_message_table.verticalHeader().setVisible(False)
+        self.aprs_message_table.horizontalHeader().setStretchLastSection(True)
+        self.aprs_message_table.setMinimumHeight(70)
+        aprs_layout.addWidget(self.aprs_message_table, 1)
+        aprs_layout.addWidget(QtWidgets.QLabel("Packets:"))
+        self.aprs_packet_table = QtWidgets.QTableWidget(0, 5)
+        self.aprs_packet_table.setHorizontalHeaderLabels(["Time", "From", "Via", "Type", "Content"])
+        self.aprs_packet_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.aprs_packet_table.verticalHeader().setVisible(False)
+        self.aprs_packet_table.horizontalHeader().setStretchLastSection(True)
+        self.aprs_packet_table.setMinimumHeight(90)
+        aprs_layout.addWidget(self.aprs_packet_table, 1)
+        digimodes_tab_layout.addWidget(aprs_group, 1)
+        self.aprs_group_widget = aprs_group
+        self._update_aprs_signal_label()
 
         # --- ADS-B RX: aircraft positions on 1090 MHz. Far too many messages for a log, so only the aircraft list.
         adsb_group = QtWidgets.QWidget()
@@ -1363,6 +1407,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pocsag_group_widget.setVisible(selected == "pocsag")
         self.adsl_group_widget.setVisible(selected == "adsl")
         self.adsb_group_widget.setVisible(selected == "adsb")
+        self.aprs_group_widget.setVisible(selected == "aprs")
         self.ft8_group_widget.setVisible(selected == "ft8")
         self.js8_group_widget.setVisible(selected == "js8")
 
@@ -1660,6 +1705,7 @@ class MainWindow(QtWidgets.QMainWindow):
             on_pocsag_message=self._pocsag_state.on_message,
             on_adsl_packet=self._adsl_state.on_packet,
             on_adsb_message=self._adsb_state.on_message,
+            on_aprs_frame=self._aprs_state.on_frame,
             on_ft8_decodes=self._ft8_state.on_decodes,
             ft8_my_call=self._ft8_tx_setting("my_call"), ft8_my_grid=self._ft8_tx_setting("locator"),
             on_js8_decodes=self._js8_state.on_decodes, js8_submodes=self.js8_speed_combo.currentData(),
@@ -2019,6 +2065,64 @@ class MainWindow(QtWidgets.QMainWindow):
             self._meshcore_state.set_identity(None)
             self.meshcore_own_key_label.setText("")
             self.meshcore_own_key_label.setToolTip("")
+
+    APRS_STATION_COLUMNS = ["Call", "Symbol", "Latitude", "Longitude", "Alt ft", "kt", "Course", "Comment", "Via", "Packets", "Age min"]
+
+    def _on_aprs_clear_clicked(self):
+        self._aprs_state.clear()
+        self._render_aprs_tables()
+
+    def _update_aprs_signal_label(self):
+        if self.tb is None:
+            self.aprs_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "aprs":
+            self.aprs_signal_label.setText("Not listening.")
+            return
+        detector = self.tb.aprs_deframer.detector
+        _rows, stations = self._aprs_state.counts()
+        freq = (self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6
+        self.aprs_signal_label.setText(f"Listening on {freq:.3f} MHz -- {detector.frames_ok} packet(s) since connecting, "
+                                       f"{stations} station(s) in the list.")
+
+    def _render_aprs_tables(self):
+        self._aprs_rendered_version = self._aprs_state.version
+        self._aprs_rendered_time = time.time()
+        now = time.time()
+
+        def shown(value, fmt="{:.0f}"):
+            return "" if value is None else fmt.format(value)
+
+        def clock(t):
+            return time.strftime("%H:%M:%S", time.localtime(t))
+        stations = sorted(self._aprs_state.get_stations(), key=lambda s: s["label"])
+        table = self.aprs_station_table
+        table.setRowCount(len(stations))
+        for r, s in enumerate(stations):
+            cells = [s["label"], s.get("symbol", ""), shown(s["lat"], "{:.4f}"), shown(s["lon"], "{:.4f}"), shown(s.get("alt_ft")),
+                     shown(s.get("speed_kt")), shown(s.get("course_deg")), s.get("comment", ""), s.get("heard_via") or "",
+                     str(s["packets"]), f"{(now - s['time']) / 60:.0f}"]
+            for c, text in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+        table.resizeColumnsToContents()
+        messages = self._aprs_state.get_messages()
+        table = self.aprs_message_table
+        table.setRowCount(len(messages))
+        for r, m in enumerate(messages):
+            text = m.get("message", "") if m["kind"] in ("message", "bulletin") else m["kind"]
+            cells = [clock(m["time"]), m["source"], m.get("addressee", ""), text, m.get("message_id") or ""]
+            for c, value in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(value))
+        rows = self._aprs_state.get_rows()
+        table = self.aprs_packet_table
+        at_bottom = table.verticalScrollBar().value() >= table.verticalScrollBar().maximum() - 4
+        table.setRowCount(len(rows))
+        for r, p in enumerate(rows):
+            cells = [clock(p["time"]), p["source"], ",".join(p["path"]), p["kind"], p.get("comment") or p.get("text", "")]
+            for c, value in enumerate(cells):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(value))
+        if at_bottom:
+            table.scrollToBottom()
 
     ADSB_COLUMNS = ["ICAO", "Callsign", "Latitude", "Longitude", "Alt ft", "kt", "ft/min", "Track", "Status", "Messages", "Age s"]
 
@@ -2565,6 +2669,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._meshcore_state.version != self._meshcore_rendered_version:
             self._render_meshcore_table()
         self._update_pocsag_signal_label()
+        self._update_aprs_signal_label()
+        if self._aprs_state.version != self._aprs_rendered_version or (
+                self.digimode_combo.currentData() == "aprs" and time.time() - self._aprs_rendered_time >= 30.0):
+            self._render_aprs_tables()
         self._update_adsb_signal_label()
         if self.digimode_combo.currentData() == "adsb" and time.time() - self._adsb_rendered_time >= 1.0:
             self._render_adsb_table()  # at most once per second: hundreds of messages a second arrive here
@@ -3328,12 +3436,12 @@ class MainWindow(QtWidgets.QMainWindow):
         freq = self.tb.nominal_freq_hz
         # Meshtastic presets retune the receiver to the preset's carrier, ADS-L to
         # its fixed LO; the previous frequency comes back when leaving the mode again.
-        fixed_freq_digimodes = ("meshtastic", "meshcore", "adsl", "adsb")
+        fixed_freq_digimodes = ("meshtastic", "meshcore", "adsl", "adsb", "aprs")
         if new_digimode in fixed_freq_digimodes:
             if self.tb.active_digimode not in fixed_freq_digimodes:
                 self._freq_before_lora = freq
-            if config.fixed_tune_frequency(new_digimode) is not None:
-                freq = config.fixed_tune_frequency(new_digimode)
+            if config.mode_default_frequency(new_digimode) is not None:
+                freq = config.mode_default_frequency(new_digimode)
             else:
                 freq = (self._meshtastic_preset() if new_digimode == "meshtastic" else self._meshcore_preset()).frequency_hz
         elif self.tb.active_digimode in fixed_freq_digimodes and self._freq_before_lora is not None:
@@ -3568,7 +3676,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # from whatever device was previously selected, so don't trust it
         # for a device with no frequency concept at all.
         frequency_hz = 0.0 if device_cls.frequency_range_hz == (0.0, 0.0) else self.freq_spin.value() * 1e6
-        fixed_hz = config.fixed_tune_frequency(self._active_digimode)
+        fixed_hz = config.mode_default_frequency(self._active_digimode)
         if fixed_hz is not None:  # connecting with such a mode already selected: same tuning as entering it
             self._apply_fixed_tune_gain(self._active_digimode)
             self._apply_fixed_tune_view(self._active_digimode)
