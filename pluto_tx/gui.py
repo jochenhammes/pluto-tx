@@ -19,6 +19,7 @@ from . import digitext
 from . import filebroadcast
 from . import pocsag
 from . import aprs_codec
+from . import jtty_codec
 from . import pocsag_codec
 from . import ft8
 from . import js8, js8_message, js8_phy
@@ -96,7 +97,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                   PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY,
                                   PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE,
                                   PlutoTxFlowgraph.MODE_POCSAG, PlutoTxFlowgraph.MODE_FT8,
-                                  PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS)
+                                  PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS, PlutoTxFlowgraph.MODE_JTTY)
             else PlutoTxFlowgraph.MODE_FM
         )
         # Bumped on every Digitext PTT press -- see _schedule_digitext_auto_unkey()
@@ -638,6 +639,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item.setEnabled(False)
             ft8_item.setToolTip("ft8_lib is not built -- run install-ft8.sh")
         self.digimode_combo.addItem("JS8 (JS8Call)", PlutoTxFlowgraph.MODE_JS8)
+        self.digimode_combo.addItem("JTTY (WSJT-X)", PlutoTxFlowgraph.MODE_JTTY)
+        if not jtty_codec.available():
+            jtty_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_JTTY))
+            jtty_item.setEnabled(False)
+            jtty_item.setToolTip("wsjt-codec is not installed -- run install-jtty.sh")
         self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
         self.digimode_combo.addItem("MeshCore (LoRa)", PlutoTxFlowgraph.MODE_MESHCORE)
         if not MESHCORE_AVAILABLE:
@@ -1033,6 +1039,37 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.aprs_locator_edit.textChanged, self.aprs_symbol_edit.textChanged, self.aprs_comment_edit.textChanged,
                         self.aprs_to_edit.textChanged, self.aprs_text_edit.textChanged):
             signal_.connect(self._on_aprs_changed)
+        # --- JTTY: one whole message per PTT press; the receiver's text grows as the frames arrive.
+        jtty_group = QtWidgets.QWidget()
+        jtty_layout = QtWidgets.QVBoxLayout(jtty_group)
+        jtty_layout.setContentsMargins(0, 0, 0, 0)
+        jtty_row = QtWidgets.QHBoxLayout()
+        jtty_row.addWidget(QtWidgets.QLabel("Text:"))
+        self.jtty_text_edit = QtWidgets.QLineEdit()
+        self.jtty_text_edit.setMaxLength(config.JTTY_MAX_TEXT_LEN)
+        self.jtty_text_edit.setPlaceholderText("CQ DA2JH CQ")
+        jtty_row.addWidget(self.jtty_text_edit, 1)
+        jtty_row.addWidget(QtWidgets.QLabel("Audio:"))
+        self.jtty_tone_spin = QtWidgets.QSpinBox()
+        self.jtty_tone_spin.setRange(int(config.JTTY_TONE_RANGE_HZ[0]), int(config.JTTY_TONE_RANGE_HZ[1]))
+        self.jtty_tone_spin.setValue(int(config.JTTY_DEFAULT_TONE_HZ))
+        self.jtty_tone_spin.setSuffix(" Hz")
+        self.jtty_tone_spin.setToolTip("The lowest tone; a sound card sends this as audio into the radio, which must be on USB.")
+        jtty_row.addWidget(self.jtty_tone_spin)
+        jtty_layout.addLayout(jtty_row)
+        self.jtty_info_label = QtWidgets.QLabel("")
+        self.jtty_info_label.setWordWrap(True)
+        self.jtty_info_label.setTextFormat(QtCore.Qt.PlainText)
+        jtty_layout.addWidget(self.jtty_info_label)
+        self.jtty_sent_log = QtWidgets.QTextEdit()
+        self.jtty_sent_log.setReadOnly(True)
+        self.jtty_sent_log.setMaximumHeight(90)
+        jtty_layout.addWidget(self.jtty_sent_log)
+        digimodes_tab_layout.addWidget(jtty_group)
+        self.jtty_group_widget = jtty_group
+        self._jtty_ptt_epoch = 0
+        self.jtty_text_edit.textChanged.connect(self._on_jtty_changed)
+        self.jtty_tone_spin.valueChanged.connect(self._on_jtty_changed)
         self.pocsag_kind_combo.currentIndexChanged.connect(self._on_pocsag_kind_changed)
         for signal_ in (self.pocsag_function_combo.currentIndexChanged, self.pocsag_baud_combo.currentIndexChanged,
                         self.pocsag_ric_spin.valueChanged, self.pocsag_text_edit.textChanged,
@@ -1436,6 +1473,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
         self._update_aprs_controls()
+        self._update_jtty_controls()
         self._update_pocsag_info()
         self._on_ft8_fields_changed()
         self._update_ft8_controls_enabled()
@@ -1697,7 +1735,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self._current_mode in (PlutoTxFlowgraph.MODE_DIGITEXT, PlutoTxFlowgraph.MODE_PSK31,
                                     PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
                                     PlutoTxFlowgraph.MODE_MESHCORE, PlutoTxFlowgraph.MODE_FT8,
-                                    PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS):
+                                    PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS,
+                                    PlutoTxFlowgraph.MODE_JTTY):
             self.mode_tab_widget.setCurrentIndex(1)
         # Connected AFTER the initial sync above (and after every widget it
         # touches exists) -- bidirectional counterpart to _on_mode_changed()/
@@ -1784,6 +1823,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pocsag_connected = enabled
         self._update_pocsag_controls_enabled()
         self._update_aprs_controls()
+        self._update_jtty_controls()
         self._ft8_connected = enabled
         self._update_ft8_controls_enabled()
         self._update_js8_controls_enabled()
@@ -2112,6 +2152,59 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _finish_aprs_auto_unkey(self, token, epoch):
         if self.tb is not token or epoch != self._aprs_ptt_epoch or not self.tb.keyed:
+            return
+        self._finish_one_shot()
+
+    def _update_jtty_controls(self):
+        self.jtty_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_JTTY)
+        self._update_jtty_info()
+
+    def _on_jtty_changed(self, *_):
+        if self.tb is not None:
+            self.tb.set_jtty(self.jtty_text_edit.text(), self.jtty_tone_spin.value())
+        self._update_jtty_controls()
+
+    def _update_jtty_info(self):
+        """Exactly what the next press would send, before it is pressed."""
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_JTTY:
+            self.jtty_info_label.setText("")
+            return
+        problem = self.tb.jtty_problem()
+        if problem:
+            self.jtty_info_label.setText(f"Not ready: {problem}")
+            return
+        r = self.tb.jtty_rendered
+        replaced = "  -- characters JTTY lacks are sent as #" if r.substituted else ""
+        self.jtty_info_label.setText(f"{r.text}  ({len(r.frames)} frame(s), {r.duration_s:.1f} s){replaced}")
+
+    def _jtty_ptt_allowed(self):
+        """Pre-flight for a JTTY PTT press (True outside JTTY mode): refuses BEFORE any RF action."""
+        if self._current_mode != PlutoTxFlowgraph.MODE_JTTY:
+            return True
+        self.tb.set_jtty(self.jtty_text_edit.text(), self.jtty_tone_spin.value())
+        problem = self.tb.jtty_problem()
+        if problem:
+            self.status_label.setText(f"Not sent: {problem}")
+        return problem is None
+
+    def _log_jtty_sent(self):
+        if self._current_mode != PlutoTxFlowgraph.MODE_JTTY or self.tb is None or self.tb.jtty_rendered is None:
+            return
+        self.jtty_sent_log.append(f"[{time.strftime('%H:%M:%S')}] {self.tb.jtty_rendered.text}")
+
+    def _schedule_jtty_auto_unkey(self):
+        if self.tb is None or self._current_mode != PlutoTxFlowgraph.MODE_JTTY:
+            return
+        token = self.tb
+        self._jtty_ptt_epoch += 1
+        epoch = self._jtty_ptt_epoch
+        hold_s = self.tb.jtty_hold_s
+        QtCore.QTimer.singleShot(int(hold_s * 1000), lambda: self._finish_jtty_auto_unkey(token, epoch))
+        QtCore.QTimer.singleShot(int((hold_s + config.POCSAG_AUTO_UNKEY_WATCHDOG_S) * 1000),
+                                 lambda: self._finish_jtty_auto_unkey(token, epoch))
+
+    def _finish_jtty_auto_unkey(self, token, epoch):
+        if self.tb is not token or epoch != self._jtty_ptt_epoch or not self.tb.keyed:
             return
         self._finish_one_shot()
 
@@ -3432,7 +3525,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._release_ptt()
 
     def _all_ptt_allowed(self):
-        return (self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._aprs_ptt_allowed() and self._meshcore_ptt_allowed()
+        return (self._meshtastic_ptt_allowed() and self._pocsag_ptt_allowed() and self._aprs_ptt_allowed() and self._jtty_ptt_allowed() and self._meshcore_ptt_allowed()
                 and self._ft8_ptt_allowed() and self._js8_ptt_allowed())
 
     def _key_and_schedule(self):
@@ -3455,8 +3548,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_meshtastic_sent()
         self._schedule_pocsag_auto_unkey()
         self._schedule_aprs_auto_unkey()
+        self._schedule_jtty_auto_unkey()
         self._log_pocsag_sent()
         self._log_aprs_sent()
+        self._log_jtty_sent()
         self._schedule_meshcore_auto_unkey()
         self._log_meshcore_sent()
 

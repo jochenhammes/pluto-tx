@@ -26,6 +26,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pluto_tx import audio_devices
 from pluto_tx import freq_correction
+from pluto_tx import jtty_codec
 
 from . import config
 from . import devices
@@ -40,6 +41,7 @@ from pluto_tx import adsl_codec
 from .adsl_state import AdslState, summarize as adsl_summarize
 from .adsb_state import AdsbState
 from .aprs_state import AprsState
+from .jtty_state import JttyState
 from .ft8_rx import Ft8State
 from .js8_rx import Js8State
 from pluto_tx import js8_phy
@@ -120,6 +122,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._meshcore_last_frames = 0
         self._meshcore_last_activity_time = 0.0
         # APRS stations and messages (in memory only) -- same "constructed ONCE, survives rebuilds" reasoning.
+        self._jtty_state = JttyState()
+        self._jtty_rendered_version = -1
         self._aprs_state = AprsState()
         self._aprs_rendered_version = -1
         self._aprs_rendered_time = 0.0
@@ -319,6 +323,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ft8_item.setEnabled(False)
             ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
         self.digimode_combo.addItem("JS8 (JS8Call)", "js8")
+        self.digimode_combo.addItem("JTTY (WSJT-X)", "jtty")
+        if not jtty_codec.available():
+            jtty_item = self.digimode_combo.model().item(self.digimode_combo.findData("jtty"))
+            jtty_item.setEnabled(False)
+            jtty_item.setToolTip("wsjt-codec is not installed -- run install-jtty.sh")
         self.digimode_combo.addItem("APRS (144.8 MHz)", "aprs")
         self.digimode_combo.addItem("ADS-L (Aircraft, 868 MHz)", "adsl")
         self.digimode_combo.addItem("ADS-B (Aircraft, 1090 MHz)", "adsb")
@@ -846,6 +855,43 @@ class MainWindow(QtWidgets.QMainWindow):
         js8_layout.addWidget(self.js8_tabs)
         digimodes_tab_layout.addWidget(js8_group, 1)
         self.js8_group_widget = js8_group
+
+        # --- JTTY: a row per message, its text growing as the frames arrive. Unfinished ones are marked, gaps show as "...".
+        jtty_group = QtWidgets.QWidget()
+        jtty_layout = QtWidgets.QVBoxLayout(jtty_group)
+        jtty_layout.setContentsMargins(0, 0, 0, 0)
+        jtty_row = QtWidgets.QHBoxLayout()
+        jtty_row.addWidget(QtWidgets.QLabel("Audio:"))
+        self.jtty_freq_spin = QtWidgets.QSpinBox()
+        self.jtty_freq_spin.setRange(*config.JTTY_SEARCH_BAND_HZ)
+        self.jtty_freq_spin.setValue(config.JTTY_RX_FREQ_HZ)
+        self.jtty_freq_spin.setSuffix(" Hz")
+        self.jtty_freq_spin.setToolTip("Where the decoder looks, besides two fixed channels at 1200-1800 Hz; it does not search the whole band.")
+        jtty_row.addWidget(self.jtty_freq_spin)
+        jtty_row.addWidget(QtWidgets.QLabel("+/-"))
+        self.jtty_tolerance_spin = QtWidgets.QSpinBox()
+        self.jtty_tolerance_spin.setRange(10, 500)
+        self.jtty_tolerance_spin.setValue(config.JTTY_RX_TOLERANCE_HZ)
+        self.jtty_tolerance_spin.setSuffix(" Hz")
+        jtty_row.addWidget(self.jtty_tolerance_spin)
+        jtty_row.addStretch(1)
+        self.jtty_clear_button = QtWidgets.QPushButton("Clear")
+        self.jtty_clear_button.clicked.connect(self._on_jtty_clear_clicked)
+        jtty_row.addWidget(self.jtty_clear_button)
+        jtty_layout.addLayout(jtty_row)
+        self.jtty_signal_label = QtWidgets.QLabel("")
+        self.jtty_signal_label.setWordWrap(True)
+        jtty_layout.addWidget(self.jtty_signal_label)
+        self.jtty_table = QtWidgets.QTableWidget(0, 5)
+        self.jtty_table.setHorizontalHeaderLabels(["UTC", "Hz", "dB", "State", "Text"])
+        self.jtty_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.jtty_table.verticalHeader().setVisible(False)
+        self.jtty_table.horizontalHeader().setStretchLastSection(True)
+        jtty_layout.addWidget(self.jtty_table, 1)
+        digimodes_tab_layout.addWidget(jtty_group, 1)
+        self.jtty_group_widget = jtty_group
+        self.jtty_freq_spin.valueChanged.connect(self._on_jtty_search_changed)
+        self.jtty_tolerance_spin.valueChanged.connect(self._on_jtty_search_changed)
         self._js8_row_calls = {}
         self._ft8_clock_ok = _ntp_synchronized()
         self._update_ft8_signal_label()
@@ -1408,6 +1454,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.adsl_group_widget.setVisible(selected == "adsl")
         self.adsb_group_widget.setVisible(selected == "adsb")
         self.aprs_group_widget.setVisible(selected == "aprs")
+        self.jtty_group_widget.setVisible(selected == "jtty")
         self.ft8_group_widget.setVisible(selected == "ft8")
         self.js8_group_widget.setVisible(selected == "js8")
 
@@ -1706,6 +1753,8 @@ class MainWindow(QtWidgets.QMainWindow):
             on_adsl_packet=self._adsl_state.on_packet,
             on_adsb_message=self._adsb_state.on_message,
             on_aprs_frame=self._aprs_state.on_frame,
+            on_jtty_update=self._on_jtty_update_for(active_digimode),
+            jtty_rxfreq_hz=self.jtty_freq_spin.value(), jtty_tolerance_hz=self.jtty_tolerance_spin.value(),
             on_ft8_decodes=self._ft8_state.on_decodes,
             ft8_my_call=self._ft8_tx_setting("my_call"), ft8_my_grid=self._ft8_tx_setting("locator"),
             on_js8_decodes=self._js8_state.on_decodes, js8_submodes=self.js8_speed_combo.currentData(),
@@ -2067,6 +2116,45 @@ class MainWindow(QtWidgets.QMainWindow):
             self.meshcore_own_key_label.setToolTip("")
 
     APRS_STATION_COLUMNS = ["Call", "Symbol", "Latitude", "Longitude", "Alt ft", "kt", "Course", "Comment", "Via", "Packets", "Age min"]
+
+    def _on_jtty_update_for(self, active_digimode):
+        if active_digimode == "jtty":
+            self._jtty_state.new_generation()  # the new codec process counts its message ids from 1 again
+        return self._jtty_state.on_update
+
+    def _on_jtty_clear_clicked(self):
+        self._jtty_state.clear()
+
+    def _on_jtty_search_changed(self, *_):
+        if self.tb is not None and self.tb.jtty_receiver is not None:
+            self.tb.jtty_receiver.set_search(self.jtty_freq_spin.value(), self.jtty_tolerance_spin.value())
+
+    def _update_jtty_signal_label(self):
+        if self.tb is None:
+            self.jtty_signal_label.setText("Not connected.")
+            return
+        if self.tb.active_digimode != "jtty" or self.tb.jtty_receiver is None:
+            self.jtty_signal_label.setText("Not listening.")
+            return
+        recv = self.tb.jtty_receiver
+        if recv.last_error:
+            self.jtty_signal_label.setText(f"Decoder: {recv.last_error}")
+            return
+        where = f"{(self.tb.nominal_freq_hz + self.tb.fine_offset_hz) / 1e6:.6f} MHz USB"
+        dropped = f" {recv.dropped_samples / 12000:.0f} s of audio lost, the decoder was too slow." if recv.dropped_samples else ""
+        self.jtty_signal_label.setText(f"Listening on {where}. The decoder is WSJT-X's own; JTTY there is still in testing.{dropped}")
+
+    def _render_jtty_table(self):
+        self._jtty_rendered_version = self._jtty_state.version
+        rows = self._jtty_state.get_rows()
+        table = self.jtty_table
+        table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            freq = row.get("freq")
+            state = "sent" if row["direction"] == "tx" else {"growing": "...", "complete": "", "expired": "cut off", "ended": "cut off"}.get(row["state"], "")
+            for col, value in enumerate((row["utc"], "" if freq is None else f"{freq:.0f}", "" if row.get("snr") is None else str(row["snr"]), state, row["text"])):
+                table.setItem(i, col, QtWidgets.QTableWidgetItem(value))
+        table.scrollToBottom()
 
     def _on_aprs_clear_clicked(self):
         self._aprs_state.clear()
@@ -2669,6 +2757,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._meshcore_state.version != self._meshcore_rendered_version:
             self._render_meshcore_table()
         self._update_pocsag_signal_label()
+        self._update_jtty_signal_label()
+        if self._jtty_state.version != self._jtty_rendered_version:
+            self._render_jtty_table()
         self._update_aprs_signal_label()
         if self._aprs_state.version != self._aprs_rendered_version or (
                 self.digimode_combo.currentData() == "aprs" and time.time() - self._aprs_rendered_time >= 30.0):
