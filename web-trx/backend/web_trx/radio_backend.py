@@ -971,6 +971,8 @@ class GnuRadioBackend(SessionBackend):
             reason = "Sender steht nicht auf der Empfangsfrequenz"
         elif self.keyed:
             reason = "Sender ist belegt"
+        elif self.tx.tb.aprs_wait_s() > 0:  # a person may send early, an answer anyone can trigger from outside may not
+            reason = f"letzte Sendung liegt keine {tx_config.APRS_MIN_INTERVAL_S:.0f} s zurück"
         if reason is None:
             self._aprs_ack = key
             try:
@@ -1228,7 +1230,8 @@ class GnuRadioBackend(SessionBackend):
             if tb.aprs_kind == "message":
                 self._aprs_message_number += 1
             await self._emit_event("aprs_sent", {**aprs_codec.summarize(aprs_codec.parse_frame(tb.aprs_frame)),
-                                                 "duration_s": round(tb.aprs_duration_s, 3), "automatic": self._aprs_ack is not None})
+                                                 "duration_s": round(tb.aprs_duration_s, 3), "automatic": self._aprs_ack is not None,
+                                                 "early_s": round(tb.aprs_sent_early_s)})
             self._unkey_task = asyncio.create_task(self._auto_unkey_after(tb.aprs_hold_s))
         elif mode == "pocsag":
             await self._emit_event("pocsag_message", {

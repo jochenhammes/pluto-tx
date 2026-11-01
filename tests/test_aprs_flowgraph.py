@@ -282,14 +282,17 @@ class RefusalTests(unittest.TestCase):
             fg.key_ptt()
         self.assertFalse(fg.keyed)
 
-    def test_rate_limit_survives_a_rebuild(self):
+    def test_sending_early_warns_but_is_not_refused_and_survives_a_rebuild(self):
         from pluto_tx import flowgraph as txf
         fg = self.tb(aprs_callsign="DA2JH", aprs_lat=53.5, aprs_lon=9.0)
         fg._ensure_aprs_audio()
         fg.aprs_source = fg._install_armed_source(fg.aprs_source, fg.aprs_resampler, fg.aprs_audio_gain, fg._aprs_audio)
         fg._aprs_start_source()
         again = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_APRS, frequency=144.8e6, aprs_callsign="DA2JH", aprs_lat=53.5, aprs_lon=9.0)
-        self.assertIn("wait", again.aprs_problem())
+        self.assertIsNone(again.aprs_problem())
+        self.assertGreater(again.aprs_wait_s(), 25)
+        again._ensure_aprs_audio()
+        self.assertGreater(again.aprs_sent_early_s, 25)
         txf.PlutoTxFlowgraph._aprs_last_sent = -1e9
 
     def test_esp32_cannot_send_it(self):

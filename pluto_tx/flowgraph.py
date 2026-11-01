@@ -144,7 +144,7 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_JS8 = 15
     MODE_APRS = 16
     # The names the CLI and TxDevice.supported_modes use for the modes.
-    _aprs_last_sent = -1e9  # per process, across rebuilt flowgraphs: a rebuild must not reopen the rate limit
+    _aprs_last_sent = -1e9  # per process, across rebuilt flowgraphs, so a rebuild does not hide how recent the last one was
     MODE_NAMES = {0: "fm", 1: "ssb", 2: "m17", 3: "freedv", 4: "rade", 5: "digitext", 6: "filebroadcast", 7: "psk31", 8: "baseband",
                   9: "rtty", 10: "meshtastic", 11: "lsb", 12: "pocsag", 13: "meshcore", 14: "ft8", 15: "js8", 16: "aprs"}
 
@@ -976,6 +976,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self.aprs_text = aprs_text
         self.aprs_message_id = aprs_message_id
         self.aprs_frame = None
+        self.aprs_sent_early_s = 0.0
         self._aprs_audio = None
         self.aprs_duration_s = 0.0
         self.aprs_source = blocks.vector_source_f([0.0], repeat=False)
@@ -1453,6 +1454,11 @@ class PlutoTxFlowgraph(gr.top_block):
             raise ValueError(f"unknown APRS kind {self.aprs_kind!r}")
         return aprs_codec.build_frame(self.aprs_callsign, config.APRS_DESTINATION, self.aprs_path, info)
 
+    def aprs_wait_s(self):
+        """Seconds until the recommended interval since the last transmission is over, else 0. Advice for a person,
+        who may send anyway; automatic answers have to respect it (web_trx's _aprs_maybe_ack)."""
+        return max(0.0, config.APRS_MIN_INTERVAL_S - (time.monotonic() - PlutoTxFlowgraph._aprs_last_sent))
+
     def aprs_problem(self):
         """None if the current APRS settings can be sent now, else a short reason."""
         if not self.aprs_callsign:
@@ -1461,9 +1467,6 @@ class PlutoTxFlowgraph(gr.top_block):
             return f"invalid callsign {self.aprs_callsign!r}"
         if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
             return "frequency is outside the amateur bands"
-        wait = config.APRS_MIN_INTERVAL_S - (time.monotonic() - PlutoTxFlowgraph._aprs_last_sent)
-        if wait > 0:
-            return f"the channel is shared: wait {wait:.0f} s before the next transmission"
         try:
             self._aprs_build_frame()
         except ValueError as e:
@@ -1475,6 +1478,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if problem:
             raise ValueError(problem)
         self.aprs_frame = self._aprs_build_frame()
+        self.aprs_sent_early_s = self.aprs_wait_s()
         audio = aprs.encode_frame(self.aprs_frame)
         pad = int(self.device.tx_end_loss_s * config.AUDIO_RATE)
         self._aprs_audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])

@@ -517,7 +517,7 @@ Bake oder Nachricht, `pluto-cli rx --digimode aprs` und `pluto-cli tx aprs` tun 
 [Web-TRX](web-trx/README.md) zeigt zusätzlich eine Karte. Beim Wechsel in den Modus stellt der Empfänger 144,800 MHz ein, die
 Frequenz bleibt aber änderbar. Es läuft nur über Funk: kein Igate, kein APRS-IS.
 
-Gesendet wird nur auf Klick oder Befehl, ein Paket je Auslösung und höchstens eines in 30 s. Kein Bake-Timer und kein Digipeater.
+Gesendet wird nur auf Klick oder Befehl, ein Paket je Auslösung. Kommt die nächste Sendung früher als 30 s nach der letzten, warnt die App, sendet aber trotzdem. Kein Bake-Timer und kein Digipeater.
 Vor dem Tasten abgewiesen werden ein fehlendes oder ungültiges Rufzeichen, Frequenzen außerhalb der Amateurbänder und zu
 lange Texte. Eine Sendung dauert auf dem Pluto rund 1 s bei 0,6 s Paket. Die eigene Position ist die Mitte des Locators.
 `pluto-cli tx aprs` verlangt `--freq` ausdrücklich. Web-TRX hat zusätzlich den Schalter „Automatisch bestätigen“: Er ist

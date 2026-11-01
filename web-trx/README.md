@@ -246,9 +246,9 @@ Der Modus **APRS** startet auf 144,800 MHz, die Frequenz bleibt änderbar, das A
 Stationen mit Position, die Tabelle alle Gehörten, daneben stehen die Nachrichten. Es läuft nur über Funk, ohne APRS-IS.
 
 Beim Senden kommen Rufzeichen und Locator aus den Stationsdaten, die Position ist die Mitte des Locators. „Aussenden“ schickt ein
-Paket, höchstens eines in 30 s. Die Sendefrequenz ändert sich nicht von selbst; die Taste „144,800 MHz“ stellt sie nur ein.
+Paket; liegt die letzte Sendung keine 30 s zurück, erscheint ein Hinweis, gesendet wird trotzdem. Die Sendefrequenz ändert sich nicht von selbst; die Taste „144,800 MHz“ stellt sie nur ein.
 **Automatisch bestätigen** sendet ohne Klick. Der Schalter ist aus, wird nicht gespeichert, geht mit dem letzten Browser und dem
-NOTAUS aus und antwortet nur, wenn der Sender auf APRS und auf der Empfangsfrequenz steht. Was nicht rausging, steht im Panel.
+NOTAUS aus und antwortet nur, wenn der Sender auf APRS und auf der Empfangsfrequenz steht und die letzte Sendung mindestens 30 s zurückliegt. Was nicht rausging, steht im Panel.
 
 Sendeweg und Empfang sind einzeln über Funk geprüft (`docs/aprs/SPEC.md`). Stehen Rechner, Pluto und RTL-SDR nebeneinander, senkt die
 Störstrahlung des Rechners die Empfindlichkeit deutlich: Die eigene Testsendung mit −40 dB wurde dann einzeln nicht dekodiert.

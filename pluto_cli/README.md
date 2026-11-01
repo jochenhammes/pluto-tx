@@ -386,8 +386,8 @@ pluto-cli tx aprs --freq 144800000 --call DA2JH --kind message --to DL1ABC --tex
 
 Receiving stays muted and prints `aprs_listen` once and `aprs_packet` per packet. `tx aprs` sends one packet per call and has no
 default frequency on purpose. `--path` takes `WIDE1-1,WIDE2-1` (default), `WIDE2-1` or `none`. It refuses before keying without a
-valid callsign, outside the amateur bands or with text that is too long. The 30 s limit only holds within one process, so a shell
-loop has to keep its own pause. Nothing has been sent on 144.800 MHz yet; see `docs/aprs/SPEC.md`.
+valid callsign, outside the amateur bands or with text that is too long. There is no minimum interval here; the channel is shared,
+so a shell loop should keep a pause of about 30 s. Nothing has been sent on 144.800 MHz yet; see `docs/aprs/SPEC.md`.
 
 ### ADS-B reception (aircraft, 1090 MHz)
 

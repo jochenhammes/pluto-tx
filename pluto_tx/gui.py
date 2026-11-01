@@ -2092,7 +2092,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._current_mode != PlutoTxFlowgraph.MODE_APRS or self.tb is None or self.tb.aprs_frame is None:
             return
         frame = aprs_codec.parse_frame(self.tb.aprs_frame)
-        self.aprs_sent_log.append(f"[{time.strftime('%H:%M:%S')}] {frame['info'].decode('ascii')}")
+        early = self.tb.aprs_sent_early_s
+        warning = f"  -- sent {config.APRS_MIN_INTERVAL_S - early:.0f} s after the last one; the channel is shared" if early > 0 else ""
+        self.aprs_sent_log.append(f"[{time.strftime('%H:%M:%S')}] {frame['info'].decode('ascii')}{warning}")
         if self.aprs_kind_combo.currentData() == "message":
             self._aprs_message_number += 1
             self._on_aprs_changed()

@@ -627,7 +627,7 @@ class SimBackend(SessionBackend):
             lat, lon = station.locator_center(self.station["locator"])
             info = aprs_codec.beacon_info(lat, lon, params["symbol"], params["comment"])
         frame = aprs_codec.parse_frame(aprs_codec.build_frame(self.station["call"], "APZPTX", path, info))
-        return {**aprs_codec.summarize(frame), "duration_s": 0.5, "automatic": False}
+        return {**aprs_codec.summarize(frame), "duration_s": 0.5, "automatic": False, "early_s": 0}
 
     async def aprs_clear(self) -> None:
         self._aprs().clear()

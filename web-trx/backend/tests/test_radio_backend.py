@@ -758,13 +758,27 @@ async def test_aprs_beacon_from_station_data(monkeypatch):
     assert not b.keyed
 
 
-async def test_aprs_rate_limit_refuses_before_keying(monkeypatch):
-    b, _events = await _aprs_tx_backend(monkeypatch)
+async def test_aprs_sending_early_warns_but_goes_out(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
     await b.ptt(True)
     await b.ptt(False)
-    with pytest.raises(SessionError, match="wait"):
-        await b.ptt(True)
-    assert not b.keyed
+    await b.ptt(True)
+    assert b.keyed
+    first, second = [f for n, f in events if n == "aprs_sent"]
+    assert first["early_s"] == 0
+    assert second["early_s"] > 25
+    await _aprs_unkey(b)
+
+
+async def test_aprs_ack_respects_the_interval_a_person_may_ignore(monkeypatch):
+    b, events = await _aprs_tx_backend(monkeypatch)
+    await b.ptt(True)
+    await b.ptt(False)
+    await b.aprs_auto_ack(True)
+    await b._aprs_maybe_ack(MESSAGE_TO_US)
+    assert [n for n, _ in events].count("aprs_sent") == 1
+    result = next(f for n, f in events if n == "aprs_ack_result")
+    assert result["sent"] is False and "30 s" in result["reason"]
     await _aprs_unkey(b)
 
 

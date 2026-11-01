@@ -971,6 +971,7 @@
     aprsOnPackets((e.packets ?? []) as Record<string, unknown>[]);
   }
   function aprsOnSent(e: Record<string, unknown>): void {
+    aprsNotice = Number(e.early_s) > 0 ? "Gesendet, obwohl die letzte Sendung keine 30 s zurückliegt. Der Kanal wird geteilt." : "";
     if (e.kind === "message" || e.kind === "ack") {
       aprsMessages = [...aprsMessages, {
         direction: "tx" as const, time_ms: Date.now(), source: String(e.source), addressee: String(e.addressee ?? ""),
@@ -1635,7 +1636,7 @@
         <span class="dim">
           {stationSaved.call || "kein Rufzeichen"}
           {aprsTx.kind === "beacon" ? `· Position: Mitte von ${stationSaved.locator || "(kein Locator)"}` : ""}
-          · höchstens eine Sendung je 30 s
+          · Kanal wird geteilt: möglichst nur eine Sendung je 30 s
         </span>
       {:else if txMode === "rade"}
         <label class="check" title="End-of-Over-Kennung nach dem Loslassen (in pluto-tx noch nicht auf Hardware verifiziert)">
