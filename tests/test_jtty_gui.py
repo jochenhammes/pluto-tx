@@ -37,6 +37,20 @@ class JttyGuiTests(unittest.TestCase):
         self.assertTrue(w.jtty_group_widget.isVisibleTo(w))
         return w
 
+    def test_choosing_jtty_shows_its_controls_without_a_device(self):
+        """As an operator gets there: no flowgraph yet, the mode picked from the menu, the window really on screen."""
+        from pluto_tx import gui
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        w.show()
+        w.mode_tab_widget.setCurrentIndex(1)
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData(JTTY))
+        self.app.processEvents()
+        self.assertTrue(w.jtty_text_edit.isVisible())
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData(PlutoTxFlowgraph.MODE_RTTY))
+        self.app.processEvents()
+        self.assertFalse(w.jtty_text_edit.isVisible())
+
     def test_preview_shows_what_would_go_out(self):
         w = self.tx_window()
         w.jtty_text_edit.setText("cq da2jh cq")

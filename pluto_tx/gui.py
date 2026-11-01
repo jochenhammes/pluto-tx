@@ -3139,6 +3139,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rtty_controls_enabled()
         self._update_pocsag_controls_enabled()
         self._update_aprs_controls()
+        self._update_jtty_controls()
         self._update_ft8_controls_enabled()
         self._update_js8_controls_enabled()
         self._update_baseband_controls_enabled()
