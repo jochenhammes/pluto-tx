@@ -22,6 +22,7 @@ und Stoppen geht per `web-trx start|stop`, mit den Skripten unter
   - Details: [`docs/BROWSER_AUDIO.md`](docs/BROWSER_AUDIO.md).
 - **POCSAG senden:** eine Nachricht an eine RIC.
 - **APRS senden:** Bake oder Nachricht, ein Paket je Klick.
+- **MeshCore:** Nodes auf der Karte, Kanäle und Direktnachrichten, Empfang und Senden von Hand.
 - **Sicherheit:**
   - NOTAUS;
   - automatisches Enttasten, wenn das Browser-Audio abreißt;
@@ -253,6 +254,18 @@ NOTAUS aus und antwortet nur, wenn der Sender auf APRS und auf der Empfangsfrequ
 Sendeweg und Empfang sind einzeln über Funk geprüft (`docs/aprs/SPEC.md`). Stehen Rechner, Pluto und RTL-SDR nebeneinander, senkt die
 Störstrahlung des Rechners die Empfindlichkeit deutlich: Die eigene Testsendung mit −40 dB wurde dann einzeln nicht dekodiert.
 
+### MeshCore
+
+Der Modus **MeshCore (LoRa)** setzt die Frequenz aus dem Preset, sie ist in diesem Modus nicht änderbar; beim Verlassen kommt die alte zurück. Das gilt für Empfang und Senden. Die Karte zeigt Nodes mit Position, die Tabelle alle, die sich per Advert gemeldet haben. Daneben stehen die Nachrichten. Nicht prüfbare Pakete sind ausgeblendet und per Schalter sichtbar.
+
+**Senden** geht nur von Hand: Advert, Kanal-Text oder Direktnachricht, ein Paket je Klick. Die Route steht zunächst auf „Direct“, denn „Flood“ löst fremde Repeater aus. Abgewiesen wird vor dem Tasten, zum Beispiel beim Duty-Cycle-Limit von 10 %, und Text im Amateurfunkband, weil er immer verschlüsselt ist. Standardkanal ist 869,618 MHz im SRD-Band, also kein Amateurfunk. Der Name fällt ohne Eingabe auf das Rufzeichen zurück. Die Position wird nur auf Wunsch gesendet, als Mitte des Locators.
+
+**Kanalschlüssel** bleiben auf dem Server in `meshcore_channels.json` neben den Einstellungen, mit Dateirechten 0600. Der Browser sieht danach nur noch den Namen. Einstellungen, Ereignisse und Sendeprotokoll enthalten den Schlüssel nicht.
+
+**Direktnachrichten** entschlüsseln ist ein Schalter, Standard aus. Die Node-Identität liegt in `~/.config/pluto-tx/meshcore_identity.json` und ist dieselbe wie in den Desktop-Apps; Web-TRX legt sie erst an, wenn der Schalter an ist oder ein Paket gesendet wird. Fremde Direktnachrichten lassen sich nicht lesen. Eine eigene lässt sich erst lesen, wenn das Advert des Absenders gehört wurde.
+
+Geprüft mit Fake-Geräten und Simulator: Advert und privater Kanal laufen durch den echten Sender und Empfänger. **Mit einem echten Heltec und über Funk ist dieser Weg noch nicht geprüft**; die Desktop-Apps sind es für den Empfang.
+
 ### ADS-B mit Live-Karte
 
 Der Modus **ADS-B** empfängt Flugzeuge auf 1090 MHz und zeigt sie wie ADS-L (unten) auf der Karte und in einer Tabelle,
@@ -409,7 +422,7 @@ Messwerte in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) Abschnitt 9).
 - FT8-Senden im Funkbetrieb testen (F3/F4 in
   [`docs/FT8_PLAN.md`](docs/FT8_PLAN.md)).
 - JS8 mit echten Gegenstationen auf KW (2 m über Luft ist getestet, J7).
-- Weitere Modi (PSK31, FreeDV, Meshtastic, MeshCore, File Broadcast, …).
+- Weitere Modi (PSK31, FreeDV, Meshtastic, File Broadcast, …).
 
 ## Struktur
 

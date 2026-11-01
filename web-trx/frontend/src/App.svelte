@@ -3,7 +3,8 @@
   import Waterfall from "./lib/Waterfall.svelte";
   import FreqInput from "./lib/FreqInput.svelte";
   import TrafficPanel from "./lib/TrafficPanel.svelte";
-  import { ADSB_VIEW, ADSL_VIEW, APRS_VIEW, type TrafficAircraft } from "./lib/trafficViews";
+  import { ADSB_VIEW, ADSL_VIEW, APRS_VIEW, MESHCORE_VIEW, type TrafficAircraft } from "./lib/trafficViews";
+  import MeshcoreMessages, { type MeshcoreChannel, type MeshcoreMessage } from "./lib/MeshcoreMessages.svelte";
   import AprsMessages, { type AprsMessage } from "./lib/AprsMessages.svelte";
   import { locatorCenter } from "./lib/geo";
   import RxDecoder, {
@@ -25,7 +26,7 @@
   const MODE_LABELS: Record<string, string> = {
     fm: "FM", ssb: "SSB (USB)", lsb: "SSB (LSB)", m17: "M17", rade: "RADE",
     pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8", js8: "JS8 (JS8Call)",
-    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)", aprs: "APRS",
+    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)", aprs: "APRS", meshcore: "MeshCore (LoRa)",
   };
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
@@ -36,7 +37,7 @@
   // whole transmission and unkeys on its own. Everything else takes the mic.
   // FT8: the click arms a series of slot-timed transmissions instead.
   // JS8: the click arms one message -- its frames go out in consecutive periods.
-  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8", "aprs"];
+  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8", "aprs", "meshcore"];
   const isAudioMode = (mode: string) => !ONE_SHOT_MODES.includes(mode);
 
   let waterfall: Waterfall;
@@ -73,6 +74,7 @@
     rx_gain?: Record<string, RxGainInfo>;
     rx_direct_sampling?: string[];
     rx_bands?: Record<string, [number, number]>;
+    meshcore?: { presets: { name: string; frequency_hz: number; phy_verified: boolean }[] };
     ft8?: { tx: boolean; rx_backends: string[]; clock_synced: boolean };
     js8?: { tx: boolean; rx_backends: string[]; submodes: string[]; jsc: boolean; clock_synced: boolean };
   } = {};
@@ -102,11 +104,23 @@
   let aprsAutoAck = false;
   let aprsNotice = "";
   let aprsTx = { kind: "beacon", path: "WIDE1-1,WIDE2-1", symbol: "/-", comment: "", to: "", text: "" };
+  // MeshCore (backend meshcore_update / meshcore_sent)
+  const meshcoreNodes = new Map<string, TrafficAircraft>();
+  let meshcoreList: TrafficAircraft[] = [];
+  let meshcoreMessages: MeshcoreMessage[] = [];
+  let meshcoreChannels: MeshcoreChannel[] = [];
+  let meshcoreStatus: { frames: number; invalid: number; hidden: number } | null = null;
+  let meshcoreDecryptDm = false;
+  let meshcoreShowUnverified = false;
+  let meshcorePublicKey = "";
+  let meshcoreSendInfo = "";
+  let meshcoreRxPreset = 0;
+  let meshcoreTx = { preset: 0, kind: "advert", name: "", text: "", route: "direct", role: 1, channel: "Public", recipient: "", with_position: false };
   const adsbAircraft = new Map<string, TrafficAircraft>();
   let adsbList: TrafficAircraft[] = [];
   let adsbStatus: { messages: number; corrected: number; crc_failures: number } | null = null;
   // Modes that hold the tuner themselves: no frequency entry, no audio, room for the map.
-  const FIXED_TUNE_MODES = ["adsl", "adsb"];
+  const FIXED_TUNE_MODES = ["adsl", "adsb", "meshcore"];
   $: rxFixedTune = FIXED_TUNE_MODES.includes(rxMode);
   let ft8Status: Ft8Status | null = null;
   // JS8 receive (backend js8_frames / js8_message / js8_status)
@@ -542,6 +556,7 @@
       clockSynced = features.ft8?.clock_synced ?? true;
       adslLoadSnapshot(e.adsl as { aircraft?: Record<string, unknown>[] } | undefined);
       adsbLoadSnapshot(e.adsb as { aircraft?: Record<string, unknown>[] } | undefined);
+      meshcoreLoadSnapshot(e.meshcore as Record<string, unknown> | undefined);
       aprsLoadSnapshot(e.aprs as { stations?: Record<string, unknown>[]; packets?: Record<string, unknown>[]; auto_ack?: boolean } | undefined);
       if (fmOptions === null) {
         fmOptions = (e.mode_options as { fm: FmOptions }).fm;
@@ -648,6 +663,15 @@
     if (e.event === "rade_status") radeStatus = e as unknown as RadeStatus;
     if (e.event === "adsl_packet" && e.address_label) adslOnPacket(e);
     if (e.event === "adsl_status") adslStatus = e as unknown as typeof adslStatus;
+    if (e.event === "meshcore_update") meshcoreOnUpdate(e);
+    if (e.event === "meshcore_sent") meshcoreOnSent(e);
+    if (e.event === "meshcore_channels") meshcoreChannels = e.channels as MeshcoreChannel[];
+    if (e.event === "meshcore_options") meshcoreOnOptions(e);
+    if (e.event === "meshcore_cleared") {
+      meshcoreNodes.clear();
+      meshcoreList = [];
+      meshcoreMessages = [];
+    }
     if (e.event === "aprs_update") aprsOnUpdate(e);
     if (e.event === "aprs_sent") aprsOnSent(e);
     if (e.event === "aprs_auto_ack") {
@@ -877,7 +901,8 @@
   }
   function selectRxMode(): void {
     const params = rxMode === "fm" ? { deemphasis: rxDeemphasis } : rxMode === "rtty" ? rxRtty
-      : rxMode === "ft8" ? { decoder: rxFt8Decoder } : rxMode === "js8" ? { ...rxJs8 } : {};
+      : rxMode === "ft8" ? { decoder: rxFt8Decoder } : rxMode === "js8" ? { ...rxJs8 }
+      : rxMode === "meshcore" ? { preset: Number(meshcoreRxPreset) } : {};
     client.request("select_mode", { direction: "rx", mode: rxMode, params });
   }
   // -- ADS-L --
@@ -921,6 +946,62 @@
   function clearAdsl(): void {
     client.request("adsl_clear", {});
   }
+
+  // -- MeshCore --
+  function meshcoreNode(n: Record<string, unknown>, old: TrafficAircraft | undefined): TrafficAircraft {
+    const key = String(n.public_key);
+    const heard = toLocalMs(Number(n.time));
+    return {
+      label: key, callsign: String(n.name ?? ""), icao: key, kind: String(n.role ?? ""), trail: [],
+      lat: n.latitude == null ? null : Number(n.latitude), lon: n.longitude == null ? null : Number(n.longitude),
+      heard_ms: heard, position_ms: n.latitude == null ? null : heard, heard_via: n.route == null ? null : String(n.route),
+      packets: (old?.packets ?? 0) + 1,
+    };
+  }
+  function meshcoreMessage(p: Record<string, unknown>, direction: "rx" | "tx", timeMs: number): MeshcoreMessage {
+    return {
+      direction, time_ms: timeMs, kind: String(p.kind), channel: String(p.channel ?? ""), verified: p.verified === true,
+      sender: String(p.sender ?? p.sender_key ?? p.recipient ?? "").slice(0, 32), text: String(p.text ?? p.type ?? ""),
+    };
+  }
+  function meshcoreOnPackets(packets: Record<string, unknown>[]): void {
+    const shown = packets.filter((p) => p.kind !== "advert");
+    if (shown.length) meshcoreMessages = [...meshcoreMessages, ...shown.map((p) => meshcoreMessage(p, "rx", toLocalMs(Number(p.time))))].slice(-200);
+  }
+  function meshcoreOnOptions(e: Record<string, unknown>): void {
+    meshcoreDecryptDm = e.decrypt_dm === true;
+    meshcoreShowUnverified = e.show_unverified === true;
+    if (typeof e.public_key === "string") meshcorePublicKey = e.public_key;
+  }
+  function meshcoreLoadSnapshot(s: Record<string, unknown> | undefined): void {
+    meshcoreNodes.clear();
+    for (const n of (s?.nodes ?? []) as Record<string, unknown>[]) meshcoreNodes.set(String(n.public_key), meshcoreNode(n, undefined));
+    meshcoreList = [...meshcoreNodes.values()];
+    meshcoreMessages = meshcoreMessages.filter((m) => m.direction === "tx");
+    meshcoreOnPackets((s?.packets ?? []) as Record<string, unknown>[]);
+    meshcoreChannels = (s?.channels ?? []) as MeshcoreChannel[];
+    meshcoreOnOptions({ ...(s?.options as object), public_key: s?.public_key });
+  }
+  function meshcoreOnUpdate(e: Record<string, unknown>): void {
+    meshcoreStatus = e as unknown as typeof meshcoreStatus;
+    for (const n of (e.nodes ?? []) as Record<string, unknown>[]) {
+      meshcoreNodes.set(String(n.public_key), meshcoreNode(n, meshcoreNodes.get(String(n.public_key))));
+    }
+    meshcoreList = [...meshcoreNodes.values()];
+    meshcoreOnPackets((e.packets ?? []) as Record<string, unknown>[]);
+  }
+  function meshcoreOnSent(e: Record<string, unknown>): void {
+    meshcoreSendInfo = `Gesendet: ${Number(e.airtime_s).toFixed(2)} s Sendezeit · ${Math.round(Number(e.duty_used_s))} von ${Math.round(Number(e.duty_budget_s))} s Stundenbudget`;
+    if (e.kind !== "advert") {
+      meshcoreMessages = [...meshcoreMessages, meshcoreMessage(e, "tx", Date.now())].slice(-200);
+      meshcoreTx = { ...meshcoreTx, text: "" };
+    }
+  }
+  function clearMeshcore(): void {
+    client.request("meshcore_clear", {});
+  }
+  $: meshcorePresets = features.meshcore?.presets ?? [];
+  $: meshcoreHeadline = `${(rxFreqHz / 1e6).toFixed(3).replace(".", ",")} MHz · ${meshcoreStatus?.frames ?? 0} Pakete · ${meshcoreStatus?.hidden ?? 0} ausgeblendet`;
 
   // -- APRS --
   function aprsStation(a: Record<string, unknown>, old: TrafficAircraft | undefined, trail: [number, number, number][]): TrafficAircraft {
@@ -1062,6 +1143,7 @@
     if (txMode === "m17") return { src_callsign: srcCallsign, dst_callsign: dstCallsign };
     if (txMode === "pocsag") return { ric, text: pocsagText };
     if (txMode === "aprs") return { ...aprsTx };
+    if (txMode === "meshcore") return { ...meshcoreTx, preset: Number(meshcoreTx.preset), role: Number(meshcoreTx.role) };
     if (txMode === "rtty") return { ...txRtty, text: rttyTxText };
     if (txMode === "digitext") return { ...digitext };
     if (txMode === "rade") return { eoo: radeEoo };
@@ -1544,8 +1626,8 @@
     </div>
 
     <div class="row">
-      <FreqInput value={txFreqHz} onCommit={tuneTx} size="large" disabled={keyed} />
-      <button on:click={() => tuneTx(rxFreqHz)} disabled={keyed} title="RX-Frequenz übernehmen">= RX</button>
+      <FreqInput value={txFreqHz} onCommit={tuneTx} size="large" disabled={keyed || (txMode === "meshcore" && txConnected)} />
+      <button on:click={() => tuneTx(rxFreqHz)} disabled={keyed || (txMode === "meshcore" && txConnected)} title="RX-Frequenz übernehmen">= RX</button>
       <div class="field narrow">
         <label for="txPpm" title="Oszillator-Korrektur des Senders (positiv = Gerät liegt zu hoch)">Korr. ppm</label>
         <input id="txPpm" class="ppm" type="number" step="0.1" bind:value={txPpm} disabled={keyed}
@@ -1597,6 +1679,71 @@
           <label for="pocsagText">Text</label>
           <input id="pocsagText" type="text" bind:value={pocsagText} on:change={selectTxMode} />
         </div>
+      {:else if txMode === "meshcore"}
+        <div class="field narrow">
+          <label for="mcPreset">Preset</label>
+          <select id="mcPreset" bind:value={meshcoreTx.preset} on:change={selectTxMode}>
+            {#each meshcorePresets as p, i}<option value={i}>{p.name}</option>{/each}
+          </select>
+        </div>
+        <div class="field narrow">
+          <label for="mcKind">Senden</label>
+          <select id="mcKind" bind:value={meshcoreTx.kind} on:change={selectTxMode}>
+            <option value="advert">Advert</option>
+            <option value="group">Kanal-Text</option>
+            <option value="direct">Direktnachricht</option>
+          </select>
+        </div>
+        <div class="field narrow">
+          <label for="mcRoute">Route</label>
+          <select id="mcRoute" bind:value={meshcoreTx.route} on:change={selectTxMode} title="Flood löst fremde Repeater aus; Direct bleibt ohne Weiterleitung beim direkten Empfänger.">
+            <option value="direct">Direct (ohne Weiterleitung)</option>
+            <option value="flood">Flood (über Repeater)</option>
+          </select>
+        </div>
+        <div class="field narrow">
+          <label for="mcName">Name</label>
+          <input id="mcName" type="text" maxlength="32" placeholder={stationCall} bind:value={meshcoreTx.name} on:change={selectTxMode} />
+        </div>
+        {#if meshcoreTx.kind === "advert"}
+          <div class="field narrow">
+            <label for="mcRole">Rolle</label>
+            <select id="mcRole" bind:value={meshcoreTx.role} on:change={selectTxMode}>
+              <option value={1}>Chat</option><option value={2}>Repeater</option><option value={3}>Room Server</option><option value={4}>Sensor</option>
+            </select>
+          </div>
+          <label class="check" title="Sendet die Mitte des Locators aus den Stationsdaten mit."><input type="checkbox" bind:checked={meshcoreTx.with_position} on:change={selectTxMode} /> Position</label>
+        {:else}
+          {#if meshcoreTx.kind === "group"}
+            <div class="field narrow">
+              <label for="mcChannel">Kanal</label>
+              <select id="mcChannel" bind:value={meshcoreTx.channel} on:change={selectTxMode}>
+                <option value="Public">Public</option>
+                {#each meshcoreChannels as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+              </select>
+            </div>
+          {:else}
+            <div class="field narrow">
+              <label for="mcNode">Gehörte Node</label>
+              <select id="mcNode" value="" on:change={(e) => { meshcoreTx.recipient = e.currentTarget.value; selectTxMode(); }}>
+                <option value="">wählen…</option>
+                {#each meshcoreList as n (n.label)}<option value={n.icao}>{n.callsign || n.icao?.slice(0, 12)}</option>{/each}
+              </select>
+            </div>
+            <div class="field grow">
+              <label for="mcRecipient">Öffentlicher Schlüssel</label>
+              <input id="mcRecipient" class="mono" type="text" maxlength="64" bind:value={meshcoreTx.recipient} on:change={selectTxMode} />
+            </div>
+          {/if}
+          <div class="field grow">
+            <label for="mcText">Text</label>
+            <input id="mcText" type="text" maxlength="180" bind:value={meshcoreTx.text} on:change={selectTxMode} />
+          </div>
+        {/if}
+        <span class="dim">
+          Sendet auf der Preset-Frequenz, nicht im Amateurfunkband; Text ist immer verschlüsselt. Duty-Cycle höchstens 10 %.
+          {meshcoreSendInfo}
+        </span>
       {:else if txMode === "aprs"}
         <div class="field narrow">
           <label for="aprsKind">Senden</label>
@@ -1976,6 +2123,15 @@
     {:else if rxMode === "adsb"}
       <TrafficPanel view={ADSB_VIEW} aircraft={adsbList} headline={adsbHeadline} station={adslStation} connected={rxConnected}
         tileSetting={features.map_tile_url ?? ""} onClear={clearAdsb} />
+    {:else if rxMode === "meshcore"}
+      <TrafficPanel view={MESHCORE_VIEW} aircraft={meshcoreList} headline={meshcoreHeadline} station={adslStation} connected={rxConnected}
+        tileSetting={features.map_tile_url ?? ""} onClear={clearMeshcore}>
+        <MeshcoreMessages messages={meshcoreMessages} channels={meshcoreChannels} decryptDm={meshcoreDecryptDm} showUnverified={meshcoreShowUnverified}
+          publicKey={meshcorePublicKey}
+          onSaveChannel={(name, secret) => client.request("meshcore_channel_set", { name, secret })}
+          onDeleteChannel={(name) => client.request("meshcore_channel_delete", { name })}
+          onOptions={(options) => client.request("meshcore_options", options)} />
+      </TrafficPanel>
     {:else if rxMode === "aprs"}
       <TrafficPanel view={APRS_VIEW} aircraft={aprsList} headline={aprsHeadline} station={adslStation} connected={rxConnected}
         tileSetting={features.map_tile_url ?? ""} onClear={clearAprs}>

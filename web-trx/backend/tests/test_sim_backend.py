@@ -218,3 +218,41 @@ async def test_aprs_receive_and_send():
     with pytest.raises(SessionError):
         await b.ptt(True)
     assert not b.keyed
+
+
+@pytest.mark.asyncio
+async def test_meshcore_receive_channels_and_send():
+    pytest.importorskip("cryptography")
+    b, events, _spectrum, _audio = make_backend()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    await b.meshcore_options({"decrypt_dm": True})
+    state = b._meshcore()
+    for raw in b.fake_meshcore_frames():
+        state.on_frame(raw)
+    rows, nodes = state.take_changed()
+    assert sorted(n["name"] for n in nodes) == ["Sim Alice <b>", "Sim Repeater", "Sim ohne Position"]
+    assert {r["kind"] for r in rows} == {"advert", "group_text", "direct_text"}
+    snapshot = b.meshcore_snapshot()
+    assert not any("hex" in r for r in snapshot["packets"])
+    key = "00112233445566778899aabbccddeeff"
+    await b.meshcore_channel_set("Privat", key)
+    with pytest.raises(SessionError):
+        await b.meshcore_channel_set("x", "zz")
+    await b.connect("tx", "sim", "")
+    params = modes.normalize_params("tx", "meshcore", {"kind": "group", "channel": "Privat", "text": "Hi", "name": "N"})
+    before = b.tx.freq_hz
+    await b.select_mode("tx", "meshcore", params)
+    assert b.tx.freq_hz == 869_618_000.0
+    with pytest.raises(SessionError):
+        await b.tune("tx", before)
+    await b.ptt(True)
+    sent = next(f for n, f in events if n == "meshcore_sent")
+    assert (sent["kind"], sent["channel"], sent["text"]) == ("group_text", "Privat", "Hi")
+    await b.ptt(False)
+    assert key not in repr(events) and key not in repr(b.meshcore_snapshot())
+    await b.select_mode("tx", "meshcore", modes.normalize_params("tx", "meshcore", {"kind": "direct", "text": "Hi"}))
+    with pytest.raises(SessionError):
+        await b.ptt(True)
+    assert not b.keyed
+    await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
+    assert b.tx.freq_hz == before

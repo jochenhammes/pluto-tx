@@ -74,6 +74,23 @@ export const APRS_VIEW: TrafficView = {
   ],
 };
 
+export const MESHCORE_VIEW: TrafficView = {
+  rings: [25, 50, 100, 200],
+  countLabel: "Nodes",
+  notice: "Nur per Funk Gehörtes.",
+  emptyText: "Noch keine Adverts empfangen. Nodes melden sich meist nur selten.",
+  tagText: (a) => a.callsign ?? a.label,
+  columns: [
+    { title: "Name", value: (a) => a.callsign ?? "" },
+    { title: "Rolle", value: (a) => a.kind ?? "" },
+    { title: "Schlüssel", value: (a) => a.icao?.slice(0, 12) ?? "" },
+    distance, bearing,
+    { title: "Via", value: (a) => a.heard_via ?? "" },
+    age,
+    { title: "Pakete", value: (a) => String(a.packets ?? 0) },
+  ],
+};
+
 export const ADSB_VIEW: TrafficView = {
   rings: [50, 100, 200, 400],
   emptyText: "Noch keine Flugzeuge empfangen. Eine Position braucht zwei passende Nachrichten.",

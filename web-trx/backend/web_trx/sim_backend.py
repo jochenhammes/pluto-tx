@@ -33,8 +33,13 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
-TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8", "aprs")
-RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl", "adsb", "aprs")
+TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8", "aprs", "meshcore")
+RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl", "adsb", "aprs", "meshcore")
+
+# MeshCore receive: invented nodes and messages built with the real codec from throwaway identities (never the real
+# identity file) and reported by the real state class. The channel key store has the real backend's refusals.
+MESHCORE_PRESETS = (("MeshCore EU/UK Narrow", 869_618_000.0, True), ("MeshCore EU/UK 250 kHz (unverified)", 869_525_000.0, False))
+MESHCORE_SIM_PERIOD_S = 4.0
 
 # APRS receive: invented stations around the station data, built with the real codec and reported by the real
 # state class, so the fields are the ones GnuRadioBackend sends. A neighbour messages the station's own callsign.
@@ -63,7 +68,7 @@ JS8_SIM_NEIGHBOUR = ("DL1ABC", "JO62")
 FT8_SLOT_S = 15.0
 FT8_DECODE_AT_S = 14.8
 FT8_SIM_STATIONS = (("DL1ABC", "JO62"), ("G4XYZ", "IO91"), ("OK1RR", "JN79"), ("EA3AAA", "JN11"))
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "aprs")  # auto-unkey, like GnuRadioBackend
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "aprs", "meshcore")  # auto-unkey, like GnuRadioBackend
 # FT8 transmit: slot timing as in pluto_tx/config.py; airtime of one frame
 # (79 symbols x 0.16 s) plus pluto-tx' tail.
 FT8_KEY_EARLY_S = 3.0
@@ -118,6 +123,14 @@ class SimBackend(SessionBackend):
         self._adsl_state = _adsl_state_module().AdslState()
         self._adsl_counts = {hz: 0 for hz in ADSL_CHANNELS_HZ}
         self._adsl_tick = 0
+        self._tx_freq_before_meshcore: float | None = None
+        self._mc_tick = 0
+        self._mc_task: asyncio.Task | None = None
+        self._mc_state = None
+        self._mc_channels: dict[str, str] = {}
+        self._mc_identity = None
+        self._mc_decrypt_dm = False
+        self._mc_nodes = None
         self._aprs_tick = 0
         self._aprs_task: asyncio.Task | None = None
         self._aprs_state = None
@@ -151,6 +164,7 @@ class SimBackend(SessionBackend):
     def features(self) -> dict:
         return {"rx_modes": list(RX_MODES), "tx_modes": list(TX_MODES),
                 "map_tile_url": os.environ.get("WEB_TRX_MAP_TILE_URL", ""),
+                "meshcore": {"presets": [{"name": n, "frequency_hz": f, "phy_verified": v} for n, f, v in MESHCORE_PRESETS]},
                 "ft8": {"tx": "ft8" in TX_MODES, "rx_backends": ["sim"], "clock_synced": True},
                 "js8": {"tx": "js8" in TX_MODES, "rx_backends": ["sim"], "submodes": ["normal", "fast", "turbo", "slow"],
                         "jsc": _js8_modules()[1].jsc_available(), "clock_synced": True}}
@@ -195,6 +209,10 @@ class SimBackend(SessionBackend):
                 if self._freq_before_fixed is None:
                     self._freq_before_fixed = st.freq_hz
                 st.freq_hz = FIXED_TUNE_HZ[mode]
+            elif mode == "meshcore":
+                if self._freq_before_fixed is None:
+                    self._freq_before_fixed = st.freq_hz
+                st.freq_hz = MESHCORE_PRESETS[params.get("preset", 0)][1]
             elif mode == "aprs":  # a starting point only, the operator can retune
                 if self._freq_before_fixed is None:
                     self._freq_before_fixed = st.freq_hz
@@ -204,13 +222,25 @@ class SimBackend(SessionBackend):
                 st.freq_hz, self._freq_before_fixed = self._freq_before_fixed, None
             if st.freq_hz != before:
                 await self._emit_event("tuned", {"direction": "rx", "freq_hz": st.freq_hz})
+        if direction == "tx":  # like GnuRadioBackend: the preset sets the frequency, leaving brings the old one back
+            before = st.freq_hz
+            if mode == "meshcore":
+                if self._tx_freq_before_meshcore is None:
+                    self._tx_freq_before_meshcore = st.freq_hz
+                st.freq_hz = MESHCORE_PRESETS[params["preset"]][1]
+            elif self._tx_freq_before_meshcore is not None:
+                st.freq_hz, self._tx_freq_before_meshcore = self._tx_freq_before_meshcore, None
+            if st.freq_hz != before:
+                await self._emit_event("tuned", {"direction": "tx", "freq_hz": st.freq_hz})
         st.mode = mode
         st.mode_params = params
 
     async def tune(self, direction: str, freq_hz: float) -> None:
         # Allowed while disconnected too: the frequency is kept and used on
         # the next connect (same as GnuRadioBackend).
-        if direction == "rx" and self.rx.connection is not None and self.rx.mode in FIXED_TUNE_HZ:
+        if direction == "tx" and self.tx.connection is not None and self.tx.mode == "meshcore":
+            raise SessionError("tx: MeshCore's frequency comes from its preset")
+        if direction == "rx" and self.rx.connection is not None and self.rx.mode in (*FIXED_TUNE_HZ, "meshcore"):
             raise SessionError(f"rx: {self.rx.mode.upper()} tunes itself, the frequency can't be changed in this mode")
         if direction == "rx" and self.rx.connection is None and self._freq_before_fixed is not None:
             self._freq_before_fixed = freq_hz  # disconnected: for the next non-ADS-L mode
@@ -242,9 +272,12 @@ class SimBackend(SessionBackend):
                 return
             if self.tx.mode == "aprs":
                 self._aprs_check_tx()
+            meshcore_sent = self._meshcore_sim_sent() if self.tx.mode == "meshcore" else None
             self.keyed = True
             await self._emit_event("keyed", {"mode": self.tx.mode})
-            if self.tx.mode == "aprs":
+            if meshcore_sent is not None:
+                await self._emit_event("meshcore_sent", meshcore_sent)
+            elif self.tx.mode == "aprs":
                 await self._emit_event("aprs_sent", self._aprs_sim_sent())
             elif self.tx.mode == "pocsag":
                 await self._emit_event("pocsag_message", {
@@ -445,6 +478,8 @@ class SimBackend(SessionBackend):
         await self._cancel_js8("shutdown", device_safe=True)
         if self._adsl_task is not None:
             self._adsl_task.cancel()
+        if self._mc_task is not None:
+            self._mc_task.cancel()
         if self._aprs_task is not None:
             self._aprs_task.cancel()
         if self._adsb_task is not None:
@@ -480,6 +515,8 @@ class SimBackend(SessionBackend):
             self._adsb_task = asyncio.create_task(self._adsb_loop())
         if self._aprs_task is None:
             self._aprs_task = asyncio.create_task(self._aprs_loop())
+        if self._mc_task is None:
+            self._mc_task = asyncio.create_task(self._meshcore_loop())
         if self._js8_task is None:
             self._js8_task = asyncio.create_task(self._js8_loop())
         if self._js8_auto is None:
@@ -598,6 +635,140 @@ class SimBackend(SessionBackend):
                    420, 30.0, -2.0, 90.0),
             packet((0, "RND"), 0x51F0AA, "paraglider", "airborne", "none", None, None, None, None, None, None),
         ]
+
+    def _meshcore(self):
+        if self._mc_state is None:
+            pluto_path.ensure_importable()
+            from pluto_advanced_rx.meshcore_state import MeshcoreState
+            self._mc_state = MeshcoreState()
+            self._mc_state.set_hide_unverified(True)
+        return self._mc_state
+
+    def _meshcore_row(self, row: dict) -> dict:
+        return {k: v for k, v in row.items() if k != "hex"}
+
+    def _meshcore_own_identity(self):
+        if self._mc_identity is None:
+            pluto_path.ensure_importable()
+            from pluto_tx.meshcore_codec import Identity
+            self._mc_identity = Identity.generate()  # lives in memory only: the simulator never touches the real file
+        return self._mc_identity
+
+    def _meshcore_channel_info(self) -> list[dict]:
+        pluto_path.ensure_importable()
+        from pluto_tx import meshcore_codec as c
+        return [{"name": name, "hash": c.channel_hash(bytes.fromhex(s))} for name, s in sorted(self._mc_channels.items())]
+
+    def _meshcore_apply_channels(self) -> None:
+        from pluto_tx import meshcore_codec as c
+        self._meshcore().set_channels([c.GroupChannel(name, bytes.fromhex(s)) for name, s in sorted(self._mc_channels.items())])
+
+    def meshcore_snapshot(self) -> dict:
+        try:
+            state = self._meshcore()
+        except ImportError:  # no `cryptography` here: the hello message must not fail over it
+            return {}
+        return {"nodes": [self._meshcore_row(n) for n in state.get_nodes()],
+                "packets": [self._meshcore_row(r) for r in state.get_snapshot()[1]], "channels": self._meshcore_channel_info(),
+                "options": {"decrypt_dm": self._mc_decrypt_dm, "show_unverified": not state.hide_unverified},
+                "public_key": self._mc_identity.public_key.hex() if self._mc_identity is not None else ""}
+
+    async def meshcore_clear(self) -> None:
+        self._meshcore().clear()
+
+    async def meshcore_options(self, params: dict) -> None:
+        state = self._meshcore()
+        if "show_unverified" in params:
+            state.set_hide_unverified(params["show_unverified"] is not True)
+        if "decrypt_dm" in params:
+            self._mc_decrypt_dm = params["decrypt_dm"] is True
+            state.set_identity(self._meshcore_own_identity() if self._mc_decrypt_dm else None)
+        await self._emit_event("meshcore_options", {"decrypt_dm": self._mc_decrypt_dm, "show_unverified": not state.hide_unverified,
+                                                    "public_key": self._mc_identity.public_key.hex() if self._mc_identity is not None else ""})
+
+    async def meshcore_channel_set(self, name: str, secret: str) -> None:
+        pluto_path.ensure_importable()
+        from pluto_tx import meshcore_codec as c
+        name = name.strip()
+        if not name or len(name) > 32 or not name.isprintable() or name.lower() == "public":
+            raise SessionError("meshcore: invalid channel name")
+        try:
+            self._mc_channels[name] = c.parse_channel_secret(secret).hex()
+        except ValueError:
+            raise SessionError("meshcore: channel key must be 32 hex digits") from None
+        self._meshcore_apply_channels()
+        await self._emit_event("meshcore_channels", {"channels": self._meshcore_channel_info()})
+
+    async def meshcore_channel_delete(self, name: str) -> None:
+        if self._mc_channels.pop(name.strip(), None) is None:
+            raise SessionError("meshcore: no such channel")
+        self._meshcore_apply_channels()
+        await self._emit_event("meshcore_channels", {"channels": self._meshcore_channel_info()})
+
+    def _meshcore_sim_sent(self) -> dict:
+        """The refusals an operator meets on the real backend, and the packet as a receiver would read it."""
+        pluto_path.ensure_importable()
+        from pluto_tx import meshcore_codec as c
+        p = self.tx.mode_params
+        name = p["name"].strip() or self.station.get("call", "")
+        route = c.ROUTE_DIRECT if p["route"] == "direct" else c.ROUTE_FLOOD
+        channels = [c.PUBLIC_CHANNEL]
+        try:
+            if p["kind"] == "advert":
+                center = station.locator_center(self.station.get("locator", "")) if p["with_position"] else None
+                raw = c.build_advert(self._meshcore_own_identity(), name, p["role"], center, route=route)
+            elif not p["text"].strip():
+                raise SessionError("meshcore: Enter a message first.")
+            elif p["kind"] == "direct":
+                if not p["recipient"]:
+                    raise SessionError("meshcore: Enter the recipient's public key (64 hex digits).")
+                raw = c.build_text_message(self._meshcore_own_identity(), c.parse_public_key(p["recipient"]), p["text"], route=route)
+            else:
+                channel = c.PUBLIC_CHANNEL
+                if p["channel"].lower() != "public":
+                    if p["channel"] not in self._mc_channels:
+                        raise SessionError(f"meshcore: no key saved for channel '{p['channel']}'")
+                    channel = c.GroupChannel(p["channel"], bytes.fromhex(self._mc_channels[p["channel"]]))
+                    channels.append(channel)
+                raw = c.build_group_text(channel, name, p["text"], route=route)
+        except ValueError as e:
+            raise SessionError(f"meshcore: {e}") from None
+        row = self._meshcore_row(c.summarize_packet(raw, channels))
+        if p["kind"] == "direct":
+            row.update(kind="direct_text", text=p["text"].strip(), verified=True, recipient=p["recipient"][:16])
+        return {**row, "airtime_s": 0.5, "duty_used_s": 1.0, "duty_budget_s": 360.0}
+
+    def fake_meshcore_frames(self) -> list[bytes]:
+        """One round of invented traffic through the real codec: nodes with and without a position, the Public channel,
+        a channel without a known key, and a direct message to our own node."""
+        pluto_path.ensure_importable()
+        from pluto_tx import meshcore_codec as c
+        if self._mc_nodes is None:
+            self._mc_nodes = [c.Identity.generate() for _ in range(3)]
+        lat0, lon0 = station.locator_center(self.station.get("locator", "")) or ADSL_DEFAULT_CENTER
+        alice, repeater, hidden = self._mc_nodes
+        self._mc_tick += 1
+        frames = [c.build_advert(alice, "Sim Alice <b>", 1, (lat0 + 0.2, lon0 + 0.3)),
+                  c.build_advert(repeater, "Sim Repeater", 2, (lat0 - 0.3, lon0 - 0.4)),
+                  c.build_advert(hidden, "Sim ohne Position", 1),
+                  c.build_group_text(c.PUBLIC_CHANNEL, "Sim Alice", f"Hallo Nummer {self._mc_tick}"),
+                  c.build_group_text(c.GroupChannel("x", bytes(range(16))), "Sim", "unbekannter Kanal")]
+        if self._mc_identity is not None:
+            frames.append(c.build_text_message(alice, self._mc_identity.public_key, f"Direkt an dich {self._mc_tick}"))
+        return frames
+
+    async def _meshcore_loop(self) -> None:
+        while True:
+            await asyncio.sleep(MESHCORE_SIM_PERIOD_S)
+            if self.rx.connection is None or self.rx.mode != "meshcore":
+                continue
+            state = self._meshcore()
+            for raw in self.fake_meshcore_frames():
+                state.on_frame(raw)
+            rows, nodes = state.take_changed()
+            frames, invalid, hidden = state.counts()
+            await self._emit_event("meshcore_update", {"packets": [self._meshcore_row(r) for r in rows], "nodes": [self._meshcore_row(n) for n in nodes],
+                                                       "frames": frames, "invalid": invalid, "hidden": hidden, "decoded": frames})
 
     def _aprs(self):
         if self._aprs_state is None:
