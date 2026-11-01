@@ -230,6 +230,19 @@ class WholeChainTests(unittest.TestCase):
         rx.wait()
         return got
 
+    def test_high_band_widens_the_search(self):
+        from pluto_advanced_rx import config as rxc, flowgraph as rxf
+        from tests import fakes
+        fakes.make_fake_rx(np.zeros(1000, np.complex64), RATE)
+        rx = rxf.AdvancedRxFlowgraph(uri="x", frequency=432.15e6, sample_rate=RATE, device_type="fake", active_digimode="jtty")
+        self.assertEqual(rx.jtty_receiver._search[1], rxc.JTTY_RX_TOLERANCE_HZ)
+        rx.set_frequency(1_296_200_000.0)
+        self.assertEqual(rx.jtty_receiver._search[1], rxc.JTTY_HIGH_BAND_TOLERANCE_HZ)
+        rx.set_jtty_search(tolerance_hz=20)
+        self.assertEqual(rx.jtty_receiver._search[1], rxc.JTTY_HIGH_BAND_TOLERANCE_HZ)
+        rx.set_frequency(432.15e6)
+        self.assertEqual(rx.jtty_receiver._search[1], 20)
+
     def assertDecoded(self, got):
         self.assertIn("CQ DA2JH CQ HALLO 73", [u["text"] for u in got if u["state"] == "complete"])
 

@@ -165,12 +165,12 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
     if mode == "jtty" and direction == "rx":
         return _jtty_rx(params)
     if mode == "jtty" and direction == "tx":
-        _reject_unknown(params, {"text", "tone_hz"}, "jtty")
+        _reject_unknown(params, {"text", "tone_hz", "drift_comp"}, "jtty")
         lo, hi = JTTY_TONE_RANGE_HZ
         tone = _number(params, "tone_hz", JTTY_TONE_DEFAULT_HZ, "jtty")
         if not lo <= tone <= hi:
             raise ValueError(f"jtty: tone_hz must be {lo:.0f}..{hi:.0f}")
-        return {"text": _text(params, JTTY_MAX_TEXT_LEN, "jtty"), "tone_hz": tone}
+        return {"text": _text(params, JTTY_MAX_TEXT_LEN, "jtty"), "tone_hz": tone, "drift_comp": _bool(params, "drift_comp", True)}
     if mode == "js8" and direction == "rx":
         _reject_unknown(params, {"submode", "decoder"}, "js8")
         submode = params.get("submode", JS8_SUBMODE_DEFAULT)

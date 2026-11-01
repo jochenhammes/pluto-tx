@@ -80,7 +80,11 @@ N1MM, automatische Antworten.
 Bewusst abgewiesen statt stillschweigend geändert: Text über 80 Zeichen, mehrere Zeilen,
 `%`-Platzhalter. Ersetzte Zeichen meldet die Oberfläche vor dem Senden.
 
-## 4. Bekannte Grenzen des Originals
+## 4. Drift
+
+Das Modell ist `FT8_DRIFT_MODEL` (`pluto_tx/config.py`), gemessen im September 2026 auf 432 und 1296 MHz. `jtty_drift_hz_per_s()` nutzt es und wertet eine Pause ab 5 Minuten als Kaltstart. Die CLI führt den Zustand über Läufe hinweg in derselben Datei wie JS8. Ausgeglichen wird die Drift während der Sendung, nicht der absolute Versatz; dafür sucht der Empfänger ab 1 GHz breiter. Messwerte: [`TESTS.md`](TESTS.md).
+
+## 5. Bekannte Grenzen des Originals
 
 - Einzelne Fehldekodierungen sind auch bei WSJT-X möglich: In der Original-Beispielaufnahme
   erscheint bei −17 dB ein Rahmen `4>-P'`. Wir filtern das nicht nach.

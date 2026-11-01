@@ -266,7 +266,7 @@ def test_meshcore_tx_params():
 
 
 def test_jtty_params():
-    assert modes.normalize_params("tx", "jtty", {"text": "CQ"}) == {"text": "CQ", "tone_hz": 1500.0}
+    assert modes.normalize_params("tx", "jtty", {"text": "CQ"}) == {"text": "CQ", "tone_hz": 1500.0, "drift_comp": True}
     assert modes.normalize_params("rx", "jtty", {}) == {"freq_hz": 1500, "tolerance_hz": 50}
     assert modes.normalize_params("rx", "jtty", {"freq_hz": 2000, "tolerance_hz": 100}) == {"freq_hz": 2000, "tolerance_hz": 100}
     for direction, params in (("tx", {"text": "x" * 81}), ("tx", {"tone_hz": 100}), ("tx", {"other": 1}),

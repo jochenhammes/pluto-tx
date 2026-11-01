@@ -129,6 +129,17 @@ def _default_wav_path():
     return _DEFAULT_WAV if os.path.exists(_DEFAULT_WAV) else _ensure_placeholder_wav()
 
 
+def _opposite_chirp(audio, drift_hz_s, rate):
+    """Real audio whose frequency runs against a carrier drifting by drift_hz_s, so that the signal on the air stays put."""
+    n = len(audio)
+    spectrum = np.fft.fft(audio)
+    spectrum[1:(n + 1) // 2] *= 2.0
+    spectrum[(n + 1) // 2:] = 0.0
+    analytic = np.fft.ifft(spectrum)
+    t = np.arange(n) / rate
+    return (analytic * np.exp(-1j * np.pi * drift_hz_s * t * t)).real.astype(np.float32)
+
+
 class PlutoTxFlowgraph(gr.top_block):
     SRC_MIC = 0
     SRC_FILE = 1
@@ -709,6 +720,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._jtty_rendered_for = None
         self._jtty_audio = None
         self.jtty_duration_s = 0.0
+        self.jtty_drift_comp_hz_s = 0.0
         self.jtty_source = blocks.vector_source_f([0.0], repeat=False)
         self.jtty_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
         self.jtty_ssb_resampler = filter.rational_resampler_ccf(
@@ -1547,12 +1559,26 @@ class PlutoTxFlowgraph(gr.top_block):
             return str(e)
         return None
 
+    def jtty_drift_hz_per_s(self):
+        """ft8_drift_hz_per_s(), except that a long pause counts as a fresh start: JTTY has no slots, so its first
+        transmission can follow hours of idling."""
+        now = time.monotonic()
+        last = self._ft8_last_tx_end if self._ft8_last_tx_end is not None else self._run_started
+        if last is not None and now - last >= config.JTTY_DRIFT_COLD_PAUSE_S:
+            self._run_started = now
+            self._ft8_last_tx_end = None
+        return self.ft8_drift_hz_per_s()
+
     def _ensure_jtty_audio(self):
         problem = self.jtty_problem()
         if problem:
             raise ValueError(problem)
         pad = int(self.device.tx_end_loss_s * config.AUDIO_RATE)
-        self._jtty_audio = np.concatenate([self.jtty_rendered.audio * config.JTTY_AUDIO_LEVEL, np.zeros(pad, dtype=np.float32)])
+        audio = self.jtty_rendered.audio * config.JTTY_AUDIO_LEVEL
+        self.jtty_drift_comp_hz_s = self.jtty_drift_hz_per_s()
+        if self.jtty_drift_comp_hz_s:
+            audio = _opposite_chirp(audio, self.jtty_drift_comp_hz_s, config.AUDIO_RATE)
+        self._jtty_audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
         self.jtty_duration_s = len(self._jtty_audio) / config.AUDIO_RATE
 
     @property
@@ -2681,7 +2707,7 @@ class PlutoTxFlowgraph(gr.top_block):
         audio-injected signal into a conventional radio -- out of scope here
         regardless of rade_eoo_enabled). The SDR device is never touched, so
         there's nothing to power down."""
-        if self.mode == self.MODE_FT8 and self._keyed:
+        if self.mode in (self.MODE_FT8, self.MODE_JTTY) and self._keyed:
             self._ft8_last_tx_end = time.monotonic()
         if self.mode == self.MODE_JS8 and self._keyed:
             self._js8_after_frame()

@@ -259,7 +259,9 @@ Störstrahlung des Rechners die Empfindlichkeit deutlich: Die eigene Testsendung
 
 Der Modus **JTTY (WSJT-X)** braucht `install-jtty.sh`, sonst fehlt er in der Auswahl. Unten steht je Nachricht eine Zeile, die mitwächst: UTC, Audiofrequenz, SNR, Text. Nicht abgeschlossene Zeilen sind abgeblendet, `...` steht für verlorene Rahmen. Die Felder **Audio Hz** und **± Hz** legen fest, wo der Decoder sucht; er durchsucht nicht das ganze Band. **Treffpunkt** stellt nur die Frequenz ein, gesendet wird nichts.
 
-Senden: Text bis 80 Zeichen, die Zeile darunter zeigt vorab, was hinausgeht, mit Rahmenzahl und Dauer. **Aussenden** sendet genau einmal und enttastet selbst. NOTAUS bricht ab. Außerhalb der Amateurbänder wird abgewiesen.
+Senden: Text bis 80 Zeichen, die Zeile darunter zeigt vorab, was hinausgeht, mit Rahmenzahl und Dauer. **Aussenden** sendet genau einmal und enttastet selbst. NOTAUS bricht ab. Außerhalb der Amateurbänder wird abgewiesen. **Driftausgleich** (Standard an) gleicht die Drift des Pluto während der Sendung aus. Ab 1 GHz sucht der Empfänger mindestens ±500 Hz.
+
+Über Funk geprüft sind bisher nur Pluto+ → RTL-SDR mit `pluto-cli`; Web-TRX selbst lief nur gegen Fake-Geräte und den Simulator.
 
 ### MeshCore
 

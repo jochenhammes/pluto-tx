@@ -1990,6 +1990,7 @@ def _apply_tx_params(tb, mode: str, params: dict) -> None:
         tb.set_meshcore_preset(params["preset"])  # the rest is set at key time, see _meshcore_settings()
     elif mode == "jtty":
         tb.set_jtty(params["text"], params["tone_hz"])
+        tb.ft8_drift_comp_enabled = bool(params["drift_comp"])
     elif mode == "pocsag":
         _apply_pocsag_params(tb, params)
     elif mode == "rtty":

@@ -119,6 +119,77 @@ class TransmitTests(unittest.TestCase):
 
 
 @unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+class DriftTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from tests import fakes
+        fakes.register_tx()
+
+    def make(self, text="X" * 40):
+        return txf.PlutoTxFlowgraph(device_type="fake", mode=JTTY, frequency=1_296_200_000.0, jtty_text=text)
+
+    def test_chirp_runs_against_the_drift(self):
+        rate = config.AUDIO_RATE
+        t = np.arange(rate * 10) / rate
+        out = txf._opposite_chirp(np.cos(2 * np.pi * 1000.0 * t).astype(np.float32), -4.0, rate)
+        def peak(x):
+            spec = np.abs(np.fft.rfft(x * np.hanning(len(x)), 8 * len(x)))
+            return np.argmax(spec) * rate / (8.0 * len(x))
+        self.assertAlmostEqual(peak(out[:rate]), 1000.0 + 2.0, delta=0.5)
+        self.assertAlmostEqual(peak(out[-rate:]), 1000.0 + 38.0, delta=0.5)
+        self.assertAlmostEqual(float(np.max(np.abs(out[rate:-rate]))), 1.0, delta=0.02)
+
+    def test_compensated_signal_decodes_after_the_modelled_drift(self):
+        """A carrier that drifts as predicted: what arrives must stay on its frequency instead of sliding."""
+        fg = self.make()
+        with mock.patch.object(fg, "jtty_drift_hz_per_s", return_value=-4.0):
+            fg._ensure_jtty_audio()
+        audio = fg._jtty_audio
+        rate = config.AUDIO_RATE
+        t = np.arange(len(audio)) / rate
+        from scipy.signal import hilbert, resample_poly
+        on_air = (hilbert(audio) * np.exp(2j * np.pi * (0.5 * -4.0 * t * t))).real
+        finals = jtty_codec.decode_pcm(to_pcm(resample_poly(on_air, jtty_codec.SAMPLE_RATE, rate)))
+        self.assertEqual([m["text"] for m in finals], [fg.jtty_rendered.text])
+        self.assertAlmostEqual(finals[0]["freq"], 1500.0, delta=2.0)
+
+    def test_devices_without_a_model_are_not_chirped(self):
+        fg = self.make()
+        fg._ensure_jtty_audio()
+        self.assertEqual(fg.jtty_drift_comp_hz_s, 0.0)
+        np.testing.assert_array_almost_equal(fg._jtty_audio[:1000], fg.jtty_rendered.audio[:1000] * config.JTTY_AUDIO_LEVEL)
+
+    def test_switch_turns_it_off(self):
+        fg = self.make()
+        fg.ft8_drift_comp_enabled = False
+        with mock.patch.dict(config.FT8_DRIFT_MODEL, {"fake": config.FT8_DRIFT_MODEL["pluto"]}):
+            self.assertEqual(fg.jtty_drift_hz_per_s(), 0.0)
+
+    def test_a_long_pause_counts_as_cold(self):
+        model = config.FT8_DRIFT_MODEL["pluto"]
+        with mock.patch.dict(config.FT8_DRIFT_MODEL, {"fake": model}):
+            fg = self.make()
+            hz = 1_296_200_000.0 * 1e-9
+            cold = (model["tx_ppb_s"] + model["warmup_ppb_s"]) * hz
+            fg.restore_drift_history(3600.0, 60.0)  # warm
+            warm = fg.jtty_drift_hz_per_s()
+            self.assertLess(abs(warm), abs(cold) * 0.6)
+            fg.restore_drift_history(3600.0, config.JTTY_DRIFT_COLD_PAUSE_S + 1)
+            self.assertAlmostEqual(fg.jtty_drift_hz_per_s(), cold, delta=0.05)
+
+    def test_unkey_notes_the_end_of_the_transmission(self):
+        fg = self.make("TEST")
+        fg.start()
+        time.sleep(0.3)
+        fg.key_ptt()
+        time.sleep(0.2)
+        fg.unkey_ptt()
+        self.assertIsNotNone(fg._ft8_last_tx_end)
+        fg.stop()
+        fg.wait()
+
+
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
 class SoundcardTests(unittest.TestCase):
     """Soundcard and AIOC take the audio itself: the radio's USB makes the signal."""
 

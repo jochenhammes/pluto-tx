@@ -210,6 +210,9 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
         else:
             count = getattr(args, "repeat_count", 1) or 1
             interval = getattr(args, "repeat_interval", 0.0)
+            if mode == PlutoTxFlowgraph.MODE_JTTY:  # one process per message, as with JS8: the device stays warm between them
+                drift_key = _js8_drift_key(args)
+                session_start = js8_drift_restore(tb, drift_key)
             for i in range(count):
                 if i:
                     emitter.emit("repeat_wait", seconds=interval, next=i + 1, of=count)
@@ -236,6 +239,7 @@ def run_tx_session(tb, mode, args, emitter: Emitter):
                     time.sleep(tb.aprs_hold_s)
                 elif mode == PlutoTxFlowgraph.MODE_JTTY:
                     time.sleep(tb.jtty_hold_s)
+                    js8_drift_save(drift_key, session_start, time.time())
                 elif mode == PlutoTxFlowgraph.MODE_MESHCORE:
                     time.sleep(tb.meshcore_hold_s)
                 else:

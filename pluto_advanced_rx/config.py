@@ -511,6 +511,10 @@ JTTY_RX_FREQ_HZ = 1500
 JTTY_RX_TOLERANCE_HZ = 50
 JTTY_SEARCH_BAND_HZ = (200, 2800)
 JTTY_RX_LATENCY_S = FT8_RX_LATENCY_S
+# On 23 cm a cold Pluto starts around +300 Hz (docs/jtty/TESTS.md), which reaches the edge of those channels. Measured on
+# 15 min of a real band: under 2 % of real time at +-500 Hz, and few more false decodes.
+JTTY_HIGH_BAND_HZ = 1_000_000_000
+JTTY_HIGH_BAND_TOLERANCE_HZ = 500
 JTTY_QUEUE_S = 60             # of audio waiting for a stalled codec, before samples are dropped
 
 # --- APRS RX: FM, 12.5/25 kHz channel. Not locked: other regions use other frequencies.

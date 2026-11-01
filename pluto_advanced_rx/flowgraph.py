@@ -869,7 +869,9 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.jtty_band_filter = filter.fir_filter_ccc(1, firdes.complex_band_pass(
                 1.0, JTTY_RATE, lo, hi, config.JTTY_BAND_TRANS_HZ, window.WIN_HAMMING))
             self.jtty_to_real = blocks.complex_to_real()
-            self.jtty_receiver = JttyReceiver(on_jtty_update or (lambda update: None), rxfreq_hz=jtty_rxfreq_hz, tolerance_hz=jtty_tolerance_hz)
+            self.jtty_tolerance_hz = int(jtty_tolerance_hz)
+            self.jtty_receiver = JttyReceiver(on_jtty_update or (lambda update: None), rxfreq_hz=jtty_rxfreq_hz,
+                                              tolerance_hz=self._jtty_effective_tolerance())
             self.connect(self.if_filter, self.jtty_resampler)
             self.connect(self.jtty_resampler, self.jtty_band_filter)
             self.connect(self.jtty_band_filter, self.jtty_to_real)
@@ -999,9 +1001,21 @@ class AdvancedRxFlowgraph(gr.top_block):
         if self.adsl_channels:
             self.fft_probe.set_view_offset(config.ADSL_VIEW_CENTER_HZ - actual)
 
+    def _jtty_effective_tolerance(self):
+        return (max(self.jtty_tolerance_hz, config.JTTY_HIGH_BAND_TOLERANCE_HZ)
+                if self.nominal_freq_hz >= config.JTTY_HIGH_BAND_HZ else self.jtty_tolerance_hz)
+
+    def set_jtty_search(self, rxfreq_hz=None, tolerance_hz=None):
+        if self.jtty_receiver is None:
+            return
+        if tolerance_hz is not None:
+            self.jtty_tolerance_hz = int(tolerance_hz)
+        self.jtty_receiver.set_search(rxfreq_hz, self._jtty_effective_tolerance())
+
     def set_frequency(self, freq_hz: float):
         self.nominal_freq_hz = freq_hz
         self._retune()
+        self.set_jtty_search()
 
     def set_frequency_correction_ppm(self, ppm: float):
         """Live change of the oscillator correction; retunes the hardware, the

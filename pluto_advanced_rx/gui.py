@@ -2126,8 +2126,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._jtty_state.clear()
 
     def _on_jtty_search_changed(self, *_):
-        if self.tb is not None and self.tb.jtty_receiver is not None:
-            self.tb.jtty_receiver.set_search(self.jtty_freq_spin.value(), self.jtty_tolerance_spin.value())
+        if self.tb is not None:
+            self.tb.set_jtty_search(self.jtty_freq_spin.value(), self.jtty_tolerance_spin.value())
 
     def _update_jtty_signal_label(self):
         if self.tb is None:

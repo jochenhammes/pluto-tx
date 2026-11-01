@@ -769,6 +769,9 @@ JTTY_MAX_TEXT_LEN = 80                    # a receiver keeps no more of a messag
 JTTY_AUDIO_LEVEL = 0.7                    # constant-envelope signal, same headroom as FT8 and JS8
 JTTY_SOUNDCARD_LEVEL = 0.5                # into a radio's mic input, as FT8 and JS8
 JTTY_TX_TAIL_S = 0.4                      # hold after the audio ends (resampler/sink latency), then unkey
+# Pause after which a device counts as cold again for the drift model (measured on the air, docs/jtty/TESTS.md):
+# after 25 min the first frame on 1296 MHz drifted -4.4 Hz/s, like a freshly started device.
+JTTY_DRIFT_COLD_PAUSE_S = 300.0
 # WSJT-X's own list (models/FrequencyList.cpp, v3.3.0-beta5): provisional meeting places, USB dial, change with activity.
 JTTY_DIAL_FREQS_HZ = (1_839_000, 3_572_000, 7_078_000, 10_140_000, 14_090_000, 18_104_000, 21_090_000, 24_920_000,
                       28_090_000, 50_160_000, 144_160_000)

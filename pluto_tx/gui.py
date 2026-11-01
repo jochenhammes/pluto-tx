@@ -1056,6 +1056,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.jtty_tone_spin.setSuffix(" Hz")
         self.jtty_tone_spin.setToolTip("The lowest tone; a sound card sends this as audio into the radio, which must be on USB.")
         jtty_row.addWidget(self.jtty_tone_spin)
+        self.jtty_drift_check = QtWidgets.QCheckBox("Drift comp.")
+        self.jtty_drift_check.setChecked(True)
+        self.jtty_drift_check.setToolTip("Pre-compensate the device's oscillator drift during the transmission (matters most on 23 cm).")
+        jtty_row.addWidget(self.jtty_drift_check)
         jtty_layout.addLayout(jtty_row)
         self.jtty_info_label = QtWidgets.QLabel("")
         self.jtty_info_label.setWordWrap(True)
@@ -2157,6 +2161,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_jtty_controls(self):
         self.jtty_group_widget.setVisible(self._current_mode == PlutoTxFlowgraph.MODE_JTTY)
+        self.jtty_drift_check.setVisible(self.device_type_combo.currentData() in config.FT8_DRIFT_MODEL)
         self._update_jtty_info()
 
     def _on_jtty_changed(self, *_):
@@ -2182,6 +2187,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._current_mode != PlutoTxFlowgraph.MODE_JTTY:
             return True
         self.tb.set_jtty(self.jtty_text_edit.text(), self.jtty_tone_spin.value())
+        self.tb.ft8_drift_comp_enabled = self.jtty_drift_check.isChecked()
         problem = self.tb.jtty_problem()
         if problem:
             self.status_label.setText(f"Not sent: {problem}")

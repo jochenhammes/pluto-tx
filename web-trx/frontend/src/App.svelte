@@ -108,7 +108,7 @@
   let jttyDroppedS = 0;
   let jttyError = "";
   let rxJtty = { freq_hz: 1500, tolerance_hz: 50 };
-  let jttyTx = { text: "", tone_hz: 1500 };
+  let jttyTx = { text: "", tone_hz: 1500, drift_comp: true };
   let jttyPreview: { text?: string; canonical?: string; frames?: number; duration_s?: number; substituted?: boolean; problem?: string } | null = null;
   let jttyPreviewTimer: ReturnType<typeof setTimeout> | null = null;
   // APRS (backend aprs_update / aprs_sent)
@@ -1191,7 +1191,7 @@
     if (txMode === "m17") return { src_callsign: srcCallsign, dst_callsign: dstCallsign };
     if (txMode === "pocsag") return { ric, text: pocsagText };
     if (txMode === "aprs") return { ...aprsTx };
-    if (txMode === "jtty") return { text: jttyTx.text, tone_hz: Number(jttyTx.tone_hz) };
+    if (txMode === "jtty") return { text: jttyTx.text, tone_hz: Number(jttyTx.tone_hz), drift_comp: jttyTx.drift_comp };
     if (txMode === "meshcore") return { ...meshcoreTx, preset: Number(meshcoreTx.preset), role: Number(meshcoreTx.role) };
     if (txMode === "rtty") return { ...txRtty, text: rttyTxText };
     if (txMode === "digitext") return { ...digitext };
@@ -1887,6 +1887,7 @@
             {#each jttyOptions.dial_freqs_hz as hz}<option value={hz}>{(hz / 1e6).toFixed(3)} MHz</option>{/each}
           </select>
         </div>
+        <label class="check" title="Gleicht die Drift des Pluto-Oszillators während der Sendung aus, vor allem auf 23 cm wichtig."><input type="checkbox" bind:checked={jttyTx.drift_comp} on:change={selectTxMode} /> Driftausgleich</label>
       </div>
       {#if jttyPreview && jttyPreview.text === jttyTx.text}
         {#if jttyPreview.problem}

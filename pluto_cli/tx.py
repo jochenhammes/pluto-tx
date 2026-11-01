@@ -470,6 +470,8 @@ def add_jtty_subparser(subparsers):
     p.add_argument("--text", required=True, help=f"Message text, at most {tx_config.JTTY_MAX_TEXT_LEN} characters")
     p.add_argument("--tone-hz", type=float, default=tx_config.JTTY_DEFAULT_TONE_HZ,
                    help="Audio frequency of the lowest tone (default: %(default)s)")
+    p.add_argument("--no-drift-comp", action="store_true",
+                   help="Do not pre-compensate the device's oscillator drift during the transmission")
     p.set_defaults(func=run_jtty, freq=None)
 
 
@@ -480,6 +482,7 @@ def run_jtty(args):
         return 1
 
     def preflight(tb):
+        tb.ft8_drift_comp_enabled = not args.no_drift_comp
         problem = tb.jtty_problem()
         if problem:  # before any RF action
             emitter.error(problem)
