@@ -65,7 +65,8 @@ Mit dem festen LNA 16 / VGA 16 dB der CLI war der Empfang schwächer: auf 2 m ni
 
 **Folgerungen:**
 - Auf 23 cm können schon rund 0,65 ppm Quarzfehler aus dem Suchfenster führen. Abhilfe: Audio Hz im Empfänger auf das Signal im Wasserfall stellen oder die ppm-Korrektur setzen.
-- `pluto-cli rx --gain` wirkt beim HackRF nicht, die Stufen sind dort nicht einstellbar. In Web-TRX und den Desktop-Apps gehen sie.
+- Die CLI hatte beim HackRF keine einstellbaren Stufen und ignorierte `--gain` still. Inzwischen gibt es `--lna-gain`, `--vga-gain` und `--rf-amp`, und `--gain` wird dort abgewiesen.
+- Mit diesen Optionen (LNA 40, VGA 30 dB) über die CLI: 2 m bei 4 MS/s 4 von 4, SNR −3 bis −9 dB; 70 cm bei 4 MS/s 2 von 4 vollständig, in den anderen beiden fehlten Rahmen; 70 cm bei 2 MS/s 4 von 4, SNR bis +16 dB. Die Rate von 4 MS/s, der Standard des HackRF, verliert auf diesem Rechner offenbar Samples; Überläufe wurden dabei nicht gezählt.
 
 ## Offene Punkte
 

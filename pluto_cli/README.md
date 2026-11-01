@@ -159,8 +159,9 @@ Common flags (every mode):
 | `--uri URI` | Connection string; ignored for `audio`. For `--device rtlsdr`: a USB serial, or `host[:port]` of an `rtl_tcp` server (e.g. `192.168.178.34:1234`, port default 1234) to use a dongle on another machine |
 | `--freq HZ` | Receive frequency in Hz |
 | `--bandwidth HZ` | Device sample rate ("zoom" span), one the `--device` offers: Pluto `1000000/2500000/5000000/8000000/10000000`, RTL-SDR `960000/1024000/1200000/1400000/1800000/1920000/2048000/2400000/2560000/3200000`, HackRF `1000000/2000000/4000000/5000000/8000000/10000000`; omit for the device default |
-| `--gain-mode {manual,slow_attack,fast_attack,hybrid}` | AGC mode |
-| `--gain DB` | Manual gain, used when `--gain-mode manual` |
+| `--gain-mode {manual,slow_attack,fast_attack,hybrid}` | AGC mode; refused on a device without AGC (HackRF) |
+| `--gain DB` | Manual gain, used when `--gain-mode manual`; refused on a device without one single gain (HackRF) |
+| `--lna-gain DB`, `--vga-gain DB`, `--rf-amp` | HackRF's own stages: LNA 0-40 dB in steps of 8, VGA 0-62 dB in steps of 2 (both default 16), RF amplifier +14 dB (default off). Refused on other devices. For digimodes on the HackRF also give `--bandwidth 2000000`: at its default of 4 MS/s JTTY lost frames and about 10 dB on this machine |
 | `--audio-out STR` | Output device string, from `pluto-cli devices list-audio-outputs`; empty = system default |
 | `--duration SECONDS` | Omit to run until Ctrl-C |
 | `--digimode {psk31,rtty,meshtastic,meshcore,pocsag,ft8,js8,jtty,adsl,adsb,aprs}` | Also decode this digimode in parallel and print characters as they arrive (see below). Omit to disable digimode decoding entirely |

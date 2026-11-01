@@ -60,12 +60,25 @@ def add_common_args(parser):
              "Ignored (harmless) on other --device backends.",
     )
     parser.add_argument(
-        "--gain-mode", choices=rx_config.GAIN_MODES, default=rx_config.DEFAULT_GAIN_MODE,
-        help=f"AGC mode for AGC-capable devices (default: {rx_config.DEFAULT_GAIN_MODE})",
+        "--gain-mode", choices=rx_config.GAIN_MODES, default=None,
+        help=f"AGC mode for AGC-capable devices (default: {rx_config.DEFAULT_GAIN_MODE}); refused on a device without AGC, such as the HackRF",
     )
     parser.add_argument(
-        "--gain", type=float, default=rx_config.DEFAULT_MANUAL_GAIN_DB,
-        help=f"Manual gain in dB, used when --gain-mode manual (default: {rx_config.DEFAULT_MANUAL_GAIN_DB:.0f})",
+        "--gain", type=float, default=None,
+        help=f"Manual gain in dB, used when --gain-mode manual (default: {rx_config.DEFAULT_MANUAL_GAIN_DB:.0f}); "
+             "refused on a device without one single gain: the HackRF has --lna-gain, --vga-gain and --rf-amp",
+    )
+    parser.add_argument(
+        "--lna-gain", type=float, default=None, metavar="DB",
+        help="HackRF: LNA gain, 0-40 dB in steps of 8 (default: 16)",
+    )
+    parser.add_argument(
+        "--vga-gain", type=float, default=None, metavar="DB",
+        help="HackRF: VGA gain, 0-62 dB in steps of 2 (default: 16)",
+    )
+    parser.add_argument(
+        "--rf-amp", action="store_true",
+        help="HackRF: switch on the +14 dB RF amplifier (default: off). A strong signal nearby can damage it.",
     )
     parser.add_argument(
         "--freq-correction-ppm", type=float, default=0.0, metavar="PPM",
@@ -435,6 +448,11 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
                      regulatory=meshtastic_preset.regulatory_label)
 
     device_cls = rx_devices.DEVICE_REGISTRY[args.device]
+    try:
+        gain_values = _stage_gains(args, device_cls)
+    except ValueError as e:
+        emitter.error(str(e))
+        return 1
     connection = runtime.resolve_connection(device_cls, args.uri)
     runtime.probe_or_exit(device_cls, connection, emitter)
 
@@ -442,7 +460,9 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         return AdvancedRxFlowgraph(
             device_type=args.device, uri=connection, frequency=frequency,
             sample_rate=args.bandwidth, buffer_size=args.buffer_size,
-            gain_mode=args.gain_mode, manual_gain_db=args.gain,
+            gain_mode=args.gain_mode or rx_config.DEFAULT_GAIN_MODE,
+            manual_gain_db=rx_config.DEFAULT_MANUAL_GAIN_DB if args.gain is None else args.gain,
+            gain_values=gain_values,
             demod_mode=mode, audio_device=args.audio_out,
             active_digimode=args.digimode,
             psk31_tone_hz=args.psk31_tone_hz,
@@ -468,6 +488,32 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     runtime.install_safety_handlers(tb, emitter)
     runtime.run_rx_session(tb, args, emitter, filebroadcast_state=filebroadcast_state)
     return 0
+
+
+def _stage_gains(args, device_cls):
+    """--lna-gain, --vga-gain and --rf-amp as the flowgraph's gain_values. Raises ValueError with a reason for the operator:
+    an option the device has no use for must not be accepted and then do nothing."""
+    stages = {stage.name: stage for stage in device_cls.gain_stages}
+    if not any(stage.controls_agc for stage in device_cls.gain_stages):
+        for option, value in (("--gain", args.gain), ("--gain-mode", args.gain_mode)):
+            if value is not None:
+                own = ", ".join(f"--{name.lower()}-gain" if stage.kind != "bool" else "--rf-amp" for name, stage in stages.items())
+                raise ValueError(f"{option} has no effect on --device {args.device}" + (f", it has {own}" if own else ""))
+    values = {}
+    for option, name, value in (("--lna-gain", "LNA", args.lna_gain), ("--vga-gain", "VGA", args.vga_gain)):
+        if value is None:
+            continue
+        stage = stages.get(name)
+        if stage is None:
+            raise ValueError(f"{option} is not available on --device {args.device}")
+        if not stage.min_value <= value <= stage.max_value or (stage.step and (value - stage.min_value) % stage.step):
+            raise ValueError(f"{option} must be {stage.min_value:g}..{stage.max_value:g} dB in steps of {stage.step:g}")
+        values[name] = value
+    if args.rf_amp:
+        if "AMP" not in stages:
+            raise ValueError(f"--rf-amp is not available on --device {args.device}")
+        values["AMP"] = True
+    return values
 
 
 def _js8_submodes(name):
