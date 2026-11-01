@@ -261,7 +261,7 @@ Der Modus **JTTY (WSJT-X)** braucht `install-jtty.sh`, sonst fehlt er in der Aus
 
 Senden: Text bis 80 Zeichen, die Zeile darunter zeigt vorab, was hinausgeht, mit Rahmenzahl und Dauer. **Aussenden** sendet genau einmal und enttastet selbst. NOTAUS bricht ab. Außerhalb der Amateurbänder wird abgewiesen. **Driftausgleich** (Standard an) gleicht die Drift des Pluto während der Sendung aus. Ab 1 GHz sucht der Empfänger mindestens ±500 Hz.
 
-Über Funk geprüft sind bisher nur Pluto+ → RTL-SDR mit `pluto-cli`; Web-TRX selbst lief nur gegen Fake-Geräte und den Simulator.
+Über Funk geprüft sind Pluto+ und HackRF mit `pluto-cli` und dem Flowgraph; Web-TRX selbst lief nur gegen Fake-Geräte und den Simulator.
 
 ### MeshCore
 

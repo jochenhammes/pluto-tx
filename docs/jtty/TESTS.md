@@ -40,14 +40,37 @@ Gemessen wurde das Zusammenspiel von Pluto und RTL-SDR. Welcher Anteil von welch
 - **Warme Geräte:** Das Signal lag rund 350 Hz zu tief, also unter dem festen Suchkanal ab 1200 Hz.
 - **Dekodierung:** Der Decoder hat die Drift innerhalb der Sendung vertragen, auch über 16 Rahmen. Bei 1793 Hz lag das Signal aber schon am Rand des Suchkanals.
 
-**Maßnahmen, automatisch getestet, aber nicht mehr über Funk geprüft:**
-- Vorkompensation im Sender (`--no-drift-comp` schaltet sie ab), mit Kaltstart nach 5 Minuten Pause.
-- Suchfenster mindestens ±500 Hz ab 1 GHz.
+**Maßnahmen:**
+- Vorkompensation im Sender (`--no-drift-comp` schaltet sie ab), mit Kaltstart nach 5 Minuten Pause. Über Funk nur mit warmem Pluto gesehen, siehe HackRF unten: Die 16 Rahmen blieben auf 23 cm innerhalb weniger Hz. Der Kaltstart mit Ausgleich ist nicht gemessen.
+- Suchfenster mindestens ±500 Hz ab 1 GHz, automatisch getestet; 1000 bis 2000 Hz reichen aber nicht immer, siehe HackRF.
+
+Auch mit dem HackRF als Sender, ohne Pluto, fiel die Frequenz am frisch gestarteten RTL-SDR um rund 0,7 Hz/s. Ein Teil der Drift stammt also vom RTL-SDR.
+
+## HackRF One
+
+Sender mit VGA 0 dB ohne Verstärker, Empfänger RTL-SDR. Empfänger HackRF gegen Pluto+ bei −40 dB. Je Band und Richtung 4 Sendungen (ein Rahmen zweimal, drei Rahmen, längere Nachricht), 18:21–18:41 UTC.
+
+| Richtung | Band | Ergebnis | Signal bei |
+|---|---|---|---|
+| HackRF → RTL-SDR | 144,160 MHz | 4 von 4 | 1424 Hz |
+| HackRF → RTL-SDR | 432,150 MHz | 4 von 4 | 1282–1268 Hz |
+| HackRF → RTL-SDR | 1296,200 MHz, ohne Korrektur | 0 von 4 | knapp unter 1000 Hz, außerhalb des Fensters |
+| HackRF → RTL-SDR | 1296,200 MHz, Empfänger auf 700 ± 200 Hz | 4 von 4 | 999–949 Hz |
+| HackRF → RTL-SDR | 1296,200 MHz, Sender `--freq-correction-ppm -0.65` | 4 von 4 | 1778–1760 Hz |
+| Pluto+ → HackRF, LNA 40, VGA 30 dB | 144,160 MHz | 4 von 4 | 1523 Hz |
+| Pluto+ → HackRF, LNA 40, VGA 30 dB | 432,150 MHz | 4 von 4 | 1612–1615 Hz |
+| Pluto+ → HackRF, LNA 40, VGA 30 dB | 1296,200 MHz | 4 von 4 | 1852–1857 Hz |
+
+Mit dem festen LNA 16 / VGA 16 dB der CLI war der Empfang schwächer: auf 2 m nichts dekodiert, auf 70 cm ein Rahmen verloren oder ein Anfang abgeschnitten, auf 23 cm 4 von 4.
+
+**Folgerungen:**
+- Auf 23 cm können schon rund 0,65 ppm Quarzfehler aus dem Suchfenster führen. Abhilfe: Audio Hz im Empfänger auf das Signal im Wasserfall stellen oder die ppm-Korrektur setzen.
+- `pluto-cli rx --gain` wirkt beim HackRF nicht, die Stufen sind dort nicht einstellbar. In Web-TRX und den Desktop-Apps gehen sie.
 
 ## Offene Punkte
 
 - **Langlauf:** Mit einem seit 26 Minuten laufenden RTL-SDR kam die Serie um 17:47 UTC nicht an, und der CLI-Empfänger endete nach 1720 s mit Exit 134. Die Ursache ist unbekannt. Der Codec allein ist es nicht: 13 von 13 Nachrichten über 70 Minuten Audio im Schnelldurchlauf. Die Wiederholung wurde auf Wunsch des Betreibers abgebrochen.
-- **Nicht getestet:** Web-TRX und Desktop-Apps mit echter Hardware, HackRF, AIOC, Soundkarte an einem Funkgerät, das Debian-Paket mit JTTY, QSOs mit anderen Stationen.
+- **Nicht getestet:** Web-TRX und Desktop-Apps mit echter Hardware, AIOC, Soundkarte an einem Funkgerät, QSOs mit anderen Stationen.
 
 ## Soundkarte
 
