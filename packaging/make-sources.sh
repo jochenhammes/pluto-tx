@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The corresponding sources for a release (GPL): pluto-tx itself at HEAD and
 # every bundled component at its pinned commit (packaging/components.lock),
-# gr-m17 with its submodules, plus the Opus snapshot rade_c builds with.
+# gr-m17 with its submodules, plus the Opus snapshot rade_c builds with and
+# the WSJT-X source tarball wsjt-codec comes from, and FFTW, which that
+# release bundles as binaries it built itself.
 #
 # Usage: packaging/make-sources.sh <version> [<out-dir>]   -> <out-dir>/sources-<version>.tar.xz
 #
@@ -58,6 +60,13 @@ archive rade_c "$(src_clone rade_c "$RADE_C_REPO" "$RADE_C_COMMIT")" "$RADE_C_CO
 archive ft8_lib "$(src_clone ft8_lib "$FT8_LIB_REPO" "$FT8_LIB_COMMIT")" "$FT8_LIB_COMMIT"
 archive js8call "$(src_clone js8call "$JS8_REPO" "$JS8_COMMIT")" "$JS8_COMMIT"
 
+CODEC_SRC="wsjtx-${WSJT_CODEC_TAG#v}-src.tar.gz"
+mkdir -p "$TOP/wsjtx"
+wget -q --timeout=60 -O "$TOP/wsjtx/$CODEC_SRC" "https://github.com/WSJTX/wsjtx/releases/download/$WSJT_CODEC_TAG/$CODEC_SRC"
+echo "$WSJT_CODEC_SRC_SHA256  $TOP/wsjtx/$CODEC_SRC" | sha256sum -c -
+wget -q --timeout=60 -O "$TOP/wsjtx/fftw-$FFTW_VERSION.tar.gz" "https://www.fftw.org/fftw-$FFTW_VERSION.tar.gz"
+echo "$FFTW_SHA256  $TOP/wsjtx/fftw-$FFTW_VERSION.tar.gz" | sha256sum -c -
+
 OPUS_URL="$(sed -n 's/^set(OPUS_URL \(.*\))$/\1/p' "$TOP/rade_c/cmake/BuildOpus.cmake" | head -1)"
 OPUS_ZIP="$(ls "$HERE"/.cache/*/downloads/"$(basename "$OPUS_URL")" 2>/dev/null | head -1 || true)"
 [[ -n "$OPUS_ZIP" ]] || { OPUS_ZIP="$WORK/$(basename "$OPUS_URL")"; wget -q --timeout=30 -O "$OPUS_ZIP" "$OPUS_URL"; }
@@ -74,6 +83,8 @@ MODEL="$(ls "$HERE"/.cache/*/downloads/opus_data-*.tar.gz 2>/dev/null | head -1 
     echo "rade_c       $RADE_C_COMMIT  $RADE_C_REPO"
     echo "ft8_lib      $FT8_LIB_COMMIT  $FT8_LIB_REPO (built with common/monitor.c LOG_LEVEL LOG_WARN)"
     echo "js8call      $JS8_COMMIT  $JS8_REPO ($JS8_TAG)"
+    echo "wsjt-codec   $WSJT_CODEC_COMMIT  https://github.com/WSJTX/wsjtx ($WSJT_CODEC_TAG, its release binaries; wsjtx/$CODEC_SRC is that release's source tarball)"
+    echo "FFTW         $FFTW_VERSION  https://www.fftw.org/ (bundled with wsjt-codec, version read from its binary; wsjtx/fftw-$FFTW_VERSION.tar.gz)"
     echo "Opus         $(basename "$OPUS_ZIP")  $OPUS_URL (patched by rade_c, src/opus-nnet.*.diff)"
     if [[ -n "$MODEL" ]]; then
         echo "Opus model   $(basename "$MODEL")  sha256 $(sha256sum "$MODEL" | cut -d' ' -f1)"
