@@ -53,6 +53,13 @@ License: GPL-3.0-or-later
 Comment: Built from unmodified JS8Call-improved sources
  https://github.com/JS8Call-improved/JS8Call-improved plus tools/js8ref.
 
+Files: usr/share/pluto-tx/espdr/*
+Copyright: h0m3us3r (eSpDR), 2026 Jochen Hammes (esp32-sdr-trx)
+License: 0BSD
+Comment: Host side of https://github.com/jochenhammes/esp32-sdr-trx, see its NOTICE.
+ espdr/images holds the prebuilt firmware; at build time it is linked with the
+ vendor PHY library (libphy.a) of ESP-IDF v5.5, under Espressif's own terms.
+
 License: GPL-3.0-or-later
  On Debian systems, the complete text of the GNU General Public License
  version 3 can be found in /usr/share/common-licenses/GPL-3.
@@ -77,3 +84,15 @@ License: MIT
 
 License: public-domain
  See /usr/share/doc/pluto-tx/licenses/gr-m17/tinier-aes/LICENSE.
+
+License: 0BSD
+ Permission to use, copy, modify, and/or distribute this software for
+ any purpose with or without fee is hereby granted.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+ OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE
+ FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY
+ DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+ AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

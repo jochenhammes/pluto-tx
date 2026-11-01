@@ -27,8 +27,10 @@ Description: SDR transceiver apps for PlutoSDR, HackRF and RTL-SDR (GNU Radio)
  pluto-cli (headless) and Web-TRX (browser interface) for amateur radio
  on the ADALM-Pluto, HackRF One and RTL-SDR.
  .
- Modes: FM, SSB, FreeDV/RADE, M17, FT8, JS8, PSK31, RTTY, POCSAG,
- LoRa (Meshtastic, MeshCore), Digitext and file broadcast.
+ Modes: FM, SSB, FreeDV/RADE, M17, FT8, JS8, PSK31, RTTY, POCSAG, APRS,
+ LoRa (Meshtastic, MeshCore), Digitext and file broadcast; receive only:
+ ADS-L and ADS-B aircraft positions. The ESP32-S3 works as a transmitter
+ too, which additionally needs esptool 5 or newer.
  .
  This package includes prebuilt copies of gr-m17, gr-lora_sdr, rade_c,
  ft8_lib and JS8Call's decoder (js8ref), kept private in /usr/lib/pluto-tx.

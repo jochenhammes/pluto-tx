@@ -33,7 +33,7 @@ override_dh_auto_install:
 	cp -a $(COMPONENTS_STAGE)/usr $(PKG)/
 	# Python code, as in a checkout (web-trx/ next to pluto_tx/)
 	mkdir -p $(SHARE)/web-trx/scripts $(SHARE)/web-trx/backend $(SHARE)/web-trx/frontend
-	cp -a pluto_tx pluto_advanced_rx pluto_cli $(SHARE)/
+	cp -a pluto_tx pluto_advanced_rx pluto_cli espdr $(SHARE)/
 	rm -f $(SHARE)/pluto_tx/tx-stdin.py $(SHARE)/pluto_cli/README.md
 	printf 'VERSION = "%s"\n' "$(VERSION)" > $(SHARE)/pluto_tx/_version.py
 	touch $(SHARE)/.pluto-tx-package
