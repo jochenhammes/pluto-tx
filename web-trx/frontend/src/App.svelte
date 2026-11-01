@@ -17,6 +17,7 @@
   import { AudioPlayer, TxAudioInput, listAudioInputs, grantAudioInputs, decodeAudioFile, type TxSource,
            type PlayerStats } from "./lib/audio";
   import TxAudioSource from "./lib/TxAudioSource.svelte";
+  import JttyPanel, { type JttyRow } from "./lib/JttyPanel.svelte";
   import { checkSession, checkSessionOrNull, logout as apiLogout, fetchTxLog, type TxLogEntry } from "./lib/auth";
 
   // Filled from the backend's "hello" event (SessionBackend.device_types()):
@@ -26,7 +27,7 @@
   const MODE_LABELS: Record<string, string> = {
     fm: "FM", ssb: "SSB (USB)", lsb: "SSB (LSB)", m17: "M17", rade: "RADE",
     pocsag: "POCSAG", rtty: "RTTY", digitext: "Waterfall Writer", ft8: "FT8", js8: "JS8 (JS8Call)",
-    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)", aprs: "APRS", meshcore: "MeshCore (LoRa)",
+    adsl: "ADS-L (Luftfahrt, 868 MHz)", adsb: "ADS-B (Luftfahrt, 1090 MHz)", aprs: "APRS", meshcore: "MeshCore (LoRa)", jtty: "JTTY (WSJT-X)",
   };
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
@@ -37,7 +38,7 @@
   // whole transmission and unkeys on its own. Everything else takes the mic.
   // FT8: the click arms a series of slot-timed transmissions instead.
   // JS8: the click arms one message -- its frames go out in consecutive periods.
-  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8", "aprs", "meshcore"];
+  const ONE_SHOT_MODES = ["pocsag", "rtty", "digitext", "ft8", "js8", "jtty", "aprs", "meshcore"];
   const isAudioMode = (mode: string) => !ONE_SHOT_MODES.includes(mode);
 
   let waterfall: Waterfall;
@@ -96,6 +97,20 @@
   let adslDirty = false;
   let adslStatus: { channels: { channel_hz: number; packets: number; crc_failures: number }[] } | null = null;
   // ADS-B: the server sends only what changed, once per second.
+  // JTTY (backend jtty_update / jtty_sent / jtty_preview): a row per message, updated while its text grows
+  interface JttyOptions {
+    max_text_len: number; tone_range_hz: [number, number]; tone_default_hz: number; rx_freq_default_hz: number;
+    tolerance_default_hz: number; tolerance_range_hz: [number, number]; dial_freqs_hz: number[];
+  }
+  let jttyOptions: JttyOptions | null = null;
+  const jttyMessages = new Map<string, JttyRow>();
+  let jttyList: JttyRow[] = [];
+  let jttyDroppedS = 0;
+  let jttyError = "";
+  let rxJtty = { freq_hz: 1500, tolerance_hz: 50 };
+  let jttyTx = { text: "", tone_hz: 1500 };
+  let jttyPreview: { text?: string; canonical?: string; frames?: number; duration_s?: number; substituted?: boolean; problem?: string } | null = null;
+  let jttyPreviewTimer: ReturnType<typeof setTimeout> | null = null;
   // APRS (backend aprs_update / aprs_sent)
   const aprsStations = new Map<string, TrafficAircraft>();
   let aprsList: TrafficAircraft[] = [];
@@ -529,6 +544,7 @@
     if (rx.mode === "ft8" && typeof rx.mode_params?.decoder === "string") rxFt8Decoder = rx.mode_params.decoder;
     if (rx.mode === "meshcore" && typeof rx.mode_params?.preset === "number") meshcoreRxPreset = rx.mode_params.preset;
     if (rx.mode === "js8") rxJs8 = { ...rxJs8, ...(rx.mode_params as Partial<typeof rxJs8>) };
+    if (rx.mode === "jtty") rxJtty = { ...rxJtty, ...(rx.mode_params as Partial<typeof rxJtty>) };
     if (tx.mode === "rtty") {
       const { text, ...rest } = p as typeof txRtty & { text?: string };
       txRtty = { ...txRtty, ...rest };
@@ -538,6 +554,7 @@
     if (tx.mode === "rade" && typeof p.eoo === "boolean") radeEoo = p.eoo;
     if (tx.mode === "ft8") ft8Tx = { ...ft8Tx, ...(p as Partial<typeof ft8Tx>) };
     if (tx.mode === "js8") js8Tx = { ...js8Tx, ...(p as Partial<typeof js8Tx>) };
+    if (tx.mode === "jtty") jttyTx = { ...jttyTx, ...(p as Partial<typeof jttyTx>) };
     js8Armed = tx.js8_armed ? (js8Armed ?? { start_at: 0, starts: [], frames: 0, slot_utc: "…" }) : null;
     // Keyed or not is the server's word too: after a reconnect (e.g. the server ended a transmission while
     // this page was frozen) a stale local "keyed" must not survive.
@@ -560,6 +577,9 @@
       adslLoadSnapshot(e.adsl as { aircraft?: Record<string, unknown>[] } | undefined);
       adsbLoadSnapshot(e.adsb as { aircraft?: Record<string, unknown>[] } | undefined);
       meshcoreLoadSnapshot(e.meshcore as Record<string, unknown> | undefined);
+      jttyMessages.clear();
+      jttyTakeRows(((e.jtty as { messages?: JttyRow[] } | undefined)?.messages) ?? []);
+      jttyOptions = (e.mode_options as { jtty?: JttyOptions }).jtty ?? null;
       aprsLoadSnapshot(e.aprs as { stations?: Record<string, unknown>[]; packets?: Record<string, unknown>[]; auto_ack?: boolean } | undefined);
       if (fmOptions === null) {
         fmOptions = (e.mode_options as { fm: FmOptions }).fm;
@@ -678,6 +698,17 @@
     if (e.event === "rx_rate_locked") {
       rxRateLocked = (e.value as number | null) ?? null;
       rxSampleRate = rxRateLocked ?? (e.saved as number | undefined) ?? "";
+    }
+    if (e.event === "jtty_update") {
+      jttyDroppedS = Number(e.dropped_s ?? 0);
+      jttyError = String(e.error ?? "");
+      jttyTakeRows((e.messages ?? []) as JttyRow[]);
+    }
+    if (e.event === "jtty_sent") jttyTakeRows((e.messages ?? []) as JttyRow[]);
+    if (e.event === "jtty_preview" && e.text === jttyTx.text) jttyPreview = e as typeof jttyPreview;
+    if (e.event === "jtty_cleared") {
+      jttyMessages.clear();
+      jttyList = [];
     }
     if (e.event === "aprs_update") aprsOnUpdate(e);
     if (e.event === "aprs_sent") aprsOnSent(e);
@@ -909,6 +940,7 @@
   function selectRxMode(): void {
     const params = rxMode === "fm" ? { deemphasis: rxDeemphasis } : rxMode === "rtty" ? rxRtty
       : rxMode === "ft8" ? { decoder: rxFt8Decoder } : rxMode === "js8" ? { ...rxJs8 }
+      : rxMode === "jtty" ? { freq_hz: Math.round(Number(rxJtty.freq_hz)), tolerance_hz: Math.round(Number(rxJtty.tolerance_hz)) }
       : rxMode === "meshcore" ? { preset: Number(meshcoreRxPreset) } : {};
     client.request("select_mode", { direction: "rx", mode: rxMode, params });
   }
@@ -1010,6 +1042,15 @@
   $: meshcorePresets = features.meshcore?.presets ?? [];
   $: meshcoreHeadline = `${(rxFreqHz / 1e6).toFixed(3).replace(".", ",")} MHz · ${meshcoreStatus?.frames ?? 0} Pakete · ${meshcoreStatus?.hidden ?? 0} ausgeblendet`;
 
+  // -- JTTY --
+  function jttyTakeRows(rows: JttyRow[]): void {
+    for (const r of rows) jttyMessages.set(r.id, r);
+    jttyList = [...jttyMessages.values()];
+  }
+  function jttyAskPreview(): void {
+    if (jttyPreviewTimer) clearTimeout(jttyPreviewTimer);
+    jttyPreviewTimer = setTimeout(() => client.request("jtty_preview", { text: jttyTx.text, tone_hz: Number(jttyTx.tone_hz) }), 200);
+  }
   // -- APRS --
   function aprsStation(a: Record<string, unknown>, old: TrafficAircraft | undefined, trail: [number, number, number][]): TrafficAircraft {
     const time = a.position_time ? Number(a.position_time) : null;
@@ -1150,6 +1191,7 @@
     if (txMode === "m17") return { src_callsign: srcCallsign, dst_callsign: dstCallsign };
     if (txMode === "pocsag") return { ric, text: pocsagText };
     if (txMode === "aprs") return { ...aprsTx };
+    if (txMode === "jtty") return { text: jttyTx.text, tone_hz: Number(jttyTx.tone_hz) };
     if (txMode === "meshcore") return { ...meshcoreTx, preset: Number(meshcoreTx.preset), role: Number(meshcoreTx.role) };
     if (txMode === "rtty") return { ...txRtty, text: rttyTxText };
     if (txMode === "digitext") return { ...digitext };
@@ -1513,6 +1555,26 @@
         <div class="mic-error">Server-Uhr ist nicht per NTP synchronisiert — FT8 braucht ±1 s Genauigkeit.</div>
       {/if}
     {/if}
+    {#if rxMode === "jtty" && jttyOptions}
+      <div class="row">
+        <div class="field">
+          <label for="rxJttyDial">Treffpunkt</label>
+          <select id="rxJttyDial" value="" on:change={(e) => { if (e.currentTarget.value) tuneRx(Number(e.currentTarget.value)); e.currentTarget.value = ""; }}>
+            <option value="">wählen …</option>
+            {#each jttyOptions.dial_freqs_hz as hz}<option value={hz}>{(hz / 1e6).toFixed(3)} MHz</option>{/each}
+          </select>
+        </div>
+        <div class="field narrow">
+          <label for="rxJttyFreq" title="Dort sucht der Decoder, außerdem in zwei festen Kanälen bei 1200–1800 Hz. Er durchsucht nicht das ganze Band.">Audio Hz</label>
+          <input id="rxJttyFreq" type="number" min={jttyOptions.tone_range_hz[0]} max={jttyOptions.tone_range_hz[1]} step="10" bind:value={rxJtty.freq_hz} on:change={selectRxMode} />
+        </div>
+        <div class="field narrow">
+          <label for="rxJttyTol">± Hz</label>
+          <input id="rxJttyTol" type="number" min={jttyOptions.tolerance_range_hz[0]} max={jttyOptions.tolerance_range_hz[1]} step="10" bind:value={rxJtty.tolerance_hz} on:change={selectRxMode} />
+        </div>
+        <span class="dim">USB, Decoder von WSJT-X (Testversion)</span>
+      </div>
+    {/if}
     {#if rxMode === "js8" && js8Options}
       <div class="row ft8-row">
         <div class="field narrow">
@@ -1807,6 +1869,34 @@
         </label>
       {/if}
     </div>
+    {#if txMode === "jtty" && jttyOptions}
+      <div class="row">
+        <div class="field grow">
+          <label for="jttyText">Text ({jttyTx.text.length}/{jttyOptions.max_text_len})</label>
+          <input id="jttyText" type="text" maxlength={jttyOptions.max_text_len} placeholder="CQ {stationCall || 'DA2JH'} CQ" bind:value={jttyTx.text}
+            on:input={jttyAskPreview} on:change={selectTxMode} />
+        </div>
+        <div class="field narrow">
+          <label for="jttyTone">Audio Hz</label>
+          <input id="jttyTone" type="number" min={jttyOptions.tone_range_hz[0]} max={jttyOptions.tone_range_hz[1]} step="10" bind:value={jttyTx.tone_hz} on:change={selectTxMode} />
+        </div>
+        <div class="field">
+          <label for="txJttyDial">Treffpunkt</label>
+          <select id="txJttyDial" value="" on:change={(e) => { if (e.currentTarget.value) tuneTx(Number(e.currentTarget.value)); e.currentTarget.value = ""; }}>
+            <option value="">wählen …</option>
+            {#each jttyOptions.dial_freqs_hz as hz}<option value={hz}>{(hz / 1e6).toFixed(3)} MHz</option>{/each}
+          </select>
+        </div>
+      </div>
+      {#if jttyPreview && jttyPreview.text === jttyTx.text}
+        {#if jttyPreview.problem}
+          <div class="mic-error">{jttyPreview.problem}</div>
+        {:else}
+          <div class="dim">Gesendet wird: {jttyPreview.canonical} · {jttyPreview.frames} Rahmen · {jttyPreview.duration_s} s
+            {#if jttyPreview.substituted}· Zeichen, die JTTY nicht kennt, gehen als # hinaus{/if}</div>
+        {/if}
+      {/if}
+    {/if}
     {#if txMode === "rtty" && rttyOptions}
       <div class="row">
         <div class="field grow">
@@ -2154,6 +2244,8 @@
         <AprsMessages messages={aprsMessages} myCall={stationCall} notice={aprsNotice} autoAck={aprsAutoAck} canAutoAck={!!stationCall}
           onAutoAck={(enabled) => client.request("aprs_auto_ack", { enabled })} />
       </TrafficPanel>
+    {:else if rxMode === "jtty"}
+      <JttyPanel messages={jttyList} connected={rxConnected} droppedS={jttyDroppedS} error={jttyError} onClear={() => client.request("jtty_clear", {})} />
     {:else if rxMode === "js8" && rxConnected}
       <Js8Panel messages={js8Messages} periods={js8Periods} status={js8Status} myCall={stationCall}
         onPick={features.js8?.tx ? pickJs8 : null}

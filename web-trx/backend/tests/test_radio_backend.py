@@ -1218,3 +1218,79 @@ async def test_a_data_mode_still_sends_after_its_audio_chain_ended(tmp_path, mon
     assert [f["source"] for f in got] == ["DA2JH"]
     assert "keyed" in [n for n, _ in events]
     await b.disconnect("tx")
+
+
+needs_jtty = pytest.mark.skipif(not radio_backend.jtty_codec.available(), reason="wsjt-codec not installed (install-jtty.sh)")
+
+
+async def _jtty_tx(tmp_path, monkeypatch, freq_hz=432_150_000.0, **settings):
+    fakes = _repo_module("fakes")
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setitem(radio_backend.tx_devices.DEVICE_REGISTRY, "fake", fakes.FakeTxDevice)
+    monkeypatch.setitem(radio_backend.DEVICE_LABELS, "fake", "fake")
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    b.tx.device_type, b.tx.connection, b.tx.freq_hz = "fake", "x", freq_hz
+    await b.select_mode("tx", "jtty", modes.normalize_params("tx", "jtty", settings))
+    return b, events
+
+
+@needs_jtty
+async def test_jtty_goes_through_web_tx_and_web_rx(tmp_path, monkeypatch):
+    import numpy as np
+
+    text = "CQ DA2JH CQ WEB TRX"
+    b, events = await _jtty_tx(tmp_path, monkeypatch, text=text)
+    await b.ptt(True)
+    assert b.keyed
+    hold = b.tx.tb.jtty_hold_s
+    sent = next(f for n, f in events if n == "jtty_sent")
+    json.dumps(sent)
+    assert (sent["text"], sent["substituted"]) == (text, False)
+    assert sent["messages"][0]["direction"] == "tx"
+    await asyncio.sleep(hold + 0.5)
+    assert not b.keyed  # it unkeys on its own
+    iq = np.array(b.tx.tb.device.sink.data(), dtype=np.complex64)
+    await b.disconnect("tx")
+    on = np.flatnonzero(np.abs(iq) > 0.01)
+    rate = 2_500_000
+    pad = np.zeros(rate, np.complex64)
+    rx, rx_events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, np.concatenate([pad, iq[on[0]:on[-1]], pad]))
+    await rx.select_mode("rx", "jtty", modes.normalize_params("rx", "jtty", {}))
+    tb = rx.rx.tb
+    await asyncio.to_thread(tb.wait)
+    await rx._emit_jtty_update(tb)
+    update = next(f for n, f in rx_events if n == "jtty_update")
+    json.dumps(update)
+    await rx.disconnect("rx")
+    rows = rx.jtty_snapshot()["messages"]
+    assert [(r["text"], r["state"], r["direction"]) for r in rows] == [(text, "complete", "rx")]
+    await rx.jtty_clear()
+    assert rx.jtty_snapshot()["messages"] == []
+
+
+@needs_jtty
+@pytest.mark.parametrize("text,freq_hz,why", [("", 432_150_000.0, "empty"), ("TEST", 869_600_000.0, "amateur bands")])
+async def test_jtty_is_refused_before_any_rf_action(tmp_path, monkeypatch, text, freq_hz, why):
+    b, events = await _jtty_tx(tmp_path, monkeypatch, freq_hz=freq_hz, text=text)
+    with pytest.raises(SessionError, match=why):
+        await b.ptt(True)
+    assert not b.keyed
+    assert not [n for n, _f in events if n in ("keyed", "jtty_sent")]
+    await b.disconnect("tx")
+
+
+@needs_jtty
+async def test_jtty_preview_says_what_goes_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    b, *_ = make_backend()
+    p = await b.jtty_preview("cq da2jh cq", 1500.0)
+    assert (p["canonical"], p["frames"], p["duration_s"], p["substituted"]) == ("CQ DA2JH CQ", 1, 1.89, False)
+    assert (await b.jtty_preview("hallo ä", 1500.0))["substituted"] is True
+    assert "problem" in await b.jtty_preview("", 1500.0)
+
+
+def test_jtty_without_the_codec_is_not_offered(monkeypatch):
+    monkeypatch.setattr(radio_backend.jtty_codec, "available", lambda: False)
+    assert not radio_backend._rx_mode_available("jtty")
+    assert not radio_backend._tx_mode_available("jtty")

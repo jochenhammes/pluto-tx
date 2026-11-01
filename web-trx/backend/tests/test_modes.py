@@ -263,3 +263,24 @@ def test_meshcore_tx_params():
                 {"text": "x" * 181}, {"name": "x" * 33}, {"with_position": 1}):
         with pytest.raises(ValueError):
             modes.normalize_params("tx", "meshcore", bad)
+
+
+def test_jtty_params():
+    assert modes.normalize_params("tx", "jtty", {"text": "CQ"}) == {"text": "CQ", "tone_hz": 1500.0}
+    assert modes.normalize_params("rx", "jtty", {}) == {"freq_hz": 1500, "tolerance_hz": 50}
+    assert modes.normalize_params("rx", "jtty", {"freq_hz": 2000, "tolerance_hz": 100}) == {"freq_hz": 2000, "tolerance_hz": 100}
+    for direction, params in (("tx", {"text": "x" * 81}), ("tx", {"tone_hz": 100}), ("tx", {"other": 1}),
+                              ("rx", {"freq_hz": 3000}), ("rx", {"tolerance_hz": 1}), ("rx", {"other": 1})):
+        with pytest.raises(ValueError):
+            modes.normalize_params(direction, "jtty", params)
+
+
+@pytest.mark.skipif(not PLUTO_TX_CONFIG.exists(), reason="not inside a pluto-tx checkout")
+def test_jtty_tables_match_pluto_tx():
+    spec = importlib.util.spec_from_file_location("pluto_tx_config", PLUTO_TX_CONFIG)
+    cfg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cfg)
+    assert modes.JTTY_MAX_TEXT_LEN == cfg.JTTY_MAX_TEXT_LEN
+    assert modes.JTTY_TONE_RANGE_HZ == tuple(cfg.JTTY_TONE_RANGE_HZ)
+    assert modes.JTTY_TONE_DEFAULT_HZ == cfg.JTTY_DEFAULT_TONE_HZ
+    assert modes.JTTY_DIAL_FREQS_HZ == tuple(cfg.JTTY_DIAL_FREQS_HZ)

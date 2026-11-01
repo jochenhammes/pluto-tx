@@ -21,6 +21,7 @@ und Stoppen geht per `web-trx start|stop`, mit den Skripten unter
     Sprachverarbeitung des Browsers abschaltbar) oder eine Audiodatei, die am Ende von selbst enttastet.
   - Details: [`docs/BROWSER_AUDIO.md`](docs/BROWSER_AUDIO.md).
 - **POCSAG senden:** eine Nachricht an eine RIC.
+- **JTTY (experimentell):** Tastaturmodus aus WSJT-X, Nachrichten wachsen beim Empfang mit, Senden von Hand.
 - **APRS senden:** Bake oder Nachricht, ein Paket je Klick.
 - **MeshCore:** Nodes auf der Karte, Kanäle und Direktnachrichten, Empfang und Senden von Hand.
 - **Sicherheit:**
@@ -254,6 +255,12 @@ NOTAUS aus und antwortet nur, wenn der Sender auf APRS und auf der Empfangsfrequ
 Sendeweg und Empfang sind einzeln über Funk geprüft (`docs/aprs/SPEC.md`). Stehen Rechner, Pluto und RTL-SDR nebeneinander, senkt die
 Störstrahlung des Rechners die Empfindlichkeit deutlich: Die eigene Testsendung mit −40 dB wurde dann einzeln nicht dekodiert.
 
+### JTTY
+
+Der Modus **JTTY (WSJT-X)** braucht `install-jtty.sh`, sonst fehlt er in der Auswahl. Unten steht je Nachricht eine Zeile, die mitwächst: UTC, Audiofrequenz, SNR, Text. Nicht abgeschlossene Zeilen sind abgeblendet, `...` steht für verlorene Rahmen. Die Felder **Audio Hz** und **± Hz** legen fest, wo der Decoder sucht; er durchsucht nicht das ganze Band. **Treffpunkt** stellt nur die Frequenz ein, gesendet wird nichts.
+
+Senden: Text bis 80 Zeichen, die Zeile darunter zeigt vorab, was hinausgeht, mit Rahmenzahl und Dauer. **Aussenden** sendet genau einmal und enttastet selbst. NOTAUS bricht ab. Außerhalb der Amateurbänder wird abgewiesen.
+
 ### MeshCore
 
 Der Modus **MeshCore (LoRa)** setzt die Frequenz aus dem Preset, sie ist in diesem Modus nicht änderbar; beim Verlassen kommt die alte zurück. Das gilt für Empfang und Senden. Die Karte zeigt Nodes mit Position, die Tabelle alle, die sich per Advert gemeldet haben. Daneben stehen die Nachrichten. Nicht prüfbare Pakete sind ausgeblendet und per Schalter sichtbar.
@@ -268,7 +275,7 @@ Der Modus **MeshCore (LoRa)** setzt die Frequenz aus dem Preset, sie ist in dies
 
 **Gesendet über Funk:** Pluto+ über Web-TRX, −40 dB, Route Direct: 2 Adverts und 1 Public-Text. Der RTL-SDR las alle 3 mit gültiger Signatur beziehungsweise MAC. Am echten Heltec V3 erschienen in der App der Kontakt und der Text.
 
-**Pluto als Sender und Empfänger zugleich:** Die eigene Sendung über denselben Pluto wurde in 5 von 6 Fällen dekodiert (zuvor 0 von 3). Dafür läuft der Sender in Datenmodi (MeshCore, APRS, POCSAG, RTTY, FT8, JS8, Waterfall Writer) ohne seine Audio-Kette, die den Empfang im selben Prozess Samples kostete. Ein Wechsel zwischen Daten- und Sprachmodus baut den Sender deshalb neu auf und dauert einen Moment. In Sprachmodi (FM, SSB, M17, RADE) läuft die Audio-Kette weiter; dort sind ohne Sendung rund 5–15 % Sample-Verlust am Pluto-RX gemessen. Solange RX und TX am Pluto hängen, läuft der Empfänger auf der Rate des Senders, 2,5 MS/s.
+**Pluto als Sender und Empfänger zugleich:** Die eigene Sendung über denselben Pluto wurde in 5 von 6 Fällen dekodiert (zuvor 0 von 3). Dafür läuft der Sender in Datenmodi (MeshCore, APRS, POCSAG, RTTY, FT8, JS8, JTTY, Waterfall Writer) ohne seine Audio-Kette, die den Empfang im selben Prozess Samples kostete. Ein Wechsel zwischen Daten- und Sprachmodus baut den Sender deshalb neu auf und dauert einen Moment. In Sprachmodi (FM, SSB, M17, RADE) läuft die Audio-Kette weiter; dort sind ohne Sendung rund 5–15 % Sample-Verlust am Pluto-RX gemessen. Solange RX und TX am Pluto hängen, läuft der Empfänger auf der Rate des Senders, 2,5 MS/s.
 
 **Nicht geprüft:** langer Text, private Kanäle und Direktnachrichten über Funk, Flood-Sendungen, HackRF als Sender, HackRF als Empfänger, das zweite Preset.
 

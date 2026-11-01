@@ -256,3 +256,39 @@ async def test_meshcore_receive_channels_and_send():
     assert not b.keyed
     await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
     assert b.tx.freq_hz == before
+
+
+async def test_jtty_receive_grows_and_send():
+    b, events, _spec, _audio = make_backend()
+    now = 1_800_000_000.0
+    for tick in range(4):
+        for update in b.fake_jtty_updates(tick, now):
+            b._jtty().on_update(update)
+    rows = b.jtty_snapshot()["messages"]
+    assert [(r["text"], r["state"]) for r in rows] == [("CQ DL1ABC HALLO 73", "complete")]
+    b._jtty().take_changed()
+    await b.connect("tx", "sim", "")
+    await b.select_mode("tx", "jtty", modes.normalize_params("tx", "jtty", {"text": "cq da2jh"}))
+    await b.ptt(True)
+    sent = next(f for n, f in events if n == "jtty_sent")
+    assert sent["text"] == "CQ DA2JH"
+    assert sent["messages"][0]["direction"] == "tx"
+    await b.ptt(False, "ptt_off")
+    await b.jtty_clear()
+    assert b.jtty_snapshot()["messages"] == []
+
+
+async def test_jtty_empty_text_is_refused():
+    b, _events, _spec, _audio = make_backend()
+    await b.connect("tx", "sim", "")
+    await b.select_mode("tx", "jtty", modes.normalize_params("tx", "jtty", {"text": "  "}))
+    with pytest.raises(SessionError):
+        await b.ptt(True)
+    assert not b.keyed
+
+
+async def test_jtty_preview_says_what_goes_out():
+    b, _events, _spec, _audio = make_backend()
+    assert (await b.jtty_preview("", 1500.0))["problem"]
+    assert (await b.jtty_preview("x" * 81, 1500.0))["problem"]
+    assert (await b.jtty_preview("hello", 1500.0))["frames"] == 1

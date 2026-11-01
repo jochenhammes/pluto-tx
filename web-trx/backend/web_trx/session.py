@@ -129,6 +129,16 @@ class SessionBackend(abc.ABC):
         """Nodes and packets heard so far and the channel names, for a client joining later. Never a channel key."""
         return {}
 
+    async def jtty_clear(self) -> None:
+        raise SessionError("JTTY is not available")
+
+    async def jtty_preview(self, text: str, tone_hz: float) -> dict:
+        raise SessionError("JTTY is not available")
+
+    def jtty_snapshot(self) -> dict:
+        """JTTY messages heard so far, for a client joining later (sent with 'hello')."""
+        return {}
+
     async def aprs_clear(self) -> None:
         raise SessionError("APRS is not available")
 
@@ -218,7 +228,7 @@ class SessionManager:
     REQUESTS = (
         "scan", "connect", "disconnect", "select_mode", "tune", "set_gain",
         "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "adsl_clear", "adsb_clear", "aprs_clear", "aprs_auto_ack", "meshcore_clear", "meshcore_options", "meshcore_channel_set",
-        "meshcore_channel_delete", "hb_ack",
+        "meshcore_channel_delete", "jtty_clear", "jtty_preview", "hb_ack",
     )
 
     def __init__(self, backend: SessionBackend, tx_log=None):
@@ -367,6 +377,7 @@ class SessionManager:
                 "adsl": self.backend.adsl_snapshot(),
                 "adsb": self.backend.adsb_snapshot(),
                 "aprs": self.backend.aprs_snapshot(),
+                "jtty": self.backend.jtty_snapshot(),
                 "meshcore": self.backend.meshcore_snapshot(),
                 **self.backend.snapshot(),
             })
@@ -462,6 +473,11 @@ class SessionManager:
             await b.meshcore_channel_set(str(params.get("name", "")), str(params.get("secret", "")))
         elif request == "meshcore_channel_delete":
             await b.meshcore_channel_delete(str(params.get("name", "")))
+        elif request == "jtty_clear":
+            await b.jtty_clear()
+            await self._emit_event("jtty_cleared", {})
+        elif request == "jtty_preview":
+            await self._emit_event("jtty_preview", await b.jtty_preview(str(params.get("text", ""))[:modes.JTTY_MAX_TEXT_LEN + 1], float(params.get("tone_hz", modes.JTTY_TONE_DEFAULT_HZ))))
         elif request == "aprs_clear":
             await b.aprs_clear()
             await self._emit_event("aprs_cleared", {})

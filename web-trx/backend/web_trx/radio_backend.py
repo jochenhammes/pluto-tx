@@ -52,9 +52,10 @@ from pluto_advanced_rx.ft8_decoder import available_backends as ft8_rx_backends
 from pluto_advanced_rx.ft8_decoder import sender_call as ft8_sender_call
 from pluto_advanced_rx.js8_assembly import Js8Assembler
 from pluto_advanced_rx.js8_decoder import available_backends as js8_rx_backends
+from pluto_advanced_rx.jtty_state import JttyState
 from pluto_advanced_rx.meshcore_state import MeshcoreState
 from pluto_advanced_rx.pocsag_state import PocsagState
-from pluto_tx import adsl_codec, aprs_codec
+from pluto_tx import adsl_codec, aprs_codec, jtty_codec
 from pluto_tx import config as tx_config
 from pluto_tx import devices as tx_devices
 from pluto_tx import ft8 as tx_ft8
@@ -100,13 +101,15 @@ RX_DEMOD_MODES = {
     "rtty": AdvancedRxFlowgraph.MODE_SSB,
     "ft8": AdvancedRxFlowgraph.MODE_SSB,
     "js8": AdvancedRxFlowgraph.MODE_SSB,
+    "jtty": AdvancedRxFlowgraph.MODE_SSB,
     "adsl": AdvancedRxFlowgraph.MODE_FM,  # data only: its audio is never sent anywhere
     "adsb": AdvancedRxFlowgraph.MODE_FM,  # likewise
     "aprs": AdvancedRxFlowgraph.MODE_FM,  # unlike those two audible, like plain FM
     "meshcore": AdvancedRxFlowgraph.MODE_FM,  # data only; LoRa chirps are nothing to listen to
 }
-RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl", "adsb": "adsb", "aprs": "aprs", "meshcore": "meshcore"}
+RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "jtty": "jtty", "adsl": "adsl", "adsb": "adsb", "aprs": "aprs", "meshcore": "meshcore"}
 ADSL_STATUS_S = 1.0
+JTTY_UPDATE_S = 0.5  # a frame takes 1.9 s; the text should show soon after it arrived
 MESHCORE_UPDATE_S = 1.0
 MESHCORE_RTL_GAIN_DB = 40.0  # the RTL-SDR's 20 dB default is too low for this, as for ADS-L and ADS-B
 MESHCORE_CHANNELS_FILE = "meshcore_channels.json"  # next to the settings, 0600: holds channel keys
@@ -129,7 +132,7 @@ def rx_bands() -> dict[str, list[float]]:
     m17_half = rx_config.M17_DEVIATION_HZ + rx_config.M17_SYMBOL_RATE
     return {
         "fm": [-fm_half, fm_half], "pocsag": [-fm_half, fm_half], "aprs": [-fm_half, fm_half],
-        "ssb": [ssb_lo, ssb_hi], "rtty": [ssb_lo, ssb_hi],
+        "ssb": [ssb_lo, ssb_hi], "rtty": [ssb_lo, ssb_hi], "jtty": [ssb_lo, ssb_hi],
         "lsb": [-ssb_hi, -ssb_lo],
         "rade": [rx_config.RADE_OFDM_LOW_HZ, rx_config.RADE_OFDM_HIGH_HZ],
         "m17": [-m17_half, m17_half],
@@ -139,7 +142,7 @@ def rx_bands() -> dict[str, list[float]]:
         # The narrowest preset: rx_bands() knows modes, not their parameters.
         "meshcore": [-rx_config.MESHCORE_PRESETS[0].bandwidth_hz / 2, rx_config.MESHCORE_PRESETS[0].bandwidth_hz / 2],
     }
-SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8", "js8")  # squelch probe after the SSB filter
+SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8", "js8", "jtty")  # squelch probe after the SSB filter
 FT8_STATUS_S = 15.0  # ft8_status at least once per slot, and on every change
 JS8_STATUS_S = 15.0
 RTTY_FLUSH_S = 0.2
@@ -164,13 +167,14 @@ TX_MODES = {
     "digitext": PlutoTxFlowgraph.MODE_DIGITEXT,
     "ft8": PlutoTxFlowgraph.MODE_FT8,
     "js8": PlutoTxFlowgraph.MODE_JS8,
+    "jtty": PlutoTxFlowgraph.MODE_JTTY,
     "aprs": PlutoTxFlowgraph.MODE_APRS,
     "meshcore": PlutoTxFlowgraph.MODE_MESHCORE,
 }
 # One-shot modes render their whole transmission at key time and unkey on
 # their own (pluto_cli.runtime.run_tx_session); all others take the
 # browser microphone while PTT is held. FT8 is one too, keyed by its series.
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8", "aprs", "meshcore")
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8", "jtty", "aprs", "meshcore")
 ONE_SHOT_TAIL_S = 0.3
 
 # TX audio processing (FM/SSB/LSB; M17 bypasses this chain in pluto-tx).
@@ -318,6 +322,7 @@ class GnuRadioBackend(SessionBackend):
         self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
         self._adsb_state = AdsbState()  # likewise
         self._aprs_state = AprsState()  # likewise
+        self._jtty_state = JttyState()  # likewise
         self._meshcore_state = MeshcoreState()  # likewise
         self._meshcore_state.set_hide_unverified(True)
         self._meshcore_channels: dict[str, str] = {}  # name -> key (hex); stays on this side, see meshcore_snapshot()
@@ -369,6 +374,7 @@ class GnuRadioBackend(SessionBackend):
                 "js8": {"tx": _tx_mode_available("js8"), "rx_backends": js8_rx_backends() if JS8_AVAILABLE else [],
                         "submodes": list(tx_js8.SPEEDS), "jsc": tx_js8_message.jsc_available(),
                         "clock_synced": clock.ntp_synchronized()},
+                "jtty": {"available": jtty_codec.available()},
                 "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)]}
 
     def device_types(self) -> dict[str, list[list[str]]]:
@@ -842,6 +848,9 @@ class GnuRadioBackend(SessionBackend):
             on_adsl_packet=self._on_adsl_packet,
             on_adsb_message=self._adsb_state.on_message,
             on_aprs_frame=self._on_aprs_frame,
+            on_jtty_update=self._jtty_state.on_update,
+            jtty_rxfreq_hz=params.get("freq_hz", rx_config.JTTY_RX_FREQ_HZ),
+            jtty_tolerance_hz=params.get("tolerance_hz", rx_config.JTTY_RX_TOLERANCE_HZ),
             on_meshcore_packet=self._meshcore_state.on_frame,
             meshcore_preset_index=params.get("preset", 0),
             on_m17_fields=self._on_m17_fields,
@@ -1095,6 +1104,24 @@ class GnuRadioBackend(SessionBackend):
             "frames": frames, "invalid": invalid, "hidden": hidden, "decoded": tb.meshcore_deframer.frames_decoded,
         })
 
+    def jtty_snapshot(self) -> dict:
+        return {"messages": self._jtty_state.get_rows()}
+
+    async def jtty_clear(self) -> None:
+        self._jtty_state.clear()
+
+    async def jtty_preview(self, text: str, tone_hz: float) -> dict:
+        """What a press would send, or why not, before it is pressed."""
+        try:
+            r = await asyncio.to_thread(jtty_codec.render, text, tone_hz)
+        except ValueError as e:
+            return {"text": text, "problem": str(e)}
+        return {"text": text, "canonical": r.text, "frames": len(r.frames), "duration_s": round(r.duration_s, 2), "substituted": r.substituted}
+
+    async def _emit_jtty_update(self, tb) -> None:
+        recv = tb.jtty_receiver
+        await self._emit_event("jtty_update", {"messages": self._jtty_state.take_changed(), "dropped_s": round(recv.dropped_samples / jtty_codec.SAMPLE_RATE, 1), "error": recv.last_error})
+
     def _on_aprs_frame(self, frame: dict) -> None:
         row = self._aprs_state.on_frame(frame)  # GNU Radio thread
         with self._aprs_lock:
@@ -1188,7 +1215,7 @@ class GnuRadioBackend(SessionBackend):
         (pluto_cli.runtime.run_rx_session does it in a sleep loop): RTTY
         AFC steps (nothing inside the flowgraph calls them), batched RTTY
         text, RADE sync/SNR status."""
-        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = last_aprs = last_meshcore = 0.0
+        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = last_aprs = last_meshcore = last_jtty = 0.0
         last_rade_state = last_ft8_state = last_js8_state = None
         while True:
             await asyncio.sleep(RTTY_FLUSH_S)
@@ -1207,6 +1234,9 @@ class GnuRadioBackend(SessionBackend):
                 if mode == "meshcore" and now - last_meshcore >= MESHCORE_UPDATE_S:
                     last_meshcore = now
                     await self._emit_meshcore_update(tb)
+                if mode == "jtty" and tb.jtty_receiver is not None and now - last_jtty >= JTTY_UPDATE_S:
+                    last_jtty = now
+                    await self._emit_jtty_update(tb)
                 if mode == "aprs" and tb.aprs_deframer is not None and now - last_aprs >= APRS_UPDATE_S:
                     last_aprs = now
                     await self._emit_aprs_update(tb)
@@ -1447,6 +1477,12 @@ class GnuRadioBackend(SessionBackend):
                 "duty_used_s": round(used_s, 1), "duty_budget_s": round(budget_s, 1),
             })
             self._unkey_task = asyncio.create_task(self._auto_unkey_after(tb.meshcore_hold_s))
+        elif mode == "jtty":
+            r = tb.jtty_rendered
+            self._jtty_state.add_sent(r.text, tb.jtty_tone_hz)
+            await self._emit_event("jtty_sent", {"text": r.text, "frames": len(r.frames), "duration_s": round(tb.jtty_duration_s, 2),
+                                                 "substituted": r.substituted, "messages": self._jtty_state.take_changed()})
+            self._unkey_task = asyncio.create_task(self._auto_unkey_after(tb.jtty_hold_s))
         elif mode == "aprs":
             if tb.aprs_kind == "message":
                 self._aprs_message_number += 1
@@ -1787,12 +1823,14 @@ def _rx_mode_available(mode: str) -> bool:
         return bool(ft8_rx_backends())
     if mode == "js8":
         return JS8_AVAILABLE and bool(js8_rx_backends())
+    if mode == "jtty":
+        return jtty_codec.available()
     return {"m17": RX_M17_AVAILABLE, "rade": RX_RADE_AVAILABLE}.get(mode, True)
 
 
 def _tx_mode_available(mode: str) -> bool:
     return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE, "ft8": TX_FT8_AVAILABLE,
-            "js8": JS8_AVAILABLE, "meshcore": TX_MESHCORE_AVAILABLE}.get(mode, True)
+            "js8": JS8_AVAILABLE, "meshcore": TX_MESHCORE_AVAILABLE, "jtty": jtty_codec.available()}.get(mode, True)
 
 
 def _js8_rx_submodes(name: str) -> tuple:
@@ -1950,6 +1988,8 @@ def _apply_tx_params(tb, mode: str, params: dict) -> None:
     # params are already validated/normalised by modes.normalize_params().
     if mode == "meshcore":
         tb.set_meshcore_preset(params["preset"])  # the rest is set at key time, see _meshcore_settings()
+    elif mode == "jtty":
+        tb.set_jtty(params["text"], params["tone_hz"])
     elif mode == "pocsag":
         _apply_pocsag_params(tb, params)
     elif mode == "rtty":
@@ -1999,6 +2039,8 @@ def _tx_problem(tb, mode: str) -> str | None:
         return tb.pocsag_problem()
     if mode == "aprs":
         return tb.aprs_problem()
+    if mode == "jtty":
+        return tb.jtty_problem()
     if mode == "ft8":
         return tb.ft8_problem()
     if mode == "js8":

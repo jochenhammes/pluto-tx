@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import ft8_series, js8_series, pluto_path, station
+from . import ft8_series, js8_series, modes, pluto_path, station
 from .session import AudioFrame, SessionBackend, SessionError, SpectrumFrame
 
 FFT_SIZE = 2048
@@ -33,8 +33,8 @@ AUDIO_TONE_HZ = {"fm": 600.0, "ssb": 900.0, "lsb": 750.0, "m17": 440.0, "rade": 
 # Mirrors the MVP mode set from docs/PROJECT_PLAN.md section 4 (lsb kept
 # alongside ssb the same way pluto-tx exposes both as separate
 # sideband-fixed modes rather than one mode with a sideband flag).
-TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8", "aprs", "meshcore")
-RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "adsl", "adsb", "aprs", "meshcore")
+TX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "digitext", "ft8", "js8", "jtty", "aprs", "meshcore")
+RX_MODES = ("fm", "ssb", "lsb", "m17", "rade", "pocsag", "rtty", "ft8", "js8", "jtty", "adsl", "adsb", "aprs", "meshcore")
 
 # MeshCore receive: invented nodes and messages built with the real codec from throwaway identities (never the real
 # identity file) and reported by the real state class. The channel key store has the real backend's refusals.
@@ -68,7 +68,7 @@ JS8_SIM_NEIGHBOUR = ("DL1ABC", "JO62")
 FT8_SLOT_S = 15.0
 FT8_DECODE_AT_S = 14.8
 FT8_SIM_STATIONS = (("DL1ABC", "JO62"), ("G4XYZ", "IO91"), ("OK1RR", "JN79"), ("EA3AAA", "JN11"))
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "aprs", "meshcore")  # auto-unkey, like GnuRadioBackend
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "jtty", "aprs", "meshcore")  # auto-unkey, like GnuRadioBackend
 # FT8 transmit: slot timing as in pluto_tx/config.py; airtime of one frame
 # (79 symbols x 0.16 s) plus pluto-tx' tail.
 FT8_KEY_EARLY_S = 3.0
@@ -133,6 +133,9 @@ class SimBackend(SessionBackend):
         self._mc_nodes = None
         self._aprs_tick = 0
         self._aprs_task: asyncio.Task | None = None
+        self._jtty_task: asyncio.Task | None = None
+        self._jtty_rows = None
+        self._jtty_tick = 0
         self._aprs_state = None
         self._aprs_auto_ack = False
         self._aprs_packets = 0
@@ -272,6 +275,8 @@ class SimBackend(SessionBackend):
                 return
             if self.tx.mode == "aprs":
                 self._aprs_check_tx()
+            if self.tx.mode == "jtty" and not self.tx.mode_params.get("text", "").strip():
+                raise SessionError("message is empty")
             meshcore_sent = self._meshcore_sim_sent() if self.tx.mode == "meshcore" else None
             self.keyed = True
             await self._emit_event("keyed", {"mode": self.tx.mode})
@@ -279,6 +284,11 @@ class SimBackend(SessionBackend):
                 await self._emit_event("meshcore_sent", meshcore_sent)
             elif self.tx.mode == "aprs":
                 await self._emit_event("aprs_sent", self._aprs_sim_sent())
+            elif self.tx.mode == "jtty":
+                text = self.tx.mode_params.get("text", "").upper()
+                self._jtty().add_sent(text, self.tx.mode_params.get("tone_hz", 1500.0))
+                await self._emit_event("jtty_sent", {"text": text, "frames": self._jtty_sim_frames(text), "duration_s": round(self._jtty_sim_frames(text) * 1.888, 2),
+                                                     "substituted": False, "messages": self._jtty().take_changed()})
             elif self.tx.mode == "pocsag":
                 await self._emit_event("pocsag_message", {
                     "ric": self.tx.mode_params.get("ric", 1234567),
@@ -480,6 +490,8 @@ class SimBackend(SessionBackend):
             self._adsl_task.cancel()
         if self._mc_task is not None:
             self._mc_task.cancel()
+        if self._jtty_task is not None:
+            self._jtty_task.cancel()
         if self._aprs_task is not None:
             self._aprs_task.cancel()
         if self._adsb_task is not None:
@@ -515,6 +527,8 @@ class SimBackend(SessionBackend):
             self._adsb_task = asyncio.create_task(self._adsb_loop())
         if self._aprs_task is None:
             self._aprs_task = asyncio.create_task(self._aprs_loop())
+        if self._jtty_task is None:
+            self._jtty_task = asyncio.create_task(self._jtty_loop())
         if self._mc_task is None:
             self._mc_task = asyncio.create_task(self._meshcore_loop())
         if self._js8_task is None:
@@ -829,6 +843,52 @@ class SimBackend(SessionBackend):
         if self.station.get("call") and self._aprs_tick % 6 == 1:
             infos.append(("DL1ABC-9", wide, c.message_info(self.station["call"], "Hallo aus dem Simulator", str(self._aprs_tick % 100))))
         return [c.parse_frame(c.build_frame(source, "APRS", path, info)) for source, path, info in infos]
+
+    def _jtty(self):
+        if self._jtty_rows is None:
+            from pluto_advanced_rx.jtty_state import JttyState
+
+            self._jtty_rows = JttyState()
+        return self._jtty_rows
+
+    @staticmethod
+    def _jtty_sim_frames(text: str) -> int:
+        return max(1, (len(text) + 4) // 5)
+
+    def jtty_snapshot(self) -> dict:
+        return {"messages": self._jtty().get_rows()}
+
+    async def jtty_clear(self) -> None:
+        self._jtty().clear()
+
+    async def jtty_preview(self, text: str, tone_hz: float) -> dict:
+        if not text.strip():
+            return {"text": text, "problem": "message is empty"}
+        if len(text) > modes.JTTY_MAX_TEXT_LEN:
+            return {"text": text, "problem": f"message is longer than {modes.JTTY_MAX_TEXT_LEN} characters"}
+        frames = self._jtty_sim_frames(text)
+        return {"text": text, "canonical": text.upper(), "frames": frames, "duration_s": round(frames * 1.888, 2), "substituted": False}
+
+    def fake_jtty_updates(self, tick: int, now: float) -> list[dict]:
+        """Invented traffic as the codec reports it: a message growing frame by frame, a weak one that is cut off."""
+        grow = ["CQ DL1", "CQ DL1ABC", "CQ DL1ABC HALLO", "CQ DL1ABC HALLO 73"]
+        message = (tick // 8) * 2 + 1
+        step = tick % 8
+        if step < len(grow):
+            return [{"id": message, "text": grow[step], "state": "complete" if step == len(grow) - 1 else "growing", "freq": 1502.5, "snr": -6, "gaps": [], "utc_start": now - step * 1.888}]
+        if step == 5:
+            return [{"id": message + 1, "text": "TEST ... 73", "state": "expired", "freq": 1641.0, "snr": -19, "gaps": [5], "utc_start": now - 6.0}]
+        return []
+
+    async def _jtty_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.888)
+            if self.rx.connection is None or self.rx.mode != "jtty":
+                continue
+            for update in self.fake_jtty_updates(self._jtty_tick, time.time()):
+                self._jtty().on_update(update)
+            self._jtty_tick += 1
+            await self._emit_event("jtty_update", {"messages": self._jtty().take_changed(), "dropped_s": 0.0, "error": ""})
 
     async def _aprs_loop(self) -> None:
         while True:

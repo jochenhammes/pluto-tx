@@ -92,6 +92,16 @@ JS8_TONE_RANGE_HZ = (200.0, 3000.0)  # the whole signal (offset .. offset + band
 JS8_TONE_DEFAULT_HZ = 1500.0
 JS8_MAX_FRAMES = 20
 
+# JTTY (pluto_tx/jtty_codec.py, docs/jtty/SPEC.md), checked against pluto_tx/config.py by test_modes.py.
+JTTY_MAX_TEXT_LEN = 80
+JTTY_TONE_RANGE_HZ = (200.0, 2800.0)
+JTTY_TONE_DEFAULT_HZ = 1500.0
+JTTY_RX_FREQ_DEFAULT_HZ = 1500
+JTTY_RX_TOLERANCE_DEFAULT_HZ = 50
+JTTY_RX_TOLERANCE_RANGE_HZ = (10, 500)
+JTTY_DIAL_FREQS_HZ = (1_839_000, 3_572_000, 7_078_000, 10_140_000, 14_090_000, 18_104_000, 21_090_000, 24_920_000,
+                      28_090_000, 50_160_000, 144_160_000)
+
 
 def client_options() -> dict:
     """Choice lists the frontend builds its dropdowns from (sent in the
@@ -115,6 +125,11 @@ def client_options() -> dict:
             "message_kinds": list(FT8_MESSAGE_KINDS), "free_text_max": FT8_FREE_TEXT_MAX,
             "report_range_db": list(FT8_REPORT_RANGE_DB), "tone_range_hz": list(FT8_TONE_RANGE_HZ),
             "tone_default_hz": FT8_TONE_DEFAULT_HZ, "slots": list(FT8_SLOTS), "max_repeats": FT8_MAX_REPEATS,
+        },
+        "jtty": {
+            "max_text_len": JTTY_MAX_TEXT_LEN, "tone_range_hz": list(JTTY_TONE_RANGE_HZ), "tone_default_hz": JTTY_TONE_DEFAULT_HZ,
+            "rx_freq_default_hz": JTTY_RX_FREQ_DEFAULT_HZ, "tolerance_default_hz": JTTY_RX_TOLERANCE_DEFAULT_HZ,
+            "tolerance_range_hz": list(JTTY_RX_TOLERANCE_RANGE_HZ), "dial_freqs_hz": list(JTTY_DIAL_FREQS_HZ),
         },
         "js8": {
             "submodes": list(JS8_SUBMODES), "rx_submodes": list(JS8_RX_SUBMODES),
@@ -147,6 +162,15 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
         return {"decoder": decoder}
     if mode == "ft8" and direction == "tx":
         return _ft8_tx(params)
+    if mode == "jtty" and direction == "rx":
+        return _jtty_rx(params)
+    if mode == "jtty" and direction == "tx":
+        _reject_unknown(params, {"text", "tone_hz"}, "jtty")
+        lo, hi = JTTY_TONE_RANGE_HZ
+        tone = _number(params, "tone_hz", JTTY_TONE_DEFAULT_HZ, "jtty")
+        if not lo <= tone <= hi:
+            raise ValueError(f"jtty: tone_hz must be {lo:.0f}..{hi:.0f}")
+        return {"text": _text(params, JTTY_MAX_TEXT_LEN, "jtty"), "tone_hz": tone}
     if mode == "js8" and direction == "rx":
         _reject_unknown(params, {"submode", "decoder"}, "js8")
         submode = params.get("submode", JS8_SUBMODE_DEFAULT)
@@ -172,6 +196,18 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
         _reject_unknown(params, {"eoo"}, "rade")
         return {"eoo": _bool(params, "eoo", False)}
     return dict(params)
+
+
+def _jtty_rx(params: dict) -> dict:
+    _reject_unknown(params, {"freq_hz", "tolerance_hz"}, "jtty")
+    lo, hi = JTTY_TONE_RANGE_HZ
+    freq = _number(params, "freq_hz", JTTY_RX_FREQ_DEFAULT_HZ, "jtty")
+    if not lo <= freq <= hi:
+        raise ValueError(f"jtty: freq_hz must be {lo:.0f}..{hi:.0f}")
+    tolerance = _number(params, "tolerance_hz", JTTY_RX_TOLERANCE_DEFAULT_HZ, "jtty")
+    if not JTTY_RX_TOLERANCE_RANGE_HZ[0] <= tolerance <= JTTY_RX_TOLERANCE_RANGE_HZ[1]:
+        raise ValueError(f"jtty: tolerance_hz must be {JTTY_RX_TOLERANCE_RANGE_HZ[0]}..{JTTY_RX_TOLERANCE_RANGE_HZ[1]}")
+    return {"freq_hz": int(freq), "tolerance_hz": int(tolerance)}
 
 
 def _meshcore_preset(params: dict) -> int:
