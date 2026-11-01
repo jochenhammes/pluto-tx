@@ -38,6 +38,7 @@ from .filebroadcast_source import FileBroadcastSource
 from . import psk31
 from . import aprs
 from . import aprs_codec
+from . import jtty_codec
 from . import pocsag
 from . import pocsag_codec
 from . import rtty
@@ -148,10 +149,11 @@ class PlutoTxFlowgraph(gr.top_block):
     MODE_FT8 = 14
     MODE_JS8 = 15
     MODE_APRS = 16
+    MODE_JTTY = 17
     # The names the CLI and TxDevice.supported_modes use for the modes.
     _aprs_last_sent = -1e9  # per process, across rebuilt flowgraphs, so a rebuild does not hide how recent the last one was
     MODE_NAMES = {0: "fm", 1: "ssb", 2: "m17", 3: "freedv", 4: "rade", 5: "digitext", 6: "filebroadcast", 7: "psk31", 8: "baseband",
-                  9: "rtty", 10: "meshtastic", 11: "lsb", 12: "pocsag", 13: "meshcore", 14: "ft8", 15: "js8", 16: "aprs"}
+                  9: "rtty", 10: "meshtastic", 11: "lsb", 12: "pocsag", 13: "meshcore", 14: "ft8", 15: "js8", 16: "aprs", 17: "jtty"}
 
     def __init__(self, device_type="pluto", connection=None, frequency=config.DEFAULT_FREQUENCY,
                  power_ceiling=None, audio_device="",
@@ -170,6 +172,7 @@ class PlutoTxFlowgraph(gr.top_block):
                  meshtastic_hop_limit=config.MESHTASTIC_DEFAULT_HOP_LIMIT, meshtastic_callsign="",
                  pocsag_ric=config.POCSAG_DEFAULT_RIC, pocsag_function=3, pocsag_kind="alpha", pocsag_text="",
                  pocsag_baud=config.POCSAG_BAUD_DEFAULT, pocsag_charset="ascii",
+                 jtty_text="", jtty_tone_hz=config.JTTY_DEFAULT_TONE_HZ,
                  aprs_kind="beacon", aprs_callsign="", aprs_path=config.APRS_DEFAULT_PATH, aprs_lat=None, aprs_lon=None,
                  aprs_symbol=config.APRS_DEFAULT_SYMBOL, aprs_comment="", aprs_to="", aprs_text="", aprs_message_id=None,
                  meshcore_preset_index=0, meshcore_kind="advert", meshcore_name="", meshcore_text="",
@@ -698,6 +701,25 @@ class PlutoTxFlowgraph(gr.top_block):
         # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
         # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
+        # --- JTTY branch (pluto_tx/jtty_codec.py): the codec's audio into a USB chain like RTTY's, or to the sound card, where
+        # the radio must be on USB. An armed source like POCSAG's: no flowgraph lock and no bare carrier after keying.
+        self.jtty_text = jtty_text
+        self.jtty_tone_hz = float(jtty_tone_hz)
+        self.jtty_rendered = None
+        self._jtty_rendered_for = None
+        self._jtty_audio = None
+        self.jtty_duration_s = 0.0
+        self.jtty_source = blocks.vector_source_f([0.0], repeat=False)
+        self.jtty_ssb_mod = filter.hilbert_fc(401, window.WIN_HAMMING, 6.76)
+        self.jtty_ssb_resampler = filter.rational_resampler_ccf(
+            interpolation=quad_rate // g, decimation=config.AUDIO_RATE // g,
+            taps=[], fractional_bw=0.4,
+        )
+        self.connect(self.jtty_source, self.jtty_ssb_mod)
+        self.connect(self.jtty_ssb_mod, self.jtty_ssb_resampler)
+        self.jtty_audio_gain = blocks.multiply_const_ff(0.0)
+        self.connect(self.jtty_source, self.jtty_audio_gain)
+
         # --- FT8 branch (pluto_tx/ft8.py). IQ-native: the GFSK is synthesised directly as complex
         # baseband exp(j*phi) (an ideal USB signal by construction, no Hilbert step), resampled up with
         # EXPLICIT taps (flat to 4 kHz, images at 48 kHz - f fully rejected). Its real part is the
@@ -1061,6 +1083,7 @@ class PlutoTxFlowgraph(gr.top_block):
         self._null_sink_baseband = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see Baseband branch above
         self._null_sink_pocsag = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see POCSAG branch above
         self._null_sink_aprs = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see APRS branch above
+        self._null_sink_jtty = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see JTTY branch above
         self._null_sink_ft8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see FT8 branch above
         self._null_sink_js8 = blocks.null_sink(gr.sizeof_gr_complex)  # always built, see JS8 branch above
 
@@ -1288,6 +1311,7 @@ class PlutoTxFlowgraph(gr.top_block):
         producers[self.MODE_BASEBAND] = self.baseband_mod  # always available, see its branch above
         producers[self.MODE_POCSAG] = self.pocsag_mod  # always available, see its branch above
         producers[self.MODE_APRS] = self.aprs_mod  # always available, see its branch above
+        producers[self.MODE_JTTY] = self.jtty_ssb_resampler  # always built; without the codec it refuses to key
         producers[self.MODE_FT8] = self.ft8_tx_resampler  # always built (mode falls back without ft8_lib)
         producers[self.MODE_JS8] = self.js8_tx_resampler  # always built (pure Python codec)
         return producers
@@ -1317,6 +1341,8 @@ class PlutoTxFlowgraph(gr.top_block):
             return self._null_sink_pocsag
         if producer is self.aprs_mod:
             return self._null_sink_aprs
+        if producer is self.jtty_ssb_resampler:
+            return self._null_sink_jtty
         if producer is self.ft8_tx_resampler:
             return self._null_sink_ft8
         if producer is self.js8_tx_resampler:
@@ -1336,6 +1362,7 @@ class PlutoTxFlowgraph(gr.top_block):
             self.MODE_RTTY: self.rtty_audio_gain,
             self.MODE_FT8: self.ft8_audio_gain,
             self.MODE_JS8: self.js8_audio_gain,
+            self.MODE_JTTY: self.jtty_audio_gain,
         }
         if RADE_AVAILABLE:
             producers[self.MODE_RADE] = self.rade_audio_gain
@@ -1399,7 +1426,7 @@ class PlutoTxFlowgraph(gr.top_block):
         if mode in (self.MODE_M17, self.MODE_FREEDV, self.MODE_RADE, self.MODE_DIGITEXT,
                     self.MODE_PSK31, self.MODE_RTTY, self.MODE_FILEBROADCAST, self.MODE_BASEBAND,
                     self.MODE_MESHTASTIC, self.MODE_MESHCORE, self.MODE_POCSAG, self.MODE_FT8,
-                    self.MODE_JS8, self.MODE_APRS):
+                    self.MODE_JS8, self.MODE_APRS, self.MODE_JTTY):
             return  # all nine bypass the NF filter/dynamics chain entirely, nothing to retap
 
         sideband_mode = mode in (self.MODE_SSB, self.MODE_LSB)
@@ -1496,6 +1523,41 @@ class PlutoTxFlowgraph(gr.top_block):
     @property
     def aprs_hold_s(self):
         return self.aprs_duration_s + config.APRS_TX_TAIL_S
+
+    def set_jtty(self, text=None, tone_hz=None):
+        if text is not None:
+            self.jtty_text = text
+        if tone_hz is not None:
+            self.jtty_tone_hz = float(tone_hz)
+
+    def _jtty_render(self):
+        wanted = (self.jtty_text, self.jtty_tone_hz)
+        if self._jtty_rendered_for != wanted:
+            self.jtty_rendered = jtty_codec.render(self.jtty_text, self.jtty_tone_hz, config.AUDIO_RATE)
+            self._jtty_rendered_for = wanted
+        return self.jtty_rendered
+
+    def jtty_problem(self):
+        """None if the current JTTY settings can be sent now, else a short reason."""
+        if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
+            return "frequency is outside the amateur bands"
+        try:
+            self._jtty_render()
+        except ValueError as e:
+            return str(e)
+        return None
+
+    def _ensure_jtty_audio(self):
+        problem = self.jtty_problem()
+        if problem:
+            raise ValueError(problem)
+        pad = int(self.device.tx_end_loss_s * config.AUDIO_RATE)
+        self._jtty_audio = np.concatenate([self.jtty_rendered.audio * config.JTTY_AUDIO_LEVEL, np.zeros(pad, dtype=np.float32)])
+        self.jtty_duration_s = len(self._jtty_audio) / config.AUDIO_RATE
+
+    @property
+    def jtty_hold_s(self):
+        return self.jtty_duration_s + config.JTTY_TX_TAIL_S
 
     def pocsag_problem(self):
         """None if the current POCSAG settings can be sent, else a short reason."""
@@ -2483,6 +2545,18 @@ class PlutoTxFlowgraph(gr.top_block):
                 self._keyed = True
                 self._aprs_start_source()
                 return
+        if self.mode == self.MODE_JTTY:
+            self._ensure_jtty_audio()  # raises ValueError before any RF action
+            self.jtty_source = self._install_armed_source(self.jtty_source, self.jtty_ssb_mod, self.jtty_audio_gain,
+                                                          self._jtty_audio)  # still dark; it starts playing last
+            if self.device.is_audio_only():
+                if self.device.needs_ptt_control:
+                    self.device.pre_key()
+                self.tx_gain.set_k(1.0 + 0j)
+                self.jtty_audio_gain.set_k(config.JTTY_SOUNDCARD_LEVEL / config.JTTY_AUDIO_LEVEL)
+                self._keyed = True
+                self.jtty_source.arm()
+                return
         if self.mode == self.MODE_POCSAG:
             self._ensure_pocsag_audio()  # raises ValueError before any RF action
             self.pocsag_source = self._install_armed_source(self.pocsag_source, self.pocsag_resampler, self.pocsag_audio_gain,
@@ -2557,6 +2631,8 @@ class PlutoTxFlowgraph(gr.top_block):
             self._pocsag_start_source()
         if self.mode == self.MODE_APRS:
             self._aprs_start_source()
+        if self.mode == self.MODE_JTTY:
+            self.jtty_source.arm()
         if self.mode == self.MODE_FT8:
             self._ft8_start_source()
         if self.mode == self.MODE_JS8:
@@ -2660,6 +2736,15 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.mode == self.MODE_FT8 and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.ft8_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
+        if self.mode == self.MODE_JTTY:
+            self._stop_armed_source(self.jtty_source)
+        if self.mode == self.MODE_JTTY and self.device.is_audio_only():
+            self.tx_gain.set_k(0.0 + 0j)
+            self.jtty_audio_gain.set_k(0.0)
             if self.device.needs_ptt_control:
                 self.device.post_unkey()
             self._keyed = False

@@ -23,7 +23,7 @@ from pluto_tx import devices as tx_devices
 
 from . import runtime
 
-MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "aprs", "ft8", "js8", "meshtastic", "meshcore", "filebroadcast", "baseband")
+MODES = ("fm", "ssb", "lsb", "m17", "freedv", "rade", "digitext", "psk31", "rtty", "pocsag", "aprs", "jtty", "ft8", "js8", "meshtastic", "meshcore", "filebroadcast", "baseband")
 
 
 def add_common_args(parser):
@@ -461,6 +461,38 @@ def run_aprs(args):
     )
 
 
+def add_jtty_subparser(subparsers):
+    p = subparsers.add_parser(
+        "jtty", help="One JTTY message (WSJT-X's keyboard mode, USB, 127 Hz wide, no time slots; needs wsjt-codec, see install-jtty.sh)",
+        description=__doc__,
+    )
+    add_common_args(p)
+    p.add_argument("--text", required=True, help=f"Message text, at most {tx_config.JTTY_MAX_TEXT_LEN} characters")
+    p.add_argument("--tone-hz", type=float, default=tx_config.JTTY_DEFAULT_TONE_HZ,
+                   help="Audio frequency of the lowest tone (default: %(default)s)")
+    p.set_defaults(func=run_jtty, freq=None)
+
+
+def run_jtty(args):
+    emitter = runtime.Emitter(args.json)
+    if args.freq is None:  # no default on purpose: nothing goes out on a meeting frequency by accident
+        emitter.error("give --freq explicitly (USB dial; WSJT-X lists " + ", ".join(f"{f / 1e6:g}" for f in tx_config.JTTY_DIAL_FREQS_HZ) + " MHz)")
+        return 1
+
+    def preflight(tb):
+        problem = tb.jtty_problem()
+        if problem:  # before any RF action
+            emitter.error(problem)
+            tb.shutdown_safe()
+            sys.exit(1)
+        tb._ensure_jtty_audio()
+        r = tb.jtty_rendered
+        emitter.emit("jtty_message", text=r.text, frames=list(r.frames), substituted=r.substituted, tone_hz=args.tone_hz,
+                     duration_s=round(tb.jtty_duration_s, 3))
+
+    return _run(args, PlutoTxFlowgraph.MODE_JTTY, emitter, post_construct=preflight, jtty_text=args.text, jtty_tone_hz=args.tone_hz)
+
+
 def add_ft8_subparser(subparsers):
     p = subparsers.add_parser(
         "ft8", help="FT8 message in the next 15 s UTC slot (USB; manual sequencing -- one message per call; "
@@ -771,6 +803,7 @@ def add_subparsers(tx_subparsers):
     add_rtty_subparser(tx_subparsers)
     add_pocsag_subparser(tx_subparsers)
     add_aprs_subparser(tx_subparsers)
+    add_jtty_subparser(tx_subparsers)
     add_ft8_subparser(tx_subparsers)
     add_js8_subparser(tx_subparsers)
     add_meshtastic_subparser(tx_subparsers)
