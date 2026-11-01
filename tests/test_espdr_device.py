@@ -330,7 +330,12 @@ class EspdrGuiTests(unittest.TestCase):
 class EspdrCopyTests(unittest.TestCase):
     """./espdr is a copy made by tools/sync-espdr.sh; these keep it honest."""
 
-    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "espdr")
+    checkout = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "espdr")
+
+    @property
+    def root(self):
+        import espdr
+        return os.path.dirname(espdr.__file__)  # also holds for the installed package, /usr/share/pluto-tx/espdr
 
     def test_the_images_match_their_sums(self):
         import hashlib
@@ -349,8 +354,9 @@ class EspdrCopyTests(unittest.TestCase):
             self.assertIn("Zero-Clause BSD", fh.read())                                          # the licence text itself
 
     def test_the_copy_is_the_package_that_is_imported(self):
-        import espdr
-        self.assertEqual(os.path.realpath(os.path.dirname(espdr.__file__)), os.path.realpath(self.root))
+        if not os.path.isdir(self.checkout):
+            self.skipTest("installed package: no checkout next to the tests")
+        self.assertEqual(os.path.realpath(self.root), os.path.realpath(self.checkout))
         self.assertTrue(os.path.exists(txlink.__file__))
 
 
