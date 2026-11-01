@@ -55,6 +55,7 @@ _PACKAGE_PROGRAMS = {
 _PROGRAM_ENV = {
     "js8ref": "JS8REF",
     "wsjt-codec": "WSJT_CODEC",
+    "rigctld": "RIGCTLD",
 }
 _CHECKOUT_DATA = {
     "jsc.json": "js8call/jsc.json",

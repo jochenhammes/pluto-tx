@@ -230,7 +230,8 @@ class PlutoTxFlowgraph(gr.top_block):
             # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
         if not device_cls.supports_mode(self.MODE_NAMES.get(mode, "")):
-            mode = self.MODE_FM  # a device that carries only some modes (the ESP32-S3: constant-envelope ones)
+            # a device that carries only some modes (the ESP32-S3: constant-envelope ones; the X6200: no FM over USB audio)
+            mode = self.MODE_FM if device_cls.supports_mode("fm") else self.MODE_RTTY
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
         # "FM" regardless of what mode the flowgraph was actually built with.
@@ -1509,7 +1510,7 @@ class PlutoTxFlowgraph(gr.top_block):
             return "no callsign set"
         if not aprs_codec.valid_callsign(self.aprs_callsign):
             return f"invalid callsign {self.aprs_callsign!r}"
-        if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
+        if self.device.has_frequency_control() and config.in_amateur_band(self.nominal_freq_hz) is None:
             return "frequency is outside the amateur bands"
         try:
             self._aprs_build_frame()
@@ -1551,7 +1552,7 @@ class PlutoTxFlowgraph(gr.top_block):
 
     def jtty_problem(self):
         """None if the current JTTY settings can be sent now, else a short reason."""
-        if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
+        if self.device.has_frequency_control() and config.in_amateur_band(self.nominal_freq_hz) is None:
             return "frequency is outside the amateur bands"
         try:
             self._jtty_render()
@@ -2217,7 +2218,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 js8_phy.frame_to_bits(frame, flags)
             except ValueError as e:
                 return str(e)
-        if not self.device.is_audio_only():
+        if self.device.has_frequency_control():
             f_lo, f_hi = self.js8_occupied_hz()
             band = config.in_amateur_band(f_lo)
             if band is None or config.in_amateur_band(f_hi) != band:
@@ -2449,6 +2450,10 @@ class PlutoTxFlowgraph(gr.top_block):
         Soundcard device entry when RADE is unavailable), but cheap
         insurance against an AttributeError if ever constructed some other
         way."""
+        if self.device.is_audio_only() and self.device.has_frequency_control():
+            # A transceiver on CAT: its power and mode are the radio's own, and the audio branches below never touch RF power.
+            self.device.set_power(self.device.primary_stage.name, self.target_power)
+            self.device.select_mode(self.MODE_NAMES.get(self.mode, ""))
         self._m17_ending = False
         self._rade_ending = False
         if self.mode == self.MODE_MESHTASTIC and self._meshtastic_pending is None:
@@ -2905,3 +2910,4 @@ class PlutoTxFlowgraph(gr.top_block):
         except Exception as e:
             print(f"WARNING: flowgraph stop() failed: {e}", file=sys.stderr)
         self.device.force_safe_state()
+        self.device.close()

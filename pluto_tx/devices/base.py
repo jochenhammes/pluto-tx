@@ -134,6 +134,18 @@ class TxDevice(abc.ABC):
         apart."""
         return cls.frequency_range_hz == (0.0, 0.0)
 
+    @classmethod
+    def has_frequency_control(cls) -> bool:
+        """True if the device has a tunable frequency. Differs from not is_audio_only() for a transceiver keyed over
+        CAT (X6200): its signal is audio, but it has a frequency, a band check and a power of its own."""
+        return cls.frequency_range_hz != (0.0, 0.0)
+
+    def select_mode(self, mode_name: str):
+        """The flowgraph's mode (a MODE_NAMES value), told before each keying. For a device that has modes of its own."""
+
+    def close(self):
+        """Releases what prepare_for_start() acquired, at the end of a session. Default: nothing."""
+
     def set_rf_bandwidth(self, hz: float):
         """Change the analog TX bandwidth at runtime (wideband modes like
         LoRa need more than a device's narrowband default). No-op unless a
