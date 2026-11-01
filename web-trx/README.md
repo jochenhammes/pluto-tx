@@ -266,7 +266,7 @@ Der Modus **MeshCore (LoRa)** setzt die Frequenz aus dem Preset, sie ist in dies
 
 **Geprüft:** Der Empfang über Funk mit RTL-SDR von einem echten Heltec V3 auf 869,618 MHz: Advert Direct und Flood, ein von einem Repeater weitergeleitetes Advert, Public-Text mit Umlauten; Inhalte und Signaturen stimmten. Mit Fake-Geräten und Simulator laufen Advert und privater Kanal durch den echten Sender und Empfänger.
 
-**Gesendet über Funk:** Pluto+ über Web-TRX, −40 dB, Route Direct: 2 Adverts und 1 Public-Text. Der RTL-SDR las alle 3 mit gültiger Signatur beziehungsweise MAC. Der Heltec meldete zu den Sendezeiten jeweils Empfangsereignisse in seinem USB-Log; der Inhalt steht dort nicht.
+**Gesendet über Funk:** Pluto+ über Web-TRX, −40 dB, Route Direct: 2 Adverts und 1 Public-Text. Der RTL-SDR las alle 3 mit gültiger Signatur beziehungsweise MAC. Am echten Heltec V3 erschienen in der App der Kontakt und der Text.
 
 **Nicht geprüft:** langer Text, private Kanäle und Direktnachrichten über Funk, Flood-Sendungen, HackRF als Sender, Pluto und HackRF als Empfänger, das zweite Preset.
 
