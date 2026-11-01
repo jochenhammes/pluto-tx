@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+    # drop-ins written by 'web-trx service enable'
+    rm -rf /etc/systemd/system/web-trx@*.service.d 2>/dev/null || true
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+fi
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    if [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

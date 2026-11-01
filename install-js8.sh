@@ -44,6 +44,12 @@ JS8_DIR="$SCRIPT_DIR/js8call"
 JS8_REPO="https://github.com/JS8Call-improved/JS8Call-improved.git"
 JS8_TAG="v2.5.2"
 JS8_COMMIT="f0f0d01b357c8eb8786aee687e8b5c787c787159"
+# packaging/components.lock is the one place for the pinned version(s) (also used
+# by the .deb build); the value above is the fallback if that file is missing.
+LOCK="$SCRIPT_DIR/packaging/components.lock"
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^JS8_REPO=//p' "$LOCK")"; [ -n "$v" ] && JS8_REPO="$v"; fi
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^JS8_TAG=//p' "$LOCK")"; [ -n "$v" ] && JS8_TAG="$v"; fi
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^JS8_COMMIT=//p' "$LOCK")"; [ -n "$v" ] && JS8_COMMIT="$v"; fi
 
 echo "== JS8 (JS8Call) installer =="
 echo "Source directory: $JS8_DIR ($JS8_TAG)"

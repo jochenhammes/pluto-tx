@@ -19,6 +19,7 @@ import re
 import threading
 
 from . import js8_phy
+from . import paths
 from . import js8_tables as T
 
 # --- constants (varicode.cpp:41-342, varicode.h) ----------------------------------------------------------
@@ -142,7 +143,7 @@ class _Jsc:
     def data(cls):
         with cls._lock:
             if not cls._loaded:
-                cls._data = T.load_jsc()
+                cls._data = T.load_jsc(paths.data_file("jsc.json") or T.JSC_DEFAULT_PATH)
                 cls._loaded = True
                 cls._cache = {}
             return cls._data

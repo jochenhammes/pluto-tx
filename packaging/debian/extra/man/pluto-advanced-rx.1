@@ -1,0 +1,34 @@
+.TH PLUTO-ADVANCED-RX 1 "2026" "pluto-tx" "User Commands"
+.SH NAME
+pluto-advanced-rx \- SDR receiver with waterfall for PlutoSDR, HackRF and RTL-SDR
+.SH SYNOPSIS
+.B pluto-advanced-rx
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B pluto-advanced-rx
+opens the receiver GUI with an interactive waterfall and decoders for the same modes as pluto-tx.
+.PP
+Run
+.B pluto-advanced-rx \-\-help
+for all options.
+.SH FILES
+.TP
+.I /usr/share/pluto-tx
+program code
+.TP
+.I /usr/lib/pluto-tx
+bundled native components (gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref)
+.TP
+.I ~/.config/pluto-tx/web-trx.env
+Web-TRX settings (password, port, TLS)
+.TP
+.I ~/.local/state/web-trx/
+Web-TRX runtime data (log, PID, TLS certificate, sessions, TX log)
+.SH SEE ALSO
+.BR pluto-tx (1),
+.BR pluto-advanced-rx (1),
+.BR pluto-cli (1),
+.BR web-trx (1),
+.BR pluto-tx-doctor (1)
+.PP
+/usr/share/doc/pluto-tx/

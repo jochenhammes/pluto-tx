@@ -207,10 +207,13 @@ class WebTrxRow(QtWidgets.QWidget):
             rc = result.returncode
             last = _last_line(result.stdout) or _last_line(result.stderr)
             if action == "start":
-                messages = {0: f"Web-TRX started: {self.control.url()}",
-                            3: "Web-TRX was already running.",
-                            4: "Web-TRX process is up but not confirmed yet -- see web-trx/run/web-trx.log."}
-                self._show_message(messages.get(rc, f"Web-TRX start failed (exit {rc}): {last}"))
+                if rc == 4:
+                    log = self.control.run_dir / "web-trx.log"
+                    self._show_message(f"Web-TRX process is up but not confirmed yet -- see {log}.")
+                else:
+                    messages = {0: f"Web-TRX started: {self.control.url()}",
+                                3: "Web-TRX was already running."}
+                    self._show_message(messages.get(rc, f"Web-TRX start failed (exit {rc}): {last}"))
             else:
                 if rc == 2:
                     self.notify_warning(

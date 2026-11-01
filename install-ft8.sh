@@ -51,6 +51,10 @@ FT8_LIB_DIR="$SCRIPT_DIR/ft8_lib"
 # all correct) was built and verified against this session -- ft8_lib has
 # no versioned releases, pin rather than float.
 FT8_LIB_COMMIT="9fec6ca39886edbf96f4f5e71edc76da5074e871"
+# packaging/components.lock is the one place for the pinned version(s) (also used
+# by the .deb build); the value above is the fallback if that file is missing.
+LOCK="$SCRIPT_DIR/packaging/components.lock"
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^FT8_LIB_COMMIT=//p' "$LOCK")"; [ -n "$v" ] && FT8_LIB_COMMIT="$v"; fi
 
 echo "== ft8_lib (FT8 digimode) installer =="
 echo "Repo directory: $FT8_LIB_DIR"

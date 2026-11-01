@@ -30,9 +30,10 @@ import os
 
 import numpy as np
 
+from . import paths
+
 FT8_AVAILABLE = False
 _lib = None
-_REPO_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ft8_lib", "libft8wrap.so")
 
 # --- Protocol constants (ft8/constants.h) -- fixed, not queried at runtime.
 FTX_PAYLOAD_LENGTH_BYTES = 10  # holds 77 bits of payload
@@ -160,9 +161,9 @@ def _load():
     global _lib, FT8_AVAILABLE
 
     # LD_LIBRARY_PATH (launcher) first, then the in-repo build install-ft8.sh produces, so tests and
-    # a plain `python3 -m pluto_tx` find it without a regenerated launcher.
+    # a plain `python3 -m pluto_tx` find it without a regenerated launcher, then the .deb package.
     lib = None
-    for name in ("libft8wrap.so", _REPO_LIB):
+    for name in paths.library_candidates("libft8wrap.so"):
         try:
             lib = ctypes.CDLL(name)
             break

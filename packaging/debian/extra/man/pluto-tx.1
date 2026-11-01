@@ -1,0 +1,34 @@
+.TH PLUTO-TX 1 "2026" "pluto-tx" "User Commands"
+.SH NAME
+pluto-tx \- SDR transmitter for PlutoSDR, HackRF and AIOC radios
+.SH SYNOPSIS
+.B pluto-tx
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B pluto-tx
+opens the transmitter GUI: FM, SSB, FreeDV/RADE, M17, FT8, JS8, PSK31, RTTY, POCSAG, LoRa, Digitext and file broadcast. Transmit only on frequencies your licence allows.
+.PP
+Run
+.B pluto-tx \-\-help
+for all options.
+.SH FILES
+.TP
+.I /usr/share/pluto-tx
+program code
+.TP
+.I /usr/lib/pluto-tx
+bundled native components (gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref)
+.TP
+.I ~/.config/pluto-tx/web-trx.env
+Web-TRX settings (password, port, TLS)
+.TP
+.I ~/.local/state/web-trx/
+Web-TRX runtime data (log, PID, TLS certificate, sessions, TX log)
+.SH SEE ALSO
+.BR pluto-tx (1),
+.BR pluto-advanced-rx (1),
+.BR pluto-cli (1),
+.BR web-trx (1),
+.BR pluto-tx-doctor (1)
+.PP
+/usr/share/doc/pluto-tx/

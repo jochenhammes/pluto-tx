@@ -16,9 +16,10 @@ placeholder argument to rade_open() -- confirmed ignored at runtime (built-
 in weights), same as the CLI tools' own default value.
 """
 import ctypes
-import shutil
 
 import numpy as np
+
+from pluto_tx import paths
 
 # Sample rates used by the RADE modem (rade_api.h) -- fixed, not queried at
 # runtime (rade_api.h itself defines them as compile-time constants).
@@ -41,12 +42,17 @@ def _load():
     # by librade.so, confirmed via nm -D during this integration's
     # feasibility spike; lpcnet_demo, a separate CLI tool built alongside
     # it, is the only way to reach it -- see lpcnet_subprocess.py).
-    if shutil.which("lpcnet_demo") is None:
+    if paths.program("lpcnet_demo") is None:
         return
 
-    try:
-        lib = ctypes.CDLL("librade.so")
-    except OSError:
+    lib = None
+    for name in paths.library_candidates("librade.so"):
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if lib is None:
         return
 
     try:

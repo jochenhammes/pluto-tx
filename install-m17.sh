@@ -45,6 +45,10 @@ INSTALL_PREFIX="$HOME/.local"
 # offline coder->decoder round-trip plus a real low-power PTT test here,
 # but "main" may have moved since; pin rather than float).
 GR_M17_COMMIT="36267b114b41920b3b62d9545afe7d7c854801bf"
+# packaging/components.lock is the one place for the pinned version(s) (also used
+# by the .deb build); the value above is the fallback if that file is missing.
+LOCK="$SCRIPT_DIR/packaging/components.lock"
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^GR_M17_COMMIT=//p' "$LOCK")"; [ -n "$v" ] && GR_M17_COMMIT="$v"; fi
 
 echo "== gr-m17 (M17 digital voice) installer =="
 echo "Repo directory: $SCRIPT_DIR"

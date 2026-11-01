@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Web-TRX
+Comment=Start the Web-TRX server and open it in the browser
+Exec=sh -c "web-trx start; web-trx open"
+Icon=web-trx
+Terminal=false
+Categories=HamRadio;AudioVideo;Network;
+Keywords=SDR;GNU Radio;PlutoSDR;HackRF;RTL-SDR;amateur radio;

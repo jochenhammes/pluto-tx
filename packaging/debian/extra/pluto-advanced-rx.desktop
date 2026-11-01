@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pluto Advanced RX
+Comment=SDR receiver with waterfall for PlutoSDR, HackRF and RTL-SDR
+Exec=pluto-advanced-rx
+Icon=pluto-advanced-rx
+Terminal=false
+Categories=HamRadio;AudioVideo;Network;
+Keywords=SDR;GNU Radio;PlutoSDR;HackRF;RTL-SDR;amateur radio;

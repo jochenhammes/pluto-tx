@@ -1,0 +1,34 @@
+.TH PLUTO-TX-DOCTOR 1 "2026" "pluto-tx" "User Commands"
+.SH NAME
+pluto-tx-doctor \- check a pluto-tx installation
+.SH SYNOPSIS
+.B pluto-tx-doctor
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B pluto-tx-doctor
+reports which launchers win on PATH, the optional components, USB access to SDRs, the RTL-SDR DVB-T driver, the clock synchronisation and the Web-TRX state. \fB\-\-scan\fR lists the SDRs SoapySDR and libiio find, \fB\-\-fix\-launchers\fR renames old launchers of a git installation that hide the package's ones.
+.PP
+Run
+.B pluto-tx-doctor \-\-help
+for all options.
+.SH FILES
+.TP
+.I /usr/share/pluto-tx
+program code
+.TP
+.I /usr/lib/pluto-tx
+bundled native components (gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref)
+.TP
+.I ~/.config/pluto-tx/web-trx.env
+Web-TRX settings (password, port, TLS)
+.TP
+.I ~/.local/state/web-trx/
+Web-TRX runtime data (log, PID, TLS certificate, sessions, TX log)
+.SH SEE ALSO
+.BR pluto-tx (1),
+.BR pluto-advanced-rx (1),
+.BR pluto-cli (1),
+.BR web-trx (1),
+.BR pluto-tx-doctor (1)
+.PP
+/usr/share/doc/pluto-tx/

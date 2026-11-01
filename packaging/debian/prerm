@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+# a running web-trx@<user> service would lose its program files
+if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
+    for unit in $(systemctl list-units --plain --no-legend 'web-trx@*.service' 2>/dev/null | awk '{print $1}'); do
+        deb-systemd-invoke stop "$unit" || true
+    done
+fi
+
+#DEBHELPER#
+
+exit 0

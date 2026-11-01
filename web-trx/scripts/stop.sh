@@ -8,7 +8,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # web-trx/
-RUN_DIR="$ROOT/run"
+# Same run directory as start.sh (checkout: web-trx/run, package: XDG state).
+if [[ -f "$ROOT/../.pluto-tx-package" ]]; then
+  RUN_DIR="${WEB_TRX_RUN_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/web-trx}"
+else
+  RUN_DIR="${WEB_TRX_RUN_DIR:-$ROOT/run}"
+fi
 PID_FILE="$RUN_DIR/web-trx.pid"
 
 mkdir -p "$RUN_DIR"

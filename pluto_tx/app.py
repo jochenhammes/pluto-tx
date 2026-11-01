@@ -11,6 +11,7 @@ import sys
 import time
 
 from . import config
+from .version import version
 from .devices import pluto as pluto_device
 from .flowgraph import PlutoTxFlowgraph
 
@@ -18,7 +19,8 @@ MODES = {"fm": PlutoTxFlowgraph.MODE_FM, "ssb": PlutoTxFlowgraph.MODE_SSB, "lsb"
 
 
 def build_argparser():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(prog="pluto-tx", description=__doc__)
+    p.add_argument("--version", action="version", version=f"%(prog)s {version()}")
     p.add_argument("--uri", default=config.DEFAULT_URI)
     p.add_argument("--freq", type=float, default=config.DEFAULT_FREQUENCY, help="Hz")
     p.add_argument("--atten", type=float, default=pluto_device.DEFAULT_ATTEN_CEILING,

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pluto_tx import js8_message, js8_phy
+from pluto_tx import js8_message, js8_phy, paths
 from pluto_tx import js8_tables as T
 
 SAMPLE_RATE = 12000
@@ -41,7 +41,7 @@ DT_BEFORE_S = 1.5               # search window around the nominal start (period
 DT_AFTER_S = 2.5
 SUBMODE_MASK = {js8_phy.NORMAL: 1, js8_phy.FAST: 2, js8_phy.TURBO: 4, js8_phy.SLOW: 8}
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-JS8REF = os.environ.get("JS8REF", os.path.join(_REPO, "js8call", "build-js8ref", "js8ref"))
+JS8REF = paths.program("js8ref") or os.environ.get("JS8REF") or os.path.join(_REPO, "js8call", "build-js8ref", "js8ref")
 
 _DATA_POS = np.concatenate([np.arange(7, 36), np.arange(43, 72)])
 _COSTAS_POS = (0, 36, 72)

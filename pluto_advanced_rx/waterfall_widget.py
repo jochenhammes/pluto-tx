@@ -222,8 +222,10 @@ class AdvancedWaterfallWidget(QtWidgets.QWidget):
         self._fft_size = fft_size
         self._image_buf = np.full((self._history_rows, fft_size), self._db_range[0], dtype=np.float32)
         self._write_row = 0
-        self._update_image_rect()
+        # Image first, then the rect: setRect() scales by the current image
+        # size, and pyqtgraph 0.13 (Debian 13) has no size before setImage().
         self.image_item.setImage(self._image_buf.T, autoLevels=False, levels=self._db_range)
+        self._update_image_rect()
 
     def _update_image_rect(self):
         f_start = self._center_hz - self._span_hz / 2

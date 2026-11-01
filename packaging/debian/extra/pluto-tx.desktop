@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pluto TX
+Comment=SDR transmitter for PlutoSDR and HackRF (GNU Radio)
+Exec=pluto-tx
+Icon=pluto-tx
+Terminal=false
+Categories=HamRadio;AudioVideo;Network;
+Keywords=SDR;GNU Radio;PlutoSDR;HackRF;RTL-SDR;amateur radio;

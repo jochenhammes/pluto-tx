@@ -40,6 +40,10 @@ INSTALL_PREFIX="$HOME/.local"
 # install-m17.sh's GR_M17_COMMIT: verify once against this exact commit,
 # don't silently rebuild against whatever master has moved to later).
 GR_LORA_SDR_COMMIT="862746dd1cf635c9c8a4bfbaa2c3a0ec3a5306c9"
+# packaging/components.lock is the one place for the pinned version(s) (also used
+# by the .deb build); the value above is the fallback if that file is missing.
+LOCK="$SCRIPT_DIR/packaging/components.lock"
+if [ -f "$LOCK" ]; then v="$(sed -n 's/^GR_LORA_SDR_COMMIT=//p' "$LOCK")"; [ -n "$v" ] && GR_LORA_SDR_COMMIT="$v"; fi
 
 echo "== gr-lora_sdr (LoRa CSS PHY) installer =="
 echo "Repo directory: $SCRIPT_DIR"

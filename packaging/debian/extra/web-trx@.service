@@ -1,0 +1,31 @@
+# Web-TRX as a system service for headless operation, one instance per user:
+#   web-trx service enable     (as that user; writes the drop-in with the
+#                               user's run directory and enables web-trx@<user>)
+# Shipped disabled: transmitting without anybody logged in is a deliberate step.
+[Unit]
+Description=Web-TRX (pluto-tx browser interface) for %i
+Documentation=file:///usr/share/doc/pluto-tx/README.web-trx.md
+Wants=network-online.target
+After=network-online.target avahi-daemon.service
+
+[Service]
+User=%i
+Environment=PYTHONPATH=/usr/share/pluto-tx:/usr/lib/pluto-tx/python
+# No PipeWire before login: GNU Radio's ALSA default -> ALSA "null" device
+# (Web-TRX takes the microphone from the browser anyway).
+Environment=GR_CONF_AUDIO_ALSA_DEFAULT_OUTPUT_DEVICE=null
+Environment=GR_CONF_AUDIO_ALSA_DEFAULT_INPUT_DEVICE=null
+WorkingDirectory=/usr/share/pluto-tx/web-trx
+# start.sh backgrounds uvicorn, writes the PID file and exits 0 once the
+# server has confirmed startup. PIDFile= comes from the drop-in.
+Type=forking
+ExecStart=/usr/share/pluto-tx/web-trx/scripts/start.sh
+# stop.sh: SIGTERM -> unkey + TX safe state (Pluto: max attenuation, LO off)
+ExecStop=/usr/share/pluto-tx/web-trx/scripts/stop.sh
+TimeoutStartSec=120
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

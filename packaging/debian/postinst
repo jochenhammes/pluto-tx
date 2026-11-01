@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # udev rule for HackRF/RTL-SDR (uaccess): applies to devices already plugged in
+    if [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+        udevadm trigger --subsystem-match=usb --action=change || true
+    fi
+    if [ -d /sys/module/dvb_usb_rtl28xxu ]; then
+        echo "pluto-tx: the DVB-T driver dvb_usb_rtl28xxu is loaded -- unplug and replug the RTL-SDR once" \
+             "(or: sudo rmmod dvb_usb_rtl28xxu)."
+    fi
+    echo "pluto-tx: check the installation with 'pluto-tx-doctor'."
+fi
+
+#DEBHELPER#
+
+exit 0
