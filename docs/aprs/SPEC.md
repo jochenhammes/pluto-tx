@@ -57,8 +57,8 @@ Position auch in APRS-IS; das Statuspaket von DB0ET fand sich dort nicht.
 
 **Trägervorlauf (behoben):** Zuerst lief vor jedem Paket rund 3 s unmodulierter Träger mit voller Leistung, weil die Quelle erst
 nach dem Tasten per `lock()`/`unlock()` eingesetzt wurde. Jetzt wird sie eingesetzt, solange alles dunkel ist, und startet ohne
-Sperre (`aprs_source.py`): rund 1,05 s je Sendung, Vorlauf unterhalb der 50-ms-Auflösung. **POCSAG tastet noch in der alten
-Reihenfolge**; dort ist der Vorlauf nicht gemessen.
+Sperre (`armed_source.py`): rund 1,05 s je Sendung, Vorlauf unterhalb der 50-ms-Auflösung. POCSAG nutzt seitdem dieselbe Quelle,
+dort aber nur mit Fake-Geräten geprüft, nicht über Funk.
 
 **Rechnerrauschen:** Reine CPU-Last hebt den Pegel im Kanal am danebenstehenden RTL-SDR von −57 auf −41 dB, ganz ohne Pluto. Bei
 verbundenem Web-TRX-Sender sind es dauerhaft −42 dB, obwohl der Pluto nachweislich dunkel ist (−89,75 dB, LO aus). Die Sendung liegt

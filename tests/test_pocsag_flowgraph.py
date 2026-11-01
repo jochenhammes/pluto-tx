@@ -206,6 +206,42 @@ class LoopbackTests(unittest.TestCase):
                                      [(baud, 1234567, f"Audio {baud}")])
 
 
+class KeyUpTests(unittest.TestCase):
+    """Bare carrier ahead of the call: the source swap has to happen before the transmitter comes up."""
+
+    def test_source_swap_happens_while_dark_and_playing_starts_last(self):
+        from tests import fakes
+        fakes.register_tx()
+        fg = txf.PlutoTxFlowgraph(device_type="fake", mode=POCSAG, frequency=439.9875e6, pocsag_text="DA2JH test")
+        order = []
+        for name, target, attr in (("lock", fg, "lock"), ("pre_key", fg.device, "pre_key"), ("set_power", fg.device, "set_power"),
+                                   ("start", fg, "_pocsag_start_source")):
+            original = getattr(target, attr)
+            setattr(target, attr, (lambda n, f: lambda *a, **k: (order.append(n), f(*a, **k))[1])(name, original))
+        fg.start()
+        fg.key_ptt()
+        self.assertEqual(order[0], "lock")
+        self.assertEqual(order.count("lock"), 1)
+        self.assertEqual(order[-1], "start")
+        fg.unkey_ptt()
+        fg.stop()
+        fg.wait()
+
+    def test_a_second_call_on_the_same_flowgraph_starts_fresh(self):
+        from tests import fakes
+        fakes.register_tx()
+        fg = txf.PlutoTxFlowgraph(device_type="fake", mode=POCSAG, frequency=439.9875e6, pocsag_text="DA2JH test")
+        fg.start()
+        fg.key_ptt()
+        first = fg.pocsag_source
+        fg.unkey_ptt()
+        fg.key_ptt()
+        self.assertIsNot(fg.pocsag_source, first)
+        fg.unkey_ptt()
+        fg.stop()
+        fg.wait()
+
+
 class GuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

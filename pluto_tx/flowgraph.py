@@ -42,7 +42,7 @@ from . import pocsag
 from . import pocsag_codec
 from . import rtty
 from . import ft8
-from .aprs_source import AprsArmedSource
+from .armed_source import ArmedAudioSource
 from .ft8_source import Ft8TimedSource
 from . import js8, js8_phy
 from .js8_source import Js8SequenceSource
@@ -1480,30 +1480,9 @@ class PlutoTxFlowgraph(gr.top_block):
         self._aprs_audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
         self.aprs_duration_s = len(self._aprs_audio) / config.AUDIO_RATE
 
-    def _aprs_install_source(self):
-        """Swap in the armed source while everything is still dark. lock()/unlock() takes around a second on a Pluto:
-        done after keying, as POCSAG does, that second and more went out as bare carrier ahead of each packet (measured
-        over the air), and on the APRS channel that is everyone's airtime."""
-        self.lock()
-        try:
-            self.disconnect(self.aprs_source, self.aprs_resampler)
-            if self.aprs_audio_gain is not None:
-                self.disconnect(self.aprs_source, self.aprs_audio_gain)
-            self.aprs_source = AprsArmedSource(self._aprs_audio)
-            self.aprs_source.set_max_output_buffer(2048)  # the silence queued ahead of the packet is bare carrier as well
-            self.connect(self.aprs_source, self.aprs_resampler)
-            if self.aprs_audio_gain is not None:
-                self.connect(self.aprs_source, self.aprs_audio_gain)
-        finally:
-            self.unlock()
-
     def _aprs_start_source(self):
         self.aprs_source.arm()
         PlutoTxFlowgraph._aprs_last_sent = time.monotonic()
-
-    def aprs_source_stop(self):
-        if isinstance(self.aprs_source, AprsArmedSource):
-            self.aprs_source.stop_playing()
 
     @property
     def aprs_hold_s(self):
@@ -1521,21 +1500,31 @@ class PlutoTxFlowgraph(gr.top_block):
             return f"message is longer than {config.POCSAG_MAX_TEXT_LEN} characters"
         return None
 
-    def _pocsag_start_source(self):
-        """Swap in a fresh one-shot source with the rendered call. Done only after the output path is unmuted
-        and powered: the source is unthrottled, so starting it earlier would run the first samples (part of
-        the preamble) through the muted chain."""
+    def _install_armed_source(self, source, resampler, audio_gain, audio):
+        """Swap in an armed source while everything is still dark -> the new source. lock()/unlock() takes around a second
+        on a Pluto: done after keying, that second and more went out as bare carrier ahead of the signal, and on a shared
+        channel that is everyone's airtime."""
         self.lock()
         try:
-            self.disconnect(self.pocsag_source, self.pocsag_resampler)
-            if self.pocsag_audio_gain is not None:
-                self.disconnect(self.pocsag_source, self.pocsag_audio_gain)
-            self.pocsag_source = blocks.vector_source_f(self._pocsag_audio.tolist(), repeat=False)
-            self.connect(self.pocsag_source, self.pocsag_resampler)
-            if self.pocsag_audio_gain is not None:
-                self.connect(self.pocsag_source, self.pocsag_audio_gain)
+            self.disconnect(source, resampler)
+            if audio_gain is not None:
+                self.disconnect(source, audio_gain)
+            armed = ArmedAudioSource(audio)
+            armed.set_max_output_buffer(2048)  # the silence queued ahead of the signal is bare carrier as well
+            self.connect(armed, resampler)
+            if audio_gain is not None:
+                self.connect(armed, audio_gain)
         finally:
             self.unlock()
+        return armed
+
+    @staticmethod
+    def _stop_armed_source(source):
+        if isinstance(source, ArmedAudioSource):
+            source.stop_playing()
+
+    def _pocsag_start_source(self):
+        self.pocsag_source.arm()
 
     def _ensure_pocsag_audio(self):
         problem = self.pocsag_problem()
@@ -2475,7 +2464,8 @@ class PlutoTxFlowgraph(gr.top_block):
                 return
         if self.mode == self.MODE_APRS:
             self._ensure_aprs_audio()  # raises ValueError before any RF action
-            self._aprs_install_source()  # still dark; it starts playing last
+            self.aprs_source = self._install_armed_source(self.aprs_source, self.aprs_resampler, self.aprs_audio_gain,
+                                                          self._aprs_audio)  # still dark; it starts playing last
             if self.device.is_audio_only():
                 if self.device.needs_ptt_control:
                     self.device.pre_key()
@@ -2485,7 +2475,9 @@ class PlutoTxFlowgraph(gr.top_block):
                 self._aprs_start_source()
                 return
         if self.mode == self.MODE_POCSAG:
-            self._ensure_pocsag_audio()  # raises ValueError before any RF action; the source starts last
+            self._ensure_pocsag_audio()  # raises ValueError before any RF action
+            self.pocsag_source = self._install_armed_source(self.pocsag_source, self.pocsag_resampler, self.pocsag_audio_gain,
+                                                            self._pocsag_audio)  # still dark; it starts playing last
             if self.device.is_audio_only():
                 if self.device.needs_ptt_control:
                     self.device.pre_key()
@@ -2664,7 +2656,9 @@ class PlutoTxFlowgraph(gr.top_block):
             self._keyed = False
             return
         if self.mode == self.MODE_APRS:
-            self.aprs_source_stop()
+            self._stop_armed_source(self.aprs_source)
+        if self.mode == self.MODE_POCSAG:
+            self._stop_armed_source(self.pocsag_source)
         if self.mode == self.MODE_APRS and self.device.is_audio_only():
             self.tx_gain.set_k(0.0 + 0j)
             self.aprs_audio_gain.set_k(0.0)

@@ -644,7 +644,8 @@ pluto_tx/                 # Sende-App
 ├── meshtastic_codec.py         # Meshtastic-Paketformat (Header, AES-CTR, Protobuf)
 ├── meshcore_codec.py / meshcore_identity.py  # MeshCore: Paketformat, Adverts (Ed25519), Gruppentext (AES-ECB+HMAC), Knotenidentität
 ├── pocsag.py / pocsag_codec.py  # POCSAG: NRZ-Audio, Codewörter/BCH/Batches/Decoder (auch von der RX-App genutzt)
-├── aprs_codec.py / aprs.py / aprs_source.py  # APRS: AX.25 und Infofeld, AFSK-Audio, Quelle für die Sendung ohne Trägervorlauf
+├── aprs_codec.py / aprs.py          # APRS: AX.25 und Infofeld, AFSK-Audio
+├── armed_source.py              # Audioquelle für APRS und POCSAG: startet ohne Trägervorlauf
 ├── adsl_codec.py                # ADS-L: XXTEA, Traffic-Payload (nur Empfang, von der RX-App genutzt)
 ├── adsb_codec.py / mode_s_crc.py  # ADS-B: Nachrichten, CPR-Positionen (nur Empfang); CRC-24 für ADS-B und ADS-L
 ├── ft8.py / ft8_ctypes.py       # FT8: GFSK-Synthese, Nachrichten, Slot-Planung; ctypes-Anbindung an ft8_lib

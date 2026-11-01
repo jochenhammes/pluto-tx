@@ -286,7 +286,7 @@ class RefusalTests(unittest.TestCase):
         from pluto_tx import flowgraph as txf
         fg = self.tb(aprs_callsign="DA2JH", aprs_lat=53.5, aprs_lon=9.0)
         fg._ensure_aprs_audio()
-        fg._aprs_install_source()
+        fg.aprs_source = fg._install_armed_source(fg.aprs_source, fg.aprs_resampler, fg.aprs_audio_gain, fg._aprs_audio)
         fg._aprs_start_source()
         again = txf.PlutoTxFlowgraph(device_type="fake", mode=txf.PlutoTxFlowgraph.MODE_APRS, frequency=144.8e6, aprs_callsign="DA2JH", aprs_lat=53.5, aprs_lon=9.0)
         self.assertIn("wait", again.aprs_problem())
