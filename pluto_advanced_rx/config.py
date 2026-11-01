@@ -502,6 +502,17 @@ JS8_DECODER_BACKEND = "auto"
 # Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)
 JS8_DEFAULT_SUBMODES = (0,)
 
+# --- JTTY (pluto_advanced_rx/jtty_rx.py, docs/jtty/SPEC.md) ------------------------------------------------
+# Same USB audio path as FT8. The decoder searches JTTY_RX_FREQ_HZ +- the tolerance and two fixed 300 Hz channels around
+# 1350 and 1650 Hz, clipped to the band; a signal elsewhere needs the frequency set to it.
+JTTY_BAND_HZ = FT8_BAND_HZ
+JTTY_BAND_TRANS_HZ = FT8_BAND_TRANS_HZ
+JTTY_RX_FREQ_HZ = 1500
+JTTY_RX_TOLERANCE_HZ = 50
+JTTY_SEARCH_BAND_HZ = (200, 2800)
+JTTY_RX_LATENCY_S = FT8_RX_LATENCY_S
+JTTY_QUEUE_S = 60             # of audio waiting for a stalled codec, before samples are dropped
+
 # --- APRS RX: FM, 12.5/25 kHz channel. Not locked: other regions use other frequencies.
 APRS_DEFAULT_FREQ_HZ = 144_800_000
 APRS_DEVIATION_HZ = 3000.0  # only scales the discriminator; the demodulator compares tones, not levels

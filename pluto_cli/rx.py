@@ -90,7 +90,7 @@ def add_common_args(parser):
         help="Seconds to run before exiting automatically. Omit to run until Ctrl-C.",
     )
     parser.add_argument(
-        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb", "aprs"), default=None,
+        "--digimode", choices=("psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "jtty", "adsl", "adsb", "aprs"), default=None,
         help="Also decode this digimode in parallel and print received characters as they "
              "arrive (independent of the primary --width-hz/demod mode above). Only ONE "
              "digimode can be active at a time -- a real GNU Radio limitation, not a CLI "
@@ -110,6 +110,14 @@ def add_common_args(parser):
     )
     parser.add_argument(
         "--ft8-mygrid", default="", metavar="LOCATOR", help="Your locator (with --ft8-mycall)",
+    )
+    parser.add_argument(
+        "--jtty-freq-hz", type=int, default=rx_config.JTTY_RX_FREQ_HZ,
+        help="Audio frequency JTTY is decoded at with --digimode jtty, as well as two fixed channels at 1200-1800 Hz (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--jtty-tolerance-hz", type=int, default=rx_config.JTTY_RX_TOLERANCE_HZ,
+        help="Search width around --jtty-freq-hz (default: %(default)s)",
     )
     parser.add_argument(
         "--js8-submode", choices=("normal", "fast", "turbo", "slow", "all"), default="normal",
@@ -338,6 +346,11 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             emit_js8_message(msg)
         emitter.emit("js8_slot", utc=utc, speed=speed, decodes=len(decodes))
 
+    def on_jtty_update(update):
+        # every state of a message: the text grows from line to line, and the last line for its message is final
+        emitter.emit("jtty_message", utc=time.strftime("%H%M%S", time.gmtime(update["utc_start"] or time.time())), freq_hz=update.get("freq"),
+                     snr_db=update.get("snr"), text=update.get("text", ""), state=update.get("state"), gaps=update.get("gaps", []))
+
     def on_m17_fields(fields):
         emitter.emit("m17_fields", **runtime.json_safe(fields))
 
@@ -345,12 +358,23 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     if direct_sampling and not rx_devices.DEVICE_REGISTRY[args.device].supports_direct_sampling:
         emitter.error(f"--direct-sampling is only available for --device rtlsdr, not {args.device}")
         return 1
-    frequency = args.freq if args.freq is not None else rx_config.DEFAULT_FREQUENCY
     selected_device = rx_devices.DEVICE_REGISTRY[args.device]
+    frequency = args.freq if args.freq is not None else rx_config.DEFAULT_FREQUENCY
+    if selected_device.frequency_range_hz == (0.0, 0.0):
+        # A sound card has no RF to tune: --freq shifts its audio band instead, so an RF value would move the signal out of it.
+        if args.freq is not None and abs(args.freq) > selected_device.default_sample_rate_hz / 2:
+            emitter.error(f"--device {args.device} has no RF frequency: --freq only shifts its audio band, omit it")
+            return 1
+        frequency = args.freq if args.freq is not None else 0.0
     if args.bandwidth is not None and args.bandwidth not in selected_device.sample_rate_hz_choices:
         offered = ", ".join(str(rate) for rate in selected_device.sample_rate_hz_choices)
         emitter.error(f"--bandwidth {args.bandwidth} is not available on --device {args.device} (offered: {offered})")
         return 1
+    if args.digimode == "jtty":
+        from pluto_tx import jtty_codec
+        if not jtty_codec.available():
+            emitter.error("JTTY is not available -- wsjt-codec is not installed, see install-jtty.sh")
+            return 1
     if args.digimode == "aprs":
         # A starting point, not a lock: an explicit --freq wins, as other regions use other frequencies.
         if args.freq is None:
@@ -432,6 +456,8 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
             on_ft8_decodes=on_ft8_decodes, ft8_backend=args.ft8_decoder,
             ft8_my_call=args.ft8_mycall, ft8_my_grid=args.ft8_mygrid,
             on_js8_decodes=on_js8_decodes if args.digimode == "js8" else None,
+            on_jtty_update=on_jtty_update if args.digimode == "jtty" else None,
+            jtty_rxfreq_hz=args.jtty_freq_hz, jtty_tolerance_hz=args.jtty_tolerance_hz,
             js8_submodes=_js8_submodes(args.js8_submode), js8_backend=args.js8_decoder,
             on_meshcore_packet=on_meshcore_packet, meshcore_preset_index=meshcore_preset_index,
             frequency_correction_ppm=args.freq_correction_ppm, direct_sampling=direct_sampling,

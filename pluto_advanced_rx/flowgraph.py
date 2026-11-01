@@ -115,7 +115,8 @@ class AdvancedRxFlowgraph(gr.top_block):
                  on_meshcore_packet=None, meshcore_preset_index=0, on_ft8_decodes=None,
                  ft8_backend=config.FT8_DECODER_BACKEND, ft8_my_call="", ft8_my_grid="",
                  on_js8_decodes=None, js8_submodes=config.JS8_DEFAULT_SUBMODES,
-                 js8_backend=config.JS8_DECODER_BACKEND, on_adsl_packet=None, on_adsb_message=None, on_aprs_frame=None):
+                 js8_backend=config.JS8_DECODER_BACKEND, on_adsl_packet=None, on_adsb_message=None, on_aprs_frame=None,
+                 on_jtty_update=None, jtty_rxfreq_hz=config.JTTY_RX_FREQ_HZ, jtty_tolerance_hz=config.JTTY_RX_TOLERANCE_HZ):
         """uri doubles as the generic "connection" string for every backend
         (a libiio URI for Pluto, a serial/Soapy-args string for HackRF) --
         default is None, NOT config.DEFAULT_URI: that Pluto-specific default
@@ -854,6 +855,26 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.connect(self.js8_band_filter, self.js8_to_real)
             self.connect(self.js8_to_real, self.js8_receiver)
 
+        # --- JTTY RX: the same USB -> 12 kHz -> band-pass -> real audio path as FT8, into one wsjt-codec process (jtty_rx.py).
+        self.jtty_receiver = None
+        if active_digimode == "jtty":
+            from .jtty_rx import JttyReceiver, SAMPLE_RATE as JTTY_RATE
+            if_rate_i = int(round(self.if_rate))
+            g_jtty = math.gcd(JTTY_RATE, if_rate_i)
+            jtty_interp, jtty_decim = JTTY_RATE // g_jtty, if_rate_i // g_jtty
+            self.jtty_resampler = filter.rational_resampler_ccf(
+                interpolation=jtty_interp, decimation=jtty_decim,
+                taps=firdes.low_pass(jtty_interp, if_rate_i * jtty_interp, 4000, 2000, window.WIN_HAMMING))
+            lo, hi = config.JTTY_BAND_HZ
+            self.jtty_band_filter = filter.fir_filter_ccc(1, firdes.complex_band_pass(
+                1.0, JTTY_RATE, lo, hi, config.JTTY_BAND_TRANS_HZ, window.WIN_HAMMING))
+            self.jtty_to_real = blocks.complex_to_real()
+            self.jtty_receiver = JttyReceiver(on_jtty_update or (lambda update: None), rxfreq_hz=jtty_rxfreq_hz, tolerance_hz=jtty_tolerance_hz)
+            self.connect(self.if_filter, self.jtty_resampler)
+            self.connect(self.jtty_resampler, self.jtty_band_filter)
+            self.connect(self.jtty_band_filter, self.jtty_to_real)
+            self.connect(self.jtty_to_real, self.jtty_receiver)
+
         # --- ADS-L RX: both M-band channels at once off the full-rate source (each 200 kHz wide, far more than if_filter
         # passes), every channel through its own filter and FM discriminator into a burst demodulator.
         self.adsl_channels = []  # (frequency, xlating filter, discriminator, deframer)
@@ -922,7 +943,7 @@ class AdvancedRxFlowgraph(gr.top_block):
             self.aprs_audio_lowpass = aprs_lowpass
             self.connect(aprs_lowpass, self.aprs_deframer)
 
-        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "adsl", "adsb", "aprs"):
+        if active_digimode not in (None, "psk31", "rtty", "meshtastic", "meshcore", "pocsag", "ft8", "js8", "jtty", "adsl", "adsb", "aprs"):
             raise ValueError(f"unknown active_digimode {active_digimode!r}")
         # Which digimode (None/"psk31"/"rtty") has its branch connected to
         # if_filter -- fixed for this instance's lifetime (see the
