@@ -115,6 +115,7 @@
   let meshcorePublicKey = "";
   let meshcoreSendInfo = "";
   let meshcoreRxPreset = 0;
+  let rxRateLocked: number | null = null; // RX and TX both on a Pluto: they share one sample clock
   let meshcoreTx = { preset: 0, kind: "advert", name: "", text: "", route: "direct", role: 1, channel: "Public", recipient: "", with_position: false };
   const adsbAircraft = new Map<string, TrafficAircraft>();
   let adsbList: TrafficAircraft[] = [];
@@ -495,7 +496,8 @@
     if (g.fft_zoom) zoomIndex = Math.max(0, ZOOM_STEPS.indexOf(g.fft_zoom));
     if (g.fft_avg) fftAvg = g.fft_avg;
     if (g.fft_size) fftSize = g.fft_size;
-    rxSampleRate = g.sample_rate ?? "";
+    rxRateLocked = (rx as { rate_locked?: number | null }).rate_locked ?? null;
+    rxSampleRate = rxRateLocked ?? g.sample_rate ?? "";
     rxDirectSampling = (rx.gains as Record<string, unknown> | undefined)?.direct_sampling as string ?? "off";
     rxPpm = g.freq_correction_ppm ?? 0;
     const rawGains = (rx.gains ?? {}) as Record<string, unknown>;
@@ -672,6 +674,10 @@
       meshcoreNodes.clear();
       meshcoreList = [];
       meshcoreMessages = [];
+    }
+    if (e.event === "rx_rate_locked") {
+      rxRateLocked = (e.value as number | null) ?? null;
+      rxSampleRate = rxRateLocked ?? (e.saved as number | undefined) ?? "";
     }
     if (e.event === "aprs_update") aprsOnUpdate(e);
     if (e.event === "aprs_sent") aprsOnSent(e);
@@ -1399,7 +1405,8 @@
       {#if rxSampleRates.length}
         <div class="field narrow">
           <label for="rxRate">Bandbreite</label>
-          <select id="rxRate" bind:value={rxSampleRate} disabled={!rxConnected}
+          <select id="rxRate" bind:value={rxSampleRate} disabled={!rxConnected || rxRateLocked !== null}
+            title={rxRateLocked !== null ? "RX und TX teilen sich den Takt des Pluto: Die Rate ist fest, solange beide verbunden sind." : ""}
             on:change={() => rxSampleRate !== "" && setRxDisplay("sample_rate", rxSampleRate)}>
             <option value="">Standard</option>
             {#each rxSampleRates as r}<option value={r}>{(r / 1e6).toLocaleString("de-DE")} MS/s</option>{/each}

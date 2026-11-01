@@ -395,6 +395,28 @@ class GnuRadioBackend(SessionBackend):
         st.device_type = device_type
         st.connection = connection
         self._save_settings()
+        await self._sync_pluto_rate()
+
+    def _pluto_rate_locked(self) -> int | None:
+        """The rate the receiver has to run at, if RX and TX are both a Pluto. The AD9364 has one sample clock and the TX
+        side only knows one rate, so a different RX choice would be overwritten while the receiver goes on believing it.
+        Two separate Plutos would be locked as well: harmless, and the URIs don't tell whether they are the same one."""
+        if self.rx.device_type == "pluto" == self.tx.device_type and self.rx.connection is not None and self.tx.connection is not None:
+            return int(tx_devices.DEVICE_REGISTRY["pluto"].default_sample_rate_hz)
+        return None
+
+    async def _sync_pluto_rate(self) -> None:
+        """After a connection changed: tell the browser, and bring a running receiver to the rate it should now have.
+        The operator's own choice stays saved and comes back when only one direction uses the Pluto."""
+        locked = self._pluto_rate_locked()
+        await self._emit_event("rx_rate_locked", {"value": locked, "saved": self.rx.gains.get("sample_rate")})
+        st = self.rx
+        if st.tb is None or not st.mode:
+            return
+        cls = rx_devices.DEVICE_REGISTRY[st.device_type]
+        wanted = self._rx_sample_rate(st.mode) or cls.default_sample_rate_hz
+        if int(st.tb.sample_rate) != int(wanted):
+            await self._select_rx_mode(st.mode, st.mode_params)
 
     async def disconnect(self, direction: str) -> None:
         st = self._state(direction)
@@ -412,6 +434,7 @@ class GnuRadioBackend(SessionBackend):
         # says whether the direction is connected.
         st.connection = None
         self._save_settings()
+        await self._sync_pluto_rate()
 
     async def select_mode(self, direction: str, mode: str, params: dict) -> None:
         st = self._state(direction)
@@ -468,6 +491,9 @@ class GnuRadioBackend(SessionBackend):
                 # Pluto's TX timing (docs/FT8_PLAN.md section 7).
                 raise SessionError("rx: bandwidth can't change while an FT8 series is armed")
             value = int(value)
+            locked = self._pluto_rate_locked()
+            if locked is not None and value != locked:
+                raise SessionError(f"rx: RX and TX share the Pluto's clock, the rate stays at {locked / 1e6:g} MS/s while both are connected")
             if value < rx_config.fixed_tune_min_rate(st.mode):
                 raise SessionError(f"{st.mode.upper()} needs at least {rx_config.fixed_tune_min_rate(st.mode) / 1e6:g} MS/s")
             choices = rx_devices.DEVICE_REGISTRY[st.device_type].sample_rate_hz_choices if st.device_type else ()
@@ -672,7 +698,7 @@ class GnuRadioBackend(SessionBackend):
         tx["settings"] = self._tx_settings()
         return {
             "tx": tx,
-            "rx": _snapshot_direction(self.rx, False),
+            "rx": {**_snapshot_direction(self.rx, False), "rate_locked": self._pluto_rate_locked()},
         }
 
     async def shutdown(self) -> None:
@@ -861,6 +887,9 @@ class GnuRadioBackend(SessionBackend):
     def _rx_sample_rate(self, mode: str | None = None) -> int | None:
         """Saved choice if the current device supports it, else the device default. ADS-L and ADS-B also fall back to
         the default (always fast enough) from a too low saved choice, which stays saved for the other modes."""
+        locked = self._pluto_rate_locked()
+        if locked is not None:
+            return locked
         rate = self.rx.gains.get("sample_rate")
         choices = rx_devices.DEVICE_REGISTRY[self.rx.device_type].sample_rate_hz_choices
         if rate is None or int(rate) not in choices:

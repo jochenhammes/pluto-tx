@@ -1108,3 +1108,53 @@ async def test_meshcore_rebuilds_for_another_phy_and_leaving_restores_the_freque
     assert b.tx.freq_hz == 145_500_000.0
     assert b.tx.tb.nominal_freq_hz == 145_500_000.0
     await b.disconnect("tx")
+
+
+# -- Pluto as RX and TX --
+
+async def _pluto_pair(tmp_path, monkeypatch):
+    import numpy as np
+
+    fakes = _repo_module("fakes")
+    b, events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, 2_500_000, np.zeros(2_500_000, np.complex64))
+    fake_rx = radio_backend.rx_devices.DEVICE_REGISTRY["fake"]
+    monkeypatch.setattr(fake_rx, "probe_with_timeout", staticmethod(lambda *a, **k: None))
+    monkeypatch.setitem(radio_backend.rx_devices.DEVICE_REGISTRY, "pluto", fake_rx)
+    monkeypatch.setitem(radio_backend.tx_devices.DEVICE_REGISTRY, "pluto", fakes.FakeTxDevice)
+    monkeypatch.setitem(radio_backend.DEVICE_LABELS, "pluto", "fake")
+    b.rx.device_type = "pluto"
+    b.tx.freq_hz = 145_500_000.0
+    return b, events
+
+
+async def test_pluto_rx_follows_the_tx_rate_and_gets_its_own_choice_back(tmp_path, monkeypatch):
+    b, events = await _pluto_pair(tmp_path, monkeypatch)
+    await b.set_gain("rx", "sample_rate", 1_000_000)
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.tb.sample_rate == 1_000_000
+    await b.connect("tx", "pluto", "x")
+    assert b.rx.tb.sample_rate == 2_500_000
+    assert ("rx_rate_locked", {"value": 2_500_000, "saved": 1_000_000}) in events
+    assert b.snapshot()["rx"]["rate_locked"] == 2_500_000
+    assert b.rx.gains["sample_rate"] == 1_000_000  # the operator's choice stays saved
+    with pytest.raises(SessionError, match="share"):
+        await b.set_gain("rx", "sample_rate", 1_000_000)
+    await b.select_mode("rx", "ssb", {})  # any rebuild keeps it
+    assert b.rx.tb.sample_rate == 2_500_000
+    await b.disconnect("tx")
+    assert b.rx.tb.sample_rate == 1_000_000
+    assert ("rx_rate_locked", {"value": None, "saved": 1_000_000}) in events
+    assert b.snapshot()["rx"]["rate_locked"] is None
+    await b.disconnect("rx")
+
+
+async def test_other_devices_keep_their_rate(tmp_path, monkeypatch):
+    b, _events = await _pluto_pair(tmp_path, monkeypatch)
+    b.rx.device_type = "fake"
+    await b.set_gain("rx", "sample_rate", 1_000_000)
+    await b.select_mode("rx", "fm", {})
+    await b.connect("tx", "pluto", "x")
+    assert b.rx.tb.sample_rate == 1_000_000
+    assert b.snapshot()["rx"]["rate_locked"] is None
+    await b.disconnect("tx")
+    await b.disconnect("rx")
