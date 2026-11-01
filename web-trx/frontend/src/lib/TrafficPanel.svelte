@@ -99,7 +99,7 @@
     position: fixed;
     inset: 0;
     z-index: 2000;
-    padding: 8px;
+    padding: 56px 8px 8px; /* NOTAUS stays visible above it */
     background: var(--bg-0);
   }
   .head {

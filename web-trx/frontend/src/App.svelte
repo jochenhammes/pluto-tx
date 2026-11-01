@@ -2226,7 +2226,25 @@
     padding-bottom: 2px;
   }
   /* Narrow screens: stacked, and the page scrolls normally instead. */
+  /* NOTAUS stays reachable: above the fullscreen map (z-index 2000, which leaves room for it), and in the
+     narrow layout, where the page scrolls, fixed in the corner instead of scrolling away. */
+  .topbar .danger {
+    position: relative;
+    z-index: 2100;
+  }
   @media (max-width: 1100px) {
+    .topbar {
+      flex-wrap: wrap;
+      padding-right: 104px;
+    }
+    .topbar .danger {
+      position: fixed;
+      top: 12px;
+      right: 16px;
+    }
+    .spacer {
+      display: none;
+    }
     .app {
       height: auto;
       min-height: 100vh;
