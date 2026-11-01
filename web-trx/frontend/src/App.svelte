@@ -525,6 +525,7 @@
     if (rx.mode === "fm" && typeof rx.mode_params?.deemphasis === "boolean") rxDeemphasis = rx.mode_params.deemphasis;
     if (rx.mode === "rtty") rxRtty = { ...rxRtty, ...(rx.mode_params as typeof rxRtty) };
     if (rx.mode === "ft8" && typeof rx.mode_params?.decoder === "string") rxFt8Decoder = rx.mode_params.decoder;
+    if (rx.mode === "meshcore" && typeof rx.mode_params?.preset === "number") meshcoreRxPreset = rx.mode_params.preset;
     if (rx.mode === "js8") rxJs8 = { ...rxJs8, ...(rx.mode_params as Partial<typeof rxJs8>) };
     if (tx.mode === "rtty") {
       const { text, ...rest } = p as typeof txRtty & { text?: string };
@@ -1416,6 +1417,14 @@
           {#each rxModes as [v, l]}<option value={v}>{l}</option>{/each}
         </select>
       </div>
+      {#if rxMode === "meshcore"}
+        <div class="field narrow">
+          <label for="rxMcPreset">Preset</label>
+          <select id="rxMcPreset" bind:value={meshcoreRxPreset} on:change={selectRxMode} disabled={!rxConnected}>
+            {#each meshcorePresets as p, i}<option value={i}>{p.name}</option>{/each}
+          </select>
+        </div>
+      {/if}
       <div class="field narrow">
         <label for="rxAudioBtn">Audio</label>
         <button id="rxAudioBtn" on:click={toggleAudio} disabled={rxFixedTune}
