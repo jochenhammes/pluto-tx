@@ -212,6 +212,7 @@ echo "$CODEC_SHA  $WORK/$CODEC_TAR" | sha256sum -c -
 mkdir -p "$STAGE$PKG_LIB/wsjt-codec" "$LICENSES/wsjt-codec"
 tar xzf "$WORK/$CODEC_TAR" -C "$STAGE$PKG_LIB/wsjt-codec" --strip-components=1
 mv "$STAGE$PKG_LIB/wsjt-codec/COPYING" "$STAGE$PKG_LIB/wsjt-codec/THIRD-PARTY.txt" "$LICENSES/wsjt-codec/"
+mv "$STAGE$PKG_LIB/wsjt-codec/share/doc" "$LICENSES/wsjt-codec/bundled-libraries"
 rm -rf "$STAGE$PKG_LIB/wsjt-codec/share"
 
 # --- self-check ------------------------------------------------------------------

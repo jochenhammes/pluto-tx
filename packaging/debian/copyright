@@ -53,6 +53,13 @@ License: GPL-3.0-or-later
 Comment: Built from unmodified JS8Call-improved sources
  https://github.com/JS8Call-improved/JS8Call-improved plus tools/js8ref.
 
+Files: usr/lib/pluto-tx/wsjt-codec/*
+Copyright: 2001-2026 Joseph Taylor K1JT and the WSJT Development Group
+License: GPL-3.0-or-later
+Comment: Unmodified release binaries of https://github.com/WSJTX/wsjtx (packaging/components.lock), with
+ the libraries that release bundles (libgfortran, libgomp, FFTW). Their licences are in
+ /usr/share/doc/pluto-tx/licenses/wsjt-codec/.
+
 Files: usr/share/pluto-tx/espdr/*
 Copyright: h0m3us3r (eSpDR), 2026 Jochen Hammes (esp32-sdr-trx)
 License: 0BSD
