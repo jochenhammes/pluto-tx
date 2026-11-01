@@ -1001,3 +1001,110 @@ async def test_meshcore_identity_is_not_created_just_by_looking(tmp_path, monkey
     assert len(b.meshcore_snapshot()["public_key"]) == 64
     await b.meshcore_options({"show_unverified": True})
     assert b.meshcore_snapshot()["options"] == {"decrypt_dm": True, "show_unverified": True}
+
+
+async def _meshcore_tx(tmp_path, monkeypatch, **settings):
+    fakes = _repo_module("fakes")
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PLUTO_TX_MESHCORE_IDENTITY", str(tmp_path / "identity.json"))
+    monkeypatch.setitem(radio_backend.tx_devices.DEVICE_REGISTRY, "fake", fakes.FakeTxDevice)
+    monkeypatch.setitem(radio_backend.DEVICE_LABELS, "fake", "fake")
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    b.tx.device_type, b.tx.connection, b.tx.freq_hz = "fake", "x", 145_500_000.0
+    return b, events, modes.normalize_params("tx", "meshcore", settings)
+
+
+async def _meshcore_key_and_take_iq(b, seconds=None):
+    import numpy as np
+
+    await b.ptt(True)
+    await asyncio.sleep(seconds or b.tx.tb.meshcore_hold_s + 0.5)
+    iq = np.array(b.tx.tb.device.sink.data(), dtype=np.complex64)
+    return iq
+
+
+async def _meshcore_decode_with_the_web_receiver(tmp_path, monkeypatch, iq, channel=None):
+    import numpy as np
+
+    rate = 2_500_000
+    pad = np.zeros(rate // 2, np.complex64)
+    rx, _events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, rate, np.concatenate([pad, iq, pad]))
+    if channel:
+        await rx.meshcore_channel_set("Privat", channel)
+    await rx.select_mode("rx", "meshcore", {"preset": 0})
+    await asyncio.to_thread(rx.rx.tb.wait)
+    await asyncio.sleep(1.0)
+    rows = rx._meshcore_state.take_changed()[0]
+    await rx.disconnect("rx")
+    return rows
+
+
+@needs_lora
+async def test_meshcore_advert_goes_through_web_tx_and_web_rx(tmp_path, monkeypatch):
+    b, events, params = await _meshcore_tx(tmp_path, monkeypatch, name="", route="direct", with_position=True)
+    await b.select_mode("tx", "meshcore", params)
+    assert b.tx.freq_hz == 869_618_000.0
+    assert ("tuned", {"direction": "tx", "freq_hz": 869_618_000.0}) in events
+    with pytest.raises(SessionError):
+        await b.tune("tx", 145_500_000.0)
+    iq = await _meshcore_key_and_take_iq(b)
+    sent = next(f for n, f in events if n == "meshcore_sent")
+    json.dumps(sent)
+    assert (sent["kind"], sent["name"], "hex" in sent) == ("advert", "DA2JH", False)
+    assert sent["duty_used_s"] > 0
+    await b.ptt(False)
+    await b.disconnect("tx")
+    rows = await _meshcore_decode_with_the_web_receiver(tmp_path, monkeypatch, iq)
+    assert [(r["kind"], r["name"], r["verified"], r["route"]) for r in rows] == [("advert", "DA2JH", True, "Direct")]
+    assert abs(rows[0]["latitude"] - 53.5) < 0.01
+
+
+@needs_lora
+async def test_meshcore_private_channel_key_is_used_but_not_exposed(tmp_path, monkeypatch):
+    b, events, params = await _meshcore_tx(tmp_path, monkeypatch, kind="group", channel="Privat", text="Grüße", name="N", route="direct")
+    await b.select_mode("tx", "meshcore", params)
+    with pytest.raises(SessionError, match="no key"):
+        await b.ptt(True)
+    await b.meshcore_channel_set("Privat", MESHCORE_KEY)
+    iq = await _meshcore_key_and_take_iq(b)
+    assert MESHCORE_KEY not in json.dumps(events).lower() and MESHCORE_KEY not in json.dumps(b.snapshot()).lower()
+    await b.ptt(False)
+    await b.disconnect("tx")
+    rows = await _meshcore_decode_with_the_web_receiver(tmp_path, monkeypatch, iq, MESHCORE_KEY)
+    assert [(r["kind"], r["channel"], r["sender"], r["text"]) for r in rows] == [("group_text", "Privat", "N", "Grüße")]
+
+
+@needs_lora
+async def test_meshcore_refusals_never_key(tmp_path, monkeypatch):
+    b, events, params = await _meshcore_tx(tmp_path, monkeypatch, kind="direct", text="Hi")
+    await b.select_mode("tx", "meshcore", params)
+    with pytest.raises(SessionError, match="recipient"):
+        await b.ptt(True)
+    await b.select_mode("tx", "meshcore", modes.normalize_params("tx", "meshcore", {"kind": "group"}))
+    with pytest.raises(SessionError, match="message"):
+        await b.ptt(True)
+    assert not b.keyed
+    assert "keyed" not in [n for n, _ in events]
+    await b.disconnect("tx")
+
+
+@needs_lora
+async def test_meshcore_rebuilds_for_another_phy_and_leaving_restores_the_frequency(tmp_path, monkeypatch):
+    b, _events, params = await _meshcore_tx(tmp_path, monkeypatch, name="N")
+    await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
+    fm_tb = b.tx.tb
+    assert not fm_tb.meshcore_phy_matches(0)
+    await b.select_mode("tx", "meshcore", params)
+    assert b.tx.tb is not fm_tb
+    assert b.tx.tb.mode == radio_backend.TX_MODES["meshcore"]
+    assert b.tx.tb.nominal_freq_hz == 869_618_000.0
+    first = b.tx.tb
+    await b.select_mode("tx", "meshcore", dict(params, preset=1))
+    assert b.tx.tb is not first
+    assert b.tx.tb.meshcore_preset.frequency_hz == 869_525_000.0
+    await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
+    assert b.tx.freq_hz == 145_500_000.0
+    assert b.tx.tb.nominal_freq_hz == 145_500_000.0
+    await b.disconnect("tx")

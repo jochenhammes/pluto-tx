@@ -253,3 +253,13 @@ def test_meshcore_rx_params_and_preset_count_match_pluto_tx():
     for bad in ({"preset": 2}, {"preset": -1}, {"preset": "0"}, {"preset": True}, {"other": 1}):
         with pytest.raises(ValueError):
             modes.normalize_params("rx", "meshcore", bad)
+
+
+def test_meshcore_tx_params():
+    p = modes.normalize_params("tx", "meshcore", {"kind": "group", "text": "Hi", "recipient": "AB" * 32})
+    assert (p["kind"], p["route"], p["role"], p["channel"], p["recipient"], p["with_position"]) == ("group", "flood", 1, "Public", "ab" * 32, False)
+    assert "secret" not in p
+    for bad in ({"secret": "00"}, {"kind": "ack"}, {"route": "x"}, {"role": 0}, {"role": True}, {"recipient": "abc"}, {"recipient": "g" * 64},
+                {"text": "x" * 181}, {"name": "x" * 33}, {"with_position": 1}):
+        with pytest.raises(ValueError):
+            modes.normalize_params("tx", "meshcore", bad)

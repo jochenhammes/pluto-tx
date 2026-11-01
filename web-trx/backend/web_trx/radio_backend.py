@@ -63,6 +63,7 @@ from pluto_tx import js8_message as tx_js8_message
 from pluto_tx.config import normalize_uri
 from pluto_tx.flowgraph import FT8_AVAILABLE as TX_FT8_AVAILABLE
 from pluto_tx.flowgraph import M17_AVAILABLE as TX_M17_AVAILABLE
+from pluto_tx.flowgraph import MESHCORE_AVAILABLE as TX_MESHCORE_AVAILABLE
 from pluto_tx.flowgraph import RADE_AVAILABLE as TX_RADE_AVAILABLE
 from pluto_tx.flowgraph import PlutoTxFlowgraph
 
@@ -164,11 +165,12 @@ TX_MODES = {
     "ft8": PlutoTxFlowgraph.MODE_FT8,
     "js8": PlutoTxFlowgraph.MODE_JS8,
     "aprs": PlutoTxFlowgraph.MODE_APRS,
+    "meshcore": PlutoTxFlowgraph.MODE_MESHCORE,
 }
 # One-shot modes render their whole transmission at key time and unkey on
 # their own (pluto_cli.runtime.run_tx_session); all others take the
 # browser microphone while PTT is held. FT8 is one too, keyed by its series.
-ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8", "aprs")
+ONE_SHOT_TX_MODES = ("pocsag", "rtty", "digitext", "ft8", "js8", "aprs", "meshcore")
 ONE_SHOT_TAIL_S = 0.3
 
 # TX audio processing (FM/SSB/LSB; M17 bypasses this chain in pluto-tx).
@@ -320,6 +322,7 @@ class GnuRadioBackend(SessionBackend):
         self._meshcore_state.set_hide_unverified(True)
         self._meshcore_channels: dict[str, str] = {}  # name -> key (hex); stays on this side, see meshcore_snapshot()
         self._meshcore_decrypt_dm = False
+        self._tx_freq_before_meshcore: float | None = None  # its preset sets the frequency; leaving brings this back
         self._aprs_lock = threading.Lock()
         self._aprs_pending: list[dict] = []  # new packets, from the GNU Radio thread to _rx_aux_loop
         self._aprs_auto_ack = False  # deliberately not saved: a restart never sends by itself
@@ -422,6 +425,8 @@ class GnuRadioBackend(SessionBackend):
 
     async def tune(self, direction: str, freq_hz: float) -> None:
         st = self._state(direction)
+        if direction == "tx" and st.tb is not None and st.mode == "meshcore":
+            raise SessionError("tx: MeshCore's frequency comes from its preset")
         if direction == "tx" and self.keyed:
             raise SessionError("tx: cannot retune while keyed")
         if direction == "rx" and st.connection is not None and _fixed_tune_hz(st.mode, st.mode_params) is not None:
@@ -1040,6 +1045,19 @@ class GnuRadioBackend(SessionBackend):
                                                     "show_unverified": not self._meshcore_state.hide_unverified,
                                                     "public_key": self._meshcore_public_key()})
 
+    def _meshcore_settings(self) -> dict:
+        params = self.tx.mode_params
+        channel = params["channel"]
+        secret = ""  # the Public channel
+        if params["kind"] == "group" and channel.lower() != meshcore_codec.PUBLIC_CHANNEL.name.lower():
+            if channel not in self._meshcore_channels:
+                raise SessionError(f"meshcore: no key saved for channel '{channel}'")
+            secret = self._meshcore_channels[channel]
+        center = station.locator_center(self.station.get("locator", "")) if params["with_position"] else None
+        return {"kind": params["kind"], "name": params["name"].strip() or self.station.get("call", ""), "text": params["text"],
+                "route": params["route"], "role": params["role"], "location": center, "channel_name": channel,
+                "channel_secret_hex": secret, "recipient_hex": params["recipient"]}
+
     async def _emit_meshcore_update(self, tb) -> None:
         rows, nodes = self._meshcore_state.take_changed()
         frames, invalid, hidden = self._meshcore_state.counts()
@@ -1264,11 +1282,28 @@ class GnuRadioBackend(SessionBackend):
         await self._cancel_js8("mode_change")  # a mode change ends a running JS8 message
         st = self.tx
         async with self._tx_lock:
+            tuned_before = st.freq_hz
+            if mode == "meshcore":
+                if self._tx_freq_before_meshcore is None:
+                    self._tx_freq_before_meshcore = st.freq_hz
+                st.freq_hz = rx_config.MESHCORE_PRESETS[params["preset"]].frequency_hz
+                # The LoRa branch is built with one PHY: another one, or a flowgraph built for another mode, needs a rebuild.
+                if st.tb is not None and not st.tb.meshcore_phy_matches(params["preset"]):
+                    await self._teardown_tx()
+            elif self._tx_freq_before_meshcore is not None:
+                st.freq_hz, self._tx_freq_before_meshcore = self._tx_freq_before_meshcore, None
+                if st.tb is not None:
+                    await asyncio.to_thread(st.tb.set_frequency, st.freq_hz)
             if st.tb is None:
                 try:
-                    st.tb = await asyncio.to_thread(self._build_tx, mode)
+                    st.tb = await asyncio.to_thread(self._build_tx, mode, params)
                 except Exception as e:
+                    st.freq_hz = tuned_before
                     raise SessionError(f"tx: could not start {st.device_type} ({st.connection}): {e}") from e
+                if mode == "meshcore" and st.tb.mode != TX_MODES[mode]:  # a sound card or ESP32-S3: the flowgraph falls back
+                    await self._teardown_tx()
+                    st.freq_hz, self._tx_freq_before_meshcore = self._tx_freq_before_meshcore, None
+                    raise SessionError(f"meshcore: not possible with {st.device_type}, it needs an RF device with LoRa")
             elif st.mode != mode:
                 # Live switch, no rebuild -- the same path pluto-tx's own GUI uses.
                 await asyncio.to_thread(st.tb.set_mode, TX_MODES[mode])
@@ -1278,13 +1313,16 @@ class GnuRadioBackend(SessionBackend):
                 raise SessionError(f"tx: invalid {mode} parameters: {e}") from e
             st.mode = mode
             st.mode_params = dict(params)
+        if st.freq_hz != tuned_before:
+            await self._emit_event("tuned", {"direction": "tx", "freq_hz": st.freq_hz})
         await self._emit_event("tx_power", _power_info(st.tb))
 
-    def _build_tx(self, mode: str):
+    def _build_tx(self, mode: str, params: dict | None = None):
         st = self.tx
         tb = PlutoTxFlowgraph(
             device_type=st.device_type, connection=st.connection, frequency=st.freq_hz,
             mode=TX_MODES[mode], source=PlutoTxFlowgraph.SRC_MIC,
+            meshcore_preset_index=(params or {}).get("preset", 0) if mode == "meshcore" else 0,
         )
         try:
             # Swap the server's local microphone for the browser's: the
@@ -1344,6 +1382,12 @@ class GnuRadioBackend(SessionBackend):
             if mode == "aprs":  # the station data can change after select_mode
                 await asyncio.to_thread(tb.set_aprs, **_aprs_settings(self.station, self.tx.mode_params, self._aprs_ack,
                                                                       self._aprs_message_number + 1))
+            meshcore_info = None
+            if mode == "meshcore":  # the station data and the channel keys can change after select_mode
+                await asyncio.to_thread(tb.set_meshcore_message, **self._meshcore_settings())
+                ok, message, meshcore_info = await asyncio.to_thread(tb.prepare_meshcore_tx)
+                if not ok:  # every refusal before any RF action
+                    raise SessionError(f"meshcore: {message}")
             problem = _tx_problem(tb, mode)
             if problem:
                 raise SessionError(f"{mode}: {problem}")
@@ -1361,7 +1405,14 @@ class GnuRadioBackend(SessionBackend):
             self.keyed = True
             self._keyed_at = self._last_mic_at = time.monotonic()
         await self._emit_event("keyed", {"mode": mode})
-        if mode == "aprs":
+        if mode == "meshcore":
+            used_s, budget_s = tb.meshcore_duty_status()
+            await self._emit_event("meshcore_sent", {
+                **self._meshcore_row(meshcore_info["summary"]), "airtime_s": round(meshcore_info["airtime_s"], 3),
+                "duty_used_s": round(used_s, 1), "duty_budget_s": round(budget_s, 1),
+            })
+            self._unkey_task = asyncio.create_task(self._auto_unkey_after(tb.meshcore_hold_s))
+        elif mode == "aprs":
             if tb.aprs_kind == "message":
                 self._aprs_message_number += 1
             await self._emit_event("aprs_sent", {**aprs_codec.summarize(aprs_codec.parse_frame(tb.aprs_frame)),
@@ -1706,7 +1757,7 @@ def _rx_mode_available(mode: str) -> bool:
 
 def _tx_mode_available(mode: str) -> bool:
     return {"m17": TX_M17_AVAILABLE, "rade": TX_RADE_AVAILABLE, "ft8": TX_FT8_AVAILABLE,
-            "js8": JS8_AVAILABLE}.get(mode, True)
+            "js8": JS8_AVAILABLE, "meshcore": TX_MESHCORE_AVAILABLE}.get(mode, True)
 
 
 def _js8_rx_submodes(name: str) -> tuple:
@@ -1862,7 +1913,9 @@ def _aprs_settings(station_data: dict, params: dict, ack: tuple[str, str] | None
 
 def _apply_tx_params(tb, mode: str, params: dict) -> None:
     # params are already validated/normalised by modes.normalize_params().
-    if mode == "pocsag":
+    if mode == "meshcore":
+        tb.set_meshcore_preset(params["preset"])  # the rest is set at key time, see _meshcore_settings()
+    elif mode == "pocsag":
         _apply_pocsag_params(tb, params)
     elif mode == "rtty":
         tb.set_rtty_text(params.get("text", ""))

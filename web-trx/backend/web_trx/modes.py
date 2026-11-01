@@ -16,6 +16,11 @@ from __future__ import annotations
 from . import station
 
 MESHCORE_PRESET_COUNT = 2  # pluto_tx.config.MESHCORE_PRESETS, checked by tests/test_modes.py
+MESHCORE_KINDS = ("advert", "group", "direct")
+MESHCORE_ROUTES = ("flood", "direct")
+MESHCORE_ROLES = (1, 2, 3, 4)  # meshcore_codec.ROLE_NAMES without "unknown"
+MESHCORE_MAX_NAME_LEN = 32
+MESHCORE_MAX_TEXT_LEN = 180  # the codec's own limit in bytes is what finally counts, see prepare_meshcore_tx()
 
 APRS_KINDS = ("beacon", "message")
 APRS_PATHS = ("WIDE1-1,WIDE2-1", "WIDE2-1", "none")
@@ -159,6 +164,8 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
     if mode == "meshcore" and direction == "rx":
         _reject_unknown(params, {"preset"}, "meshcore")
         return {"preset": _meshcore_preset(params)}
+    if mode == "meshcore" and direction == "tx":
+        return _meshcore_tx(params)
     if mode == "aprs" and direction == "tx":
         return _aprs_tx(params)
     if mode == "rade" and direction == "tx":
@@ -172,6 +179,27 @@ def _meshcore_preset(params: dict) -> int:
     if type(preset) is not int or not 0 <= preset < MESHCORE_PRESET_COUNT:
         raise ValueError(f"meshcore: preset must be 0..{MESHCORE_PRESET_COUNT - 1}")
     return preset
+
+
+def _meshcore_tx(params: dict) -> dict:
+    # A channel goes by name: parameters reach every browser and the TX log, its key must not (radio_backend).
+    _reject_unknown(params, {"preset", "kind", "name", "text", "route", "role", "channel", "recipient", "with_position"}, "meshcore")
+    kind = params.get("kind", "advert")
+    if kind not in MESHCORE_KINDS:
+        raise ValueError(f"meshcore: kind must be one of {MESHCORE_KINDS}")
+    route = params.get("route", "flood")
+    if route not in MESHCORE_ROUTES:
+        raise ValueError(f"meshcore: route must be one of {MESHCORE_ROUTES}")
+    role = params.get("role", 1)
+    if type(role) is not int or role not in MESHCORE_ROLES:
+        raise ValueError(f"meshcore: role must be one of {MESHCORE_ROLES}")
+    recipient = _text(params, 64, "meshcore", "recipient").strip().lower()
+    if recipient and not (len(recipient) == 64 and all(c in "0123456789abcdef" for c in recipient)):
+        raise ValueError("meshcore: recipient must be a public key of 64 hex digits")
+    return {"preset": _meshcore_preset(params), "kind": kind, "route": route, "role": role, "recipient": recipient,
+            "name": _text(params, MESHCORE_MAX_NAME_LEN, "meshcore", "name"), "text": _text(params, MESHCORE_MAX_TEXT_LEN, "meshcore"),
+            "channel": _text(params, 32, "meshcore", "channel").strip() or "Public",
+            "with_position": _bool(params, "with_position", False)}
 
 
 def _aprs_tx(params: dict) -> dict:
