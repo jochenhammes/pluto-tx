@@ -264,7 +264,9 @@ Der Modus **MeshCore (LoRa)** setzt die Frequenz aus dem Preset, sie ist in dies
 
 **Direktnachrichten** entschlüsseln ist ein Schalter, Standard aus. Die Node-Identität liegt in `~/.config/pluto-tx/meshcore_identity.json` und ist dieselbe wie in den Desktop-Apps; Web-TRX legt sie erst an, wenn der Schalter an ist oder ein Paket gesendet wird. Fremde Direktnachrichten lassen sich nicht lesen. Eine eigene lässt sich erst lesen, wenn das Advert des Absenders gehört wurde.
 
-Geprüft mit Fake-Geräten und Simulator: Advert und privater Kanal laufen durch den echten Sender und Empfänger. **Mit einem echten Heltec und über Funk ist dieser Weg noch nicht geprüft**; die Desktop-Apps sind es für den Empfang.
+**Geprüft:** Der Empfang über Funk mit RTL-SDR von einem echten Heltec V3 auf 869,618 MHz: Advert Direct und Flood, ein von einem Repeater weitergeleitetes Advert, Public-Text mit Umlauten; Inhalte und Signaturen stimmten. Mit Fake-Geräten und Simulator laufen Advert und privater Kanal durch den echten Sender und Empfänger.
+
+**Nicht geprüft:** Senden aus Web-TRX über Funk und Empfang am Heltec, langer Text, private Kanäle und Direktnachrichten über Funk, Pluto und HackRF als Empfänger, das zweite Preset. Zählerstände nicht entschlüsselbarer Pakete wurden nur mitgezählt.
 
 ### ADS-B mit Live-Karte
 
