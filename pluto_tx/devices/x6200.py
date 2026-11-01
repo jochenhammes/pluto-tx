@@ -9,6 +9,7 @@ it has a frequency and a power of its own (has_frequency_control()). Measured on
 
 connection: "<rig>|<audio>"; <rig> is a serial port or rigctld://host:port (optionally @<hamlib model>), <audio> an ALSA
 device or "monitor:<PipeWire node>", the only way in while PipeWire holds the card."""
+import json
 import os
 import shutil
 import subprocess
@@ -81,22 +82,15 @@ def _usb_hub_path(sys_device):
     return os.path.dirname(path)
 
 
-def pipewire_sink_for_card(card):
-    """PipeWire's sink node of an ALSA card, or None without PipeWire."""
-    if not shutil.which("wpctl"):
-        return None
+def pipewire_node_for_card(card, media_class):
+    """PipeWire's node of an ALSA card ("Audio/Sink", "Audio/Source"), or None without PipeWire."""
     try:
-        dump = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=3).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    import json
-    try:
-        nodes = json.loads(dump)
-    except ValueError:
+        nodes = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=3).stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     for node in nodes:
         props = (node.get("info") or {}).get("props") or {}
-        if props.get("media.class") == "Audio/Sink" and str(props.get("alsa.card")) == str(card):
+        if props.get("media.class") == media_class and str(props.get("alsa.card")) == str(card):
             return props.get("node.name")
     return None
 
@@ -105,7 +99,6 @@ def _set_pipewire_volume(node_name, value=1.0):
     """The radio's input is calibrated at full scale; PipeWire's default for a new card is 40 %, about -24 dB."""
     if shutil.which("wpctl"):
         try:
-            import json
             nodes = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=3).stdout)
             for node in nodes:
                 if ((node.get("info") or {}).get("props") or {}).get("node.name") == node_name:
@@ -127,6 +120,7 @@ class X6200Device(TxDevice):
     supports_frequency_correction = False
     needs_ptt_control = True
     supported_modes = frozenset({"ssb", "lsb", "rade", "digitext", "psk31", "rtty", "ft8", "js8", "jtty"})
+    supported_modes_reason = "it takes USB audio only in USB-D and LSB-D, so nothing that needs FM or AM"
     power_stages = (
         PowerStage(name="rfpower", label="RF power", kind="continuous_db", min_value=0.0, max_value=100.0, unit="%",
                    is_primary=True, off_value=0.0),
@@ -136,7 +130,8 @@ class X6200Device(TxDevice):
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz)
-        self._rig_spec, self._audio, self._model = parse_connection(connection)
+        rig, audio, self._model = parse_connection(connection)
+        self._rig_spec, self._audio = resolve_rig_and_audio(rig, audio, "Audio/Sink")
         self._client = None       # request path of the app
         self._estop_client = None # its own socket, so that E-STOP never waits for a request in progress
         self._manager = None
@@ -166,11 +161,8 @@ class X6200Device(TxDevice):
         if address:
             host, port = address
         else:
-            port_name = self._rig_spec or next(iter(_scan_serial_ports()), "")
-            if not port_name:
-                raise RigError("no X6200 found on a serial port")
             host, port = "127.0.0.1", DEFAULT_TCP_PORT
-            self._manager = RigctldManager(port_name, self._model, port)
+            self._manager = RigctldManager(self._rig_spec, self._model, port)
             self._manager.ensure_running()
         self._client = RigctlClient(host, port)
         self._estop_client = RigctlClient(host, port, timeout=0.5)
@@ -183,8 +175,7 @@ class X6200Device(TxDevice):
             self._client.set_frequency(self.frequency_hz)
 
     def _start_guard(self, port):
-        owned = self._manager.owned_pid if self._manager else None
-        command = [sys.executable, os.path.abspath(rig_guard.__file__), str(port)] + ([str(owned)] if owned else [])
+        command = [sys.executable, os.path.abspath(rig_guard.__file__), str(port)]
         self._guard = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     def _tell_guard(self, line):
@@ -281,7 +272,7 @@ class X6200Device(TxDevice):
             self._tell_guard(f"key {rig_guard.SETTLE_S}")
 
     def close(self):
-        """Ends the guard, which also releases the PTT once more and stops a rigctld this device started."""
+        """Ends the guard, which also releases the PTT once more. rigctld keeps running, see RigctldManager."""
         guard, self._guard = self._guard, None
         if guard is not None:
             try:
@@ -292,9 +283,7 @@ class X6200Device(TxDevice):
                 guard.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 guard.kill()
-        if self._manager is not None:
-            self._manager.stop()  # already ended by the guard: this reaps it, so that a reconnect finds the port free
-            self._manager = None
+        self._manager = None
 
     def read_hw_state(self):
         if self._client is None:
@@ -346,10 +335,24 @@ class X6200Device(TxDevice):
     def scan_devices_with_timeout(timeout_s=5.0):
         candidates = {}
         for port in _scan_serial_ports():
-            audio = _audio_next_to(port)
+            audio = audio_next_to(port)
             label = f"Xiegu X6200 ({port}" + (f", {audio[len(PIPEWIRE_PREFIX):]}" if audio else ", no sound card found") + ")"
             candidates[f"{port}|{audio}"] = label
         return candidates, None
+
+
+def resolve_rig_and_audio(rig, audio, media_class):
+    """-> (rig, audio) with a blank part filled in from what is attached. Raises RigError rather than leave the audio blank: a
+    blank device is the system default, and the radio would be keyed while the signal plays on the speakers."""
+    if not rig:
+        rig = next(iter(_scan_serial_ports()), "")
+        if not rig:
+            raise RigError("no X6200 found on a serial port")
+    if not audio and not rigctld_address(rig):
+        audio = audio_next_to(rig, media_class)
+    if not audio:
+        raise RigError(f"no sound card known for the radio on {rig}: give it after a |, as in {rig}|plughw:CARD=...")
+    return rig, audio
 
 
 def _scan_serial_ports():
@@ -361,7 +364,7 @@ def _scan_serial_ports():
     return found
 
 
-def _audio_next_to(port):
+def audio_next_to(port, media_class="Audio/Sink"):
     """The sound card on the same USB hub as the serial port, as a PipeWire node if there is one, else an ALSA device."""
     tty = os.path.join("/sys/class/tty", os.path.basename(port), "device")
     hub = _usb_hub_path(tty)
@@ -373,7 +376,7 @@ def _audio_next_to(port):
             continue
         device = os.path.join(root, name, "device")
         if os.path.exists(device) and _usb_hub_path(device) == hub:
-            node = pipewire_sink_for_card(name[4:])
+            node = pipewire_node_for_card(name[4:], media_class)
             if node:
                 return PIPEWIRE_PREFIX + node
             with open(os.path.join(root, name, "id")) as f:

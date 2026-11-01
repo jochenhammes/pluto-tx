@@ -94,6 +94,7 @@ PACKAGES=(
                         # proportional Sans/Serif faces) -- digitext.py's preferred font, not
                         # guaranteed present on a minimal system otherwise; falls back to Pillow's
                         # own built-in bitmap font if this is somehow still missing
+    libhamlib-utils   # rigctld, CAT for the Xiegu X6200 (devices/x6200.py, rigctl.py); started at connect time only
     python3-serial    # pyserial ("import serial"), for pluto_tx's AIOC TX device backend
                        # (devices/aioc.py, aioc_ptt.py) -- serial DTR/RTS PTT to a radio
                        # connected via an AIOC adapter (e.g. a Quansheng UV-K5)

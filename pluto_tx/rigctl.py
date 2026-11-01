@@ -24,7 +24,7 @@ class RigTimeout(RigError):
 class RigctlClient:
     """One TCP connection to rigctld. One request at a time, from any thread."""
 
-    def __init__(self, host="127.0.0.1", port=DEFAULT_TCP_PORT, timeout=1.5):
+    def __init__(self, host="127.0.0.1", port=DEFAULT_TCP_PORT, timeout=3.0):
         self.host, self.port, self.timeout = host, int(port), float(timeout)
         self._sock = None
         self._buffer = b""
@@ -74,6 +74,13 @@ class RigctlClient:
                         raise RigError(f"rigctld connection lost during {line!r}: {e}") from e
         raise RigError(f"rigctld did not answer {line!r}")
 
+    def _query(self, line):
+        """A read can safely be repeated: one lost answer (seen once under load, docs/x6200/TESTS.md) must not end a session."""
+        try:
+            return self.request(line)
+        except RigTimeout:
+            return self.request(line)
+
     def _read_answer(self, line):
         values = {}
         while True:
@@ -96,41 +103,38 @@ class RigctlClient:
                 values["value"] = text  # a level comes as a bare number after its "get_level: NAME" line
 
     def get_frequency(self):
-        return float(self.request("f")["Frequency"])
+        return float(self._query("f")["Frequency"])
 
     def set_frequency(self, hz):
         self.request(f"F {int(round(hz))}")
 
     def get_mode(self):
-        return self.request("m")["Mode"]
+        return self._query("m")["Mode"]
 
     def set_mode(self, mode):
         self.request(f"M {mode} 0")
 
     def get_ptt(self):
-        return int(self.request("t")["PTT"]) != 0
+        return int(self._query("t")["PTT"]) != 0
 
     def set_ptt(self, on):
         self.request(f"T {1 if on else 0}")
 
     def get_level(self, name):
-        return float(self.request(f"l {name}")["value"])
+        return float(self._query(f"l {name}")["value"])
 
     def set_level(self, name, value):
         self.request(f"L {name} {value:.4f}")
 
 
 class RigctldManager:
-    """Uses a rigctld already listening on the port, else starts one that this object owns."""
+    """Uses a rigctld already listening on the port, else starts one and leaves it running: no app may end it, because another
+    one (a receiver next to a transmitter, Web-TRX next to a desktop app) or rig_guard.py may need it to release the PTT."""
 
     def __init__(self, serial_port, model, tcp_port=DEFAULT_TCP_PORT, baud=19200, program=None):
         self.serial_port, self.model, self.tcp_port, self.baud = serial_port, int(model), int(tcp_port), int(baud)
         self.program = program
         self.process = None
-
-    @property
-    def owned_pid(self):
-        return self.process.pid if self.process is not None else None
 
     def _responds(self):
         client = RigctlClient(port=self.tcp_port, timeout=1.0)
@@ -151,7 +155,7 @@ class RigctldManager:
         self.process = subprocess.Popen(
             [program, "-m", str(self.model), "-r", self.serial_port, "-s", str(self.baud), "-T", "127.0.0.1", "-t", str(self.tcp_port)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True)  # outlives a dying app, so that rig_guard.py can still release the PTT through it
+            start_new_session=True)  # outlives the app: see the class docstring
         end = time.monotonic() + RIGCTLD_START_TIMEOUT_S
         while time.monotonic() < end:
             if self.process.poll() is not None:
@@ -159,19 +163,8 @@ class RigctldManager:
             if self._responds():
                 return
             time.sleep(0.1)
-        self.stop()
+        self.process.terminate()
         raise RigError(f"no answer from the radio on {self.serial_port} through rigctld")
-
-    def stop(self):
-        process, self.process = self.process, None
-        if process is None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
 
 
 def _find_rigctld():

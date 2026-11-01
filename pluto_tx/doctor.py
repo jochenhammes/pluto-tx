@@ -117,6 +117,14 @@ def check_components(r: Report):
         r.ok(f"RADE (rade_c): lpcnet_demo {paths.program('lpcnet_demo')}")
     else:
         r.warn("RADE (rade_c) not available", _hint("install-rade.sh"))
+    if paths.program("wsjt-codec"):
+        r.ok(f"JTTY: wsjt-codec {paths.program('wsjt-codec')}")
+    else:
+        r.warn("JTTY not available (wsjt-codec)", _hint("install-jtty.sh"))
+    if paths.program("rigctld"):
+        r.ok(f"Xiegu X6200: rigctld {paths.program('rigctld')}")
+    else:
+        r.warn("Xiegu X6200 not available (rigctld)", "apt install libhamlib-utils")
     js8ref, jsc = paths.program("js8ref"), paths.data_file("jsc.json")
     if js8ref and jsc:
         r.ok(f"JS8: js8ref {js8ref}, word lists {jsc}")

@@ -14,6 +14,14 @@ DEVICE_REGISTRY = {
 }
 
 
+# Needs pyserial; Hamlib's rigctld only at connect time. Same posture as the TX side.
+try:
+    from .x6200 import X6200RxDevice
+    DEVICE_REGISTRY["x6200"] = X6200RxDevice
+except ImportError:
+    pass
+
+
 def build_device(device_type, connection=None, frequency_hz=None, sample_rate_hz=None, bandwidth_hz=None,
                   buffer_size=None):
     device_cls = DEVICE_REGISTRY[device_type]

@@ -92,6 +92,7 @@ class TxDevice(abc.ABC):
     # (the ESP32-S3 sends the FREQUENCY of a constant-envelope signal and nothing else) lists them here; flowgraph.py falls back to FM for
     # any other, pluto_cli refuses them with a message and the GUI greys them out.
     supported_modes: Optional[frozenset] = None
+    supported_modes_reason: str = "it sends the frequency of a constant-envelope signal and nothing else"
 
     @classmethod
     def supports_mode(cls, mode_name: str) -> bool:

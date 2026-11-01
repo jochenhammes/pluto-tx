@@ -1294,3 +1294,55 @@ def test_jtty_without_the_codec_is_not_offered(monkeypatch):
     monkeypatch.setattr(radio_backend.jtty_codec, "available", lambda: False)
     assert not radio_backend._rx_mode_available("jtty")
     assert not radio_backend._tx_mode_available("jtty")
+
+
+async def _x6200_backend(tmp_path, monkeypatch):
+
+    from gnuradio import blocks, gr
+    fake = _repo_module("fake_rigctld")
+    rig = fake.FakeRigctld(ptt_delay_s=0.05)
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr("pluto_tx.devices.x6200._set_pipewire_volume", lambda *a: None)
+    monkeypatch.setattr("pluto_tx.audio_devices.open_output_device", lambda *a: blocks.null_sink(gr.sizeof_float))
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    return b, events, rig, f"rigctld://127.0.0.1:{rig.port}|monitor:n"
+
+
+def test_x6200_lists_only_what_it_can_send():
+    modes_by_device = make_backend()[0].features()["tx_device_modes"]
+    assert "jtty" in modes_by_device["x6200"] or not radio_backend.jtty_codec.available()
+    assert {"ssb", "lsb", "rtty"} <= set(modes_by_device["x6200"])
+    assert not {"fm", "pocsag", "aprs", "m17", "meshcore"} & set(modes_by_device["x6200"])
+    assert "fm" in modes_by_device["pluto"]
+
+
+async def test_x6200_refuses_a_mode_it_cannot_send(tmp_path, monkeypatch):
+    b, _events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        with pytest.raises(SessionError, match="cannot send FM"):
+            await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
+@needs_jtty
+async def test_x6200_sends_jtty_through_web_trx(tmp_path, monkeypatch):
+    b, events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        await b.tune("tx", 14_092_000.0)
+        await b.select_mode("tx", "jtty", modes.normalize_params("tx", "jtty", {"text": "CQ DA2JH CQ"}))
+        await b.ptt(True)
+        assert b.keyed
+        assert rig.ptt
+        assert (rig.frequency, rig.mode) == (14_092_000.0, "PKTUSB")
+        assert next(f for n, f in events if n == "jtty_sent")["text"] == "CQ DA2JH CQ"
+        await asyncio.sleep(b.tx.tb.jtty_hold_s + 0.5)
+        assert not b.keyed
+        assert not rig.ptt
+    finally:
+        await b.disconnect("tx")
+        rig.close()

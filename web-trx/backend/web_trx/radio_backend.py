@@ -222,9 +222,9 @@ MIC_SILENCE_UNKEY_S = 1.5
 DEFAULT_TX_TIMEOUT_S = 180.0
 MIC_BLOCK_S = 0.01  # granularity of the paced mic source
 
-DEVICE_LABELS = {"pluto": "PlutoSDR", "hackrf": "HackRF One", "rtlsdr": "RTL-SDR"}
-RX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "rtlsdr") if t in rx_devices.DEVICE_REGISTRY)
-TX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf") if t in tx_devices.DEVICE_REGISTRY)
+DEVICE_LABELS = {"pluto": "PlutoSDR", "hackrf": "HackRF One", "rtlsdr": "RTL-SDR", "x6200": "Xiegu X6200"}
+RX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "rtlsdr", "x6200") if t in rx_devices.DEVICE_REGISTRY)
+TX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "x6200") if t in tx_devices.DEVICE_REGISTRY)
 
 
 class _AudioTap(gr.sync_block):
@@ -375,7 +375,8 @@ class GnuRadioBackend(SessionBackend):
                         "submodes": list(tx_js8.SPEEDS), "jsc": tx_js8_message.jsc_available(),
                         "clock_synced": clock.ntp_synchronized()},
                 "jtty": {"available": jtty_codec.available()},
-                "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)]}
+                "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)],
+                "tx_device_modes": {t: [m for m in TX_MODES if _tx_mode_available(m) and _device_sends(t, m)] for t in TX_DEVICE_TYPES}}
 
     def device_types(self) -> dict[str, list[list[str]]]:
         return {
@@ -1332,6 +1333,9 @@ class GnuRadioBackend(SessionBackend):
     async def _select_tx_mode(self, mode: str, params: dict) -> None:
         if mode not in TX_MODES:
             raise SessionError(f"unsupported tx mode '{mode}'")
+        if self.tx.device_type and not _device_sends(self.tx.device_type, mode):
+            cls = tx_devices.DEVICE_REGISTRY[self.tx.device_type]
+            raise SessionError(f"{cls.display_name} cannot send {mode.upper()}: {cls.supported_modes_reason}")
         if not _tx_mode_available(mode):
             raise SessionError(f"{mode.upper()} is not available on this server (see pluto-tx install-{mode}.sh)")
         if self.keyed:
@@ -1826,6 +1830,10 @@ def _rx_mode_available(mode: str) -> bool:
     if mode == "jtty":
         return jtty_codec.available()
     return {"m17": RX_M17_AVAILABLE, "rade": RX_RADE_AVAILABLE}.get(mode, True)
+
+
+def _device_sends(device_type: str, mode: str) -> bool:
+    return tx_devices.DEVICE_REGISTRY[device_type].supports_mode(PlutoTxFlowgraph.MODE_NAMES[TX_MODES[mode]])
 
 
 def _tx_mode_available(mode: str) -> bool:

@@ -1,6 +1,18 @@
 # Plan: Xiegu X6200 (OpenX6X00) als externes Gerät in pluto-tx
 
-Stand: 2026-11-01 · Status: **nur Plan, nichts implementiert**
+Stand: 2026-11-02 · Status: **Phasen 0–5 weitgehend umgesetzt, Stand und Abweichungen direkt unter dieser Zeile**
+
+> **Stand der Umsetzung, Ergebnisse statt Annahmen.** Messwerte: `docs/x6200/TESTS.md`, Aufbau: `docs/x6200/SPEC.md`.
+> - **A1 bestätigt:** Soundkarte und zwei serielle Ports (`/dev/ttyACM*`, einer spricht CI-V). **A2 entschieden:** USB-Audio sendet nur in USB-D und LSB-D. Damit entfallen FM, POCSAG und APRS über dieses Kabel. **A3:** 48 kHz, 16 Bit; Empfangsaudio liegt unabhängig von der Lautstärke an.
+> - **Hamlib:** Ubuntu 4.6.5 kennt Modell 3091.
+> - **Abweichungen vom Plan:**
+>   - `is_audio_only()` bedeutet jetzt „Signal über den Audioweg" und bleibt beim X6200 `True`; dazu kommt `has_frequency_control()`. Nur die Frequenz- und Bandstellen wurden angepasst, nicht alle rund 40 Aufrufe.
+>   - Neu ist `pluto_tx/rig_guard.py`: Gemessen bleibt der Sender nach dem Tod des Hosts getastet; ein eigener Prozess löst die PTT bei Zeitablauf und beim Schließen der Pipe.
+>   - `rigctld` wird nie automatisch beendet, weil Wächter und andere Apps ihn brauchen können.
+>   - Messgegenstelle ist der HackRF mit Whip-Antenne, kein Abgriff am Dummy-Load.
+> - **Umgesetzt:** Phasen 1–3, Phase 4 für SSB und LSB (FreeDV nicht), Phase 5 für GUI, CLI, Web-TRX, Installation, Phase 6 für CLI und Web-TRX-Backend.
+> - **Entscheidungen:** TCI nur als Rückfallebene, nicht gebaut. 10 % Standardgrenze, 120 s Sendelimit im Wächter. Gerätename `x6200`.
+> - **Offen:** siehe „Offene Punkte" in `docs/x6200/TESTS.md`, dazu Betrieb an der Antenne (Phase 8) und das Ziehen des USB-Kabels während einer Sendung.
 Geprüft gegen: `jochenhammes/pluto-tx` @ `a66593e` und `Guru-RF/OpenX6X00` @ `e475fbb` (Doku nennt v0.3.8), Hamlib `master`.
 Ziel-Branch (später): `feature/x6200-device` in pluto-tx.
 

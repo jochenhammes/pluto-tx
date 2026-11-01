@@ -107,7 +107,7 @@ Common flags (every mode):
 
 | flag | meaning |
 |---|---|
-| `--device {pluto,hackrf,soundcard,aioc}` | TX hardware backend (default: `pluto`) |
+| `--device {pluto,hackrf,soundcard,aioc,espdr,x6200}` | TX hardware backend (default: `pluto`). `x6200`: `--uri '<serial or rigctld://host:port>\|<ALSA device or monitor:node>'`, blank to find it; `--power` in % of its maximum, default ceiling 10 % |
 | `--uri URI` | Connection string (libiio URI for pluto, serial for hackrf, ignored for soundcard, `<serial port>|<ALSA device>` for aioc -- e.g. `/dev/ttyACM0|plughw:CARD=AllInOneCable,DEV=0`) |
 | `--freq HZ` | Transmit frequency in Hz |
 | `--freq-correction-ppm PPM` | Oscillator error of the device in ppm (default 0; positive = the device transmits too high, the hardware is tuned lower; scales with `--freq`; ignored for soundcard/aioc) |
@@ -153,7 +153,7 @@ Common flags (every mode):
 
 | flag | meaning |
 |---|---|
-| `--device {pluto,hackrf,rtlsdr,audio}` | RX hardware backend (default: `pluto`) |
+| `--device {pluto,hackrf,rtlsdr,audio,x6200}` | RX hardware backend (default: `pluto`) |
 | `--freq-correction-ppm PPM` | Oscillator error of the device in ppm (default 0; positive = the device runs too high, the hardware is tuned lower; scales with `--freq`) |
 | `--direct-sampling {off,i,q}` | RTL-SDR only: bypass the tuner and sample the antenna input directly (HF up to 28.8 MHz, aliased above 14.4 MHz; `q` for the RTL-SDR Blog V3). Default `off` |
 | `--uri URI` | Connection string; ignored for `audio`. For `--device rtlsdr`: a USB serial, or `host[:port]` of an `rtl_tcp` server (e.g. `192.168.178.34:1234`, port default 1234) to use a dongle on another machine |

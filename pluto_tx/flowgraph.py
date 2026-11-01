@@ -603,6 +603,9 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_layout = digitext_layout
         self.digitext_zoom = digitext_zoom
         self.digitext_min_freq_hz = digitext_min_freq_hz
+        if self.device.is_audio_only() and self.device.has_frequency_control():
+            # A transceiver's filter ends near 3 kHz; the default of 4 kHz is for an SDR's wide audio.
+            self.digitext_min_freq_hz = min(digitext_min_freq_hz, config.DIGITEXT_TRANSCEIVER_MIN_FREQ_HZ)
         self._digitext_audio = None
         self._digitext_audio_dirty = True
         self.digitext_duration_s = 0.0
@@ -1179,6 +1182,12 @@ class PlutoTxFlowgraph(gr.top_block):
         # unkey_ptt()'s MODE_FM + is_audio_only() branch.
         self.fm_audio_gain = blocks.multiply_const_ff(0.0)
         self.connect(self.fm_audio_adder, self.fm_audio_gain)
+        # SSB voice as audio, for a transceiver that makes the sideband itself: the same processed audio the SDR path's
+        # Hilbert transform gets. The radio decides upper or lower (X6200: USB-D, LSB-D).
+        self.ssb_audio_gain = None
+        if self.device.is_audio_only():
+            self.ssb_audio_gain = blocks.multiply_const_ff(0.0)
+            self.connect(self.limiter, self.ssb_audio_gain)
         # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
         # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
@@ -1383,6 +1392,9 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_POCSAG] = self.pocsag_audio_gain
         if self.aprs_audio_gain is not None:
             producers[self.MODE_APRS] = self.aprs_audio_gain
+        if self.ssb_audio_gain is not None:
+            producers[self.MODE_SSB] = self.ssb_audio_gain
+            producers[self.MODE_LSB] = self.ssb_audio_gain
         return producers
 
     def _wire_soundcard_audio_producer(self, gain_block):
@@ -2487,6 +2499,14 @@ class PlutoTxFlowgraph(gr.top_block):
             self.rade_audio_gain.set_k(1.0)
             self._keyed = True
             return
+        if self.mode in (self.MODE_SSB, self.MODE_LSB) and self.device.is_audio_only():
+            if self.device.needs_ptt_control:
+                self.device.pre_key()
+            self.ptt_mute.set_k(1.0)
+            self.tx_gain.set_k(1.0 + 0j)
+            self.ssb_audio_gain.set_k(config.SSB_SOUNDCARD_LEVEL)
+            self._keyed = True
+            return
         if self.mode == self.MODE_DIGITEXT:
             # Rebuild digitext_source fresh (reset to the start) right
             # before every transmission -- vector_source_f has no seek/
@@ -2730,6 +2750,14 @@ class PlutoTxFlowgraph(gr.top_block):
             self.ptt_mute.set_k(0.0)
             self.tx_gain.set_k(0.0 + 0j)
             self.fm_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
+        if self.mode in (self.MODE_SSB, self.MODE_LSB) and self.device.is_audio_only():
+            self.ptt_mute.set_k(0.0)
+            self.tx_gain.set_k(0.0 + 0j)
+            self.ssb_audio_gain.set_k(0.0)
             if self.device.needs_ptt_control:
                 self.device.post_unkey()
             self._keyed = False

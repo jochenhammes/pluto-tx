@@ -98,6 +98,12 @@ class RxDevice(abc.ABC):
         self._frequency_correction_ppm = 0.0
 
     @classmethod
+    def has_frequency_control(cls) -> bool:
+        """True if the device has a tunable frequency: differs from not is_audio_only() for a transceiver on CAT (X6200),
+        which delivers audio and tunes itself."""
+        return cls.frequency_range_hz != (0.0, 0.0)
+
+    @classmethod
     def is_audio_only(cls) -> bool:
         """True for backends with no RF concept at all (frequency_range_hz
         == (0.0, 0.0)) -- e.g. AudioDevice. Mirrors pluto_tx's

@@ -277,6 +277,7 @@ DIGITEXT_MIN_FREQ_HZ = 4000.0  # default value AND the GUI offset slider's maxim
 # operator slide down from the known-good 4000Hz and directly see the real result
 # on their own receiver is more useful than a second guessed "safe" constant.
 DIGITEXT_MIN_FREQ_HZ_FLOOR = 300.0
+DIGITEXT_TRANSCEIVER_MIN_FREQ_HZ = 400.0  # about 2.2 kHz of text then fits a transceiver's SSB filter
 # True silence appended after the message -- belt-and-suspenders alongside
 # the GUI's auto-unkey timer for a second REAL bug found this session: RF
 # continued transmitting (looked like an unmodulated carrier) well past
@@ -763,6 +764,7 @@ FT8_DRIFT_MODEL = {
 # --- JS8 (pluto_tx/js8*.py, docs/js8/SPEC.md; RX: pluto_advanced_rx/js8_*.py) -------------------------
 # Audio frequency of tone 0 (the signal occupies tone_hz .. tone_hz + 8 tone spacings, 25-160 Hz).
 # --- JTTY (pluto_tx/jtty_codec.py, docs/jtty/SPEC.md): whole messages through WSJT-X's own wsjt-codec.
+SSB_SOUNDCARD_LEVEL = 0.5                 # SSB voice as audio, into a transceiver's data input
 JTTY_DEFAULT_TONE_HZ = 1500.0             # the lowest tone; the signal is 127 Hz wide above it
 JTTY_TONE_RANGE_HZ = (200.0, 2800.0)      # the codec renders higher, but no receiver decodes above about 2950 Hz
 JTTY_MAX_TEXT_LEN = 80                    # a receiver keeps no more of a message

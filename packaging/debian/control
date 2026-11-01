@@ -20,7 +20,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}, ${gnuradio:Depe
  soapysdr-module-hackrf, soapysdr-module-rtlsdr, python3-soapysdr, hackrf, rtl-sdr,
  python3-pil, fonts-dejavu-mono, python3-serial, python3-cryptography, python3-meshtastic,
  python3-fastapi, python3-uvicorn, python3-websockets, python3-pydantic, openssl
-Recommends: wsjtx
+Recommends: wsjtx, libhamlib-utils
 Suggests: js8call
 Description: SDR transceiver apps for PlutoSDR, HackRF and RTL-SDR (GNU Radio)
  pluto-tx (transmitter), pluto-advanced-rx (receiver with waterfall),

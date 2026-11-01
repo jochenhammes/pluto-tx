@@ -1476,6 +1476,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Scan will report 0 devices found; enter a name manually if the "
                 "default isn't the right one."
             )
+        elif device_cls.connection_kind == "rig":
+            self.device_label.setText("Radio (CAT|audio, blank = find it):")
+            self.uri_combo.setToolTip(
+                "Serial port or rigctld://host:port, then | and the sound card: /dev/ttyACM1|monitor:<PipeWire node>. "
+                "Use Scan to find an attached X6200. Starts rigctld unless one is already running on port 4532."
+            )
         elif device_cls.device_type == "rtlsdr":
             self.device_label.setText("RTL-SDR (serial, or host[:port] of an rtl_tcp server):")
             self.uri_combo.setToolTip(

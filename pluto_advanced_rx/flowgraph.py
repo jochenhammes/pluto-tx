@@ -290,7 +290,7 @@ class AdvancedRxFlowgraph(gr.top_block):
             # waterfall's displayed axis must stay pinned to that raw,
             # unrotated spectrum rather than following this shift.
             self.audio_rotator = blocks.rotator_cc(
-                -2 * math.pi * (self.nominal_freq_hz + self.fine_offset_hz) / self.sample_rate
+                -2 * math.pi * self._audio_tuning_hz() / self.sample_rate
             )
             self.connect(self.pluto_source, self.audio_rotator)
             self.connect(self.audio_rotator, self.if_filter)
@@ -990,11 +990,16 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.audio_sink = audio_devices.open_output_device(config.AUDIO_RATE, audio_device)
         self.connect(self.rx_mute, self.audio_sink)
 
+    def _audio_tuning_hz(self):
+        """What the rotator shifts on an audio device. A transceiver tunes itself: an RF frequency here would move its audio
+        out of the band."""
+        return 0.0 if self.device.has_frequency_control() else self.nominal_freq_hz + self.fine_offset_hz
+
     def _retune(self):
         actual = self.nominal_freq_hz + self.fine_offset_hz
         if self.audio_rotator is not None:
-            self.audio_rotator.set_phase_inc(-2 * math.pi * actual / self.sample_rate)
-        else:
+            self.audio_rotator.set_phase_inc(-2 * math.pi * self._audio_tuning_hz() / self.sample_rate)
+        if self.audio_rotator is None or self.device.has_frequency_control():
             self.device.set_frequency(actual)
         for channel_hz, xlate, _demod, _deframer in self.adsl_channels:
             xlate.set_center_freq(channel_hz - actual)

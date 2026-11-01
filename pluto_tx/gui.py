@@ -2848,6 +2848,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "e.g. plughw:CARD=AllInOneCable,DEV=0. Use Scan to auto-detect an "
                 "attached AIOC -- fills this AND the Serial Port field below."
             )
+        elif device_cls.connection_kind == "rig":
+            self.device_label.setText("Radio (CAT|audio, blank = find it):")
+            self.uri_combo.setToolTip(
+                "Serial port or rigctld://host:port, then | and the sound card: /dev/ttyACM1|monitor:<PipeWire node>. "
+                "Use Scan to find an attached X6200. Starts rigctld unless one is already running on port 4532."
+            )
         elif device_cls.device_type == "espdr":
             self.device_label.setText("ESP32-S3 (blank = find the board):")
             self.uri_combo.setToolTip(
@@ -2899,7 +2905,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ft8_drift_check.setVisible(self.device_type_combo.currentData() in config.FT8_DRIFT_MODEL)
         self._update_device_connection_labels()
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
-        is_rf = not device_cls.is_audio_only()
+        is_rf = device_cls.has_frequency_control()  # includes a transceiver on CAT: its signal is audio, its frequency real
         lo_hz, hi_hz = device_cls.frequency_range_hz
         self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
         self.freq_spin.setVisible(is_rf)
@@ -2942,7 +2948,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _AUDIO_ONLY_CAPABLE_MODES = (
         PlutoTxFlowgraph.MODE_FM, PlutoTxFlowgraph.MODE_RADE, PlutoTxFlowgraph.MODE_DIGITEXT,
         PlutoTxFlowgraph.MODE_PSK31, PlutoTxFlowgraph.MODE_RTTY, PlutoTxFlowgraph.MODE_POCSAG,
-        PlutoTxFlowgraph.MODE_FT8, PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS,
+        PlutoTxFlowgraph.MODE_FT8, PlutoTxFlowgraph.MODE_JS8, PlutoTxFlowgraph.MODE_APRS, PlutoTxFlowgraph.MODE_JTTY,
     )
     _LORA_MODES = (PlutoTxFlowgraph.MODE_MESHTASTIC, PlutoTxFlowgraph.MODE_MESHCORE)
 
@@ -3015,7 +3021,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     was_enabled.setdefault(key, item.isEnabled())
                     item.setEnabled(False)
                     item.setToolTip(f"{device_cls.display_name} cannot send this: it carries only "
-                                    f"{', '.join(sorted(device_cls.supported_modes)).upper()} (the frequency of a constant-envelope signal)")
+                                    f"{', '.join(sorted(device_cls.supported_modes)).upper()} ({device_cls.supported_modes_reason})")
                 elif key in was_enabled:
                     before = was_enabled.pop(key)
                     item.setToolTip("")
@@ -3023,7 +3029,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         item.setEnabled(before)
         if not device_cls.supports_mode(PlutoTxFlowgraph.MODE_NAMES.get(self._current_mode, "")):
             self.mode_tab_widget.setCurrentIndex(0)
-            self.mode_combo.setCurrentIndex(self.mode_combo.findData(PlutoTxFlowgraph.MODE_FM))
+            fallback = PlutoTxFlowgraph.MODE_FM if device_cls.supports_mode("fm") else PlutoTxFlowgraph.MODE_SSB
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(fallback))
 
     def _set_indicator_idle(self):
         self.tx_indicator.setText("READY" if self._armed else "E-STOP - LOCKED")

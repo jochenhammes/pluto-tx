@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -57,6 +58,13 @@ class ClientTests(Base):
         self.rig.silent = True
         with self.assertRaises(RigTimeout):
             c.get_frequency()
+
+    def test_a_lost_answer_is_asked_again(self):
+        c = self.make(timeout=0.2)
+        c.get_frequency()
+        self.rig.silent = True
+        threading.Timer(0.1, lambda: setattr(self.rig, "silent", False)).start()
+        self.assertEqual(c.get_frequency(), self.rig.frequency)
 
     def test_reconnects_after_a_broken_connection(self):
         c = self.make()
@@ -140,6 +148,26 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(d.rigctld_address("/dev/ttyACM1"))
 
 
+class ResolveTests(unittest.TestCase):
+    def test_audio_is_never_left_blank(self):
+        from pluto_tx.devices import x6200 as d
+        with mock.patch.object(d, "audio_next_to", return_value="") as nearby, mock.patch.object(d, "_scan_serial_ports", return_value=["/dev/ttyACM1"]):
+            with self.assertRaisesRegex(RigError, "no sound card"):
+                d.resolve_rig_and_audio("", "", "Audio/Sink")
+            nearby.assert_called_once_with("/dev/ttyACM1", "Audio/Sink")
+            with self.assertRaisesRegex(RigError, "no sound card"):  # a remote rigctld has no USB hub to look at
+                d.resolve_rig_and_audio("rigctld://h:1", "", "Audio/Sink")
+        with mock.patch.object(d, "audio_next_to", return_value="plughw:CARD=X,DEV=0"), mock.patch.object(d, "_scan_serial_ports", return_value=["/dev/ttyACM1"]):
+            self.assertEqual(d.resolve_rig_and_audio("", "", "Audio/Sink"), ("/dev/ttyACM1", "plughw:CARD=X,DEV=0"))
+        self.assertEqual(d.resolve_rig_and_audio("/dev/x", "a", "Audio/Sink"), ("/dev/x", "a"))
+
+    def test_no_radio(self):
+        from pluto_tx.devices import x6200 as d
+        with mock.patch.object(d, "_scan_serial_ports", return_value=[]):
+            with self.assertRaisesRegex(RigError, "no X6200"):
+                d.resolve_rig_and_audio("", "", "Audio/Sink")
+
+
 class DeviceTests(Base):
     def make(self, frequency=14_090_000.0):
         from pluto_tx.devices.x6200 import X6200Device
@@ -157,7 +185,7 @@ class DeviceTests(Base):
         self.assertTrue(X6200Device.is_audio_only())
         self.assertTrue(X6200Device.has_frequency_control())
         self.assertTrue(X6200Device.needs_ptt_control)
-        for mode in ("jtty", "ft8", "js8", "rtty", "psk31", "digitext", "rade"):
+        for mode in ("jtty", "ft8", "js8", "rtty", "psk31", "digitext", "rade", "ssb", "lsb"):
             self.assertTrue(X6200Device.supports_mode(mode), mode)
         for mode in ("fm", "pocsag", "aprs", "m17", "meshcore", "meshtastic", "baseband", "filebroadcast", "freedv"):
             self.assertFalse(X6200Device.supports_mode(mode), mode)
@@ -314,10 +342,109 @@ class FlowgraphTests(Base):
         self.assertFalse(fg.keyed)
         self.assertEqual(fg.jtty_audio_gain.k(), 0.0)
 
+    def test_ssb_voice_goes_out_as_audio_in_the_data_mode(self):
+        from pluto_tx import flowgraph as txf
+        for mode, rig_mode in ((txf.PlutoTxFlowgraph.MODE_SSB, "PKTUSB"), (txf.PlutoTxFlowgraph.MODE_LSB, "PKTLSB")):
+            with self.subTest(rig_mode=rig_mode):
+                fg = self.make(mode)
+                fg.set_target_power(3.0)
+                fg.start()
+                time.sleep(0.2)
+                self.assertEqual(fg.ssb_audio_gain.k(), 0.0)
+                fg.key_ptt()
+                self.assertEqual(self.rig.mode, rig_mode)
+                self.assertGreater(fg.ssb_audio_gain.k(), 0.0)
+                self.assertTrue(self.rig.ptt)
+                fg.unkey_ptt()
+                self.assertEqual(fg.ssb_audio_gain.k(), 0.0)
+                self.assertFalse(self.rig.ptt)
+                fg.shutdown_safe()
+
     def test_an_unsupported_mode_does_not_fall_back_to_fm(self):
         from pluto_tx import flowgraph as txf
         fg = self.make(txf.PlutoTxFlowgraph.MODE_FM)
         self.assertEqual(fg.mode, txf.PlutoTxFlowgraph.MODE_RTTY)
+
+
+class GuiTests(Base):
+    """The TX app with the X6200 chosen: RF controls visible although its signal is audio, impossible modes grey."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt5 import QtCore, QtWidgets
+        QtCore.QStandardPaths.setTestModeEnabled(True)
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_controls_follow_the_device(self):
+        from pluto_tx import gui
+        from pluto_tx.flowgraph import PlutoTxFlowgraph as F
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        w.show()
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("x6200"))
+        self.app.processEvents()
+        self.assertTrue(w.freq_spin.isVisible())
+        self.assertTrue(w.power_slider.isVisible())
+        self.assertIn("%", w.power_row_label.text())
+        self.assertEqual((w.freq_spin.minimum(), w.freq_spin.maximum()), (1.8, 54.0))
+        for combo, mode in ((w.digimode_combo, F.MODE_POCSAG), (w.digimode_combo, F.MODE_APRS), (w.mode_combo, F.MODE_FM), (w.mode_combo, F.MODE_M17)):
+            self.assertFalse(combo.model().item(combo.findData(mode)).isEnabled(), mode)
+        self.assertTrue(w.digimode_combo.model().item(w.digimode_combo.findData(F.MODE_JTTY)).isEnabled())
+        self.assertEqual(w._current_mode, F.MODE_SSB)   # was FM, which this radio cannot send
+        self.assertIn("CAT", w.device_label.text())
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("soundcard"))
+        self.app.processEvents()
+        self.assertFalse(w.freq_spin.isVisible())
+
+
+class RxDeviceTests(Base):
+    def make(self, frequency=14_090_000.0):
+        from pluto_advanced_rx.devices.x6200 import X6200RxDevice
+        dev = X6200RxDevice(f"rigctld://127.0.0.1:{self.rig.port}|monitor:src", frequency, 48_000, None)
+        self.addCleanup(dev.close)
+        return dev, X6200RxDevice
+
+    def test_tunes_over_cat_and_lowers_the_capture_volume(self):
+        from pluto_advanced_rx.devices import x6200 as rx
+        dev, cls = self.make()
+        self.assertTrue(cls.is_audio_only())
+        self.assertTrue(cls.has_frequency_control())
+        with mock.patch.object(rx, "_set_pipewire_volume") as volume, mock.patch.object(rx, "_AudioToComplexSource") as source:
+            dev.build_source()
+        volume.assert_called_once_with("src", rx.CAPTURE_VOLUME)
+        source.assert_called_once_with(48_000, "monitor:src")
+        self.assertEqual(self.rig.frequency, 14_090_000.0)
+        dev.set_frequency(7_078_000.0)
+        self.assertEqual(self.rig.frequency, 7_078_000.0)
+        self.assertEqual(dev.read_hw_state()["s_meter_db"], -29.0)
+
+    def test_frequency_out_of_range_stays_off_the_radio(self):
+        dev, _cls = self.make()
+        from pluto_advanced_rx.devices import x6200 as rx
+        with mock.patch.object(rx, "_set_pipewire_volume"), mock.patch.object(rx, "_AudioToComplexSource"):
+            dev.build_source()
+        before = self.rig.frequency
+        dev.set_frequency(432_150_000.0)
+        self.assertEqual(self.rig.frequency, before)
+
+    def test_the_rotator_stays_at_zero_while_the_radio_tunes(self):
+        """A plain audio device shifts its band by the frequency; an RF frequency here would lose the signal."""
+        import numpy as np
+        from gnuradio import blocks, gr
+        from pluto_advanced_rx import devices, flowgraph as rxf
+        from pluto_advanced_rx.devices import x6200 as rx
+        with mock.patch.object(rx, "_set_pipewire_volume"), \
+                mock.patch.object(rx, "_AudioToComplexSource", side_effect=lambda *a: blocks.vector_source_c([0j] * 100, True)), \
+                mock.patch("pluto_tx.audio_devices.open_output_device", side_effect=lambda *a: blocks.null_sink(gr.sizeof_float)):
+            tb = rxf.AdvancedRxFlowgraph(device_type="x6200", uri=f"rigctld://127.0.0.1:{self.rig.port}|monitor:src", frequency=14_090_000.0,
+                                         sample_rate=48_000, active_digimode=None)
+        self.addCleanup(tb.shutdown)
+        self.assertIsNotNone(tb.audio_rotator)
+        self.assertEqual(tb._audio_tuning_hz(), 0.0)
+        self.assertEqual(self.rig.frequency, 14_090_000.0)
+        tb.set_frequency(7_078_000.0)
+        self.assertEqual(self.rig.frequency, 7_078_000.0)
+        self.assertEqual(tb._audio_tuning_hz(), 0.0)
 
 
 if __name__ == "__main__":
