@@ -199,6 +199,21 @@ install -m 755 "$WORK/js8ref-build/js8ref" "$BINDIR/js8ref"
 mkdir -p "$LICENSES/js8call"
 cp "$JS8_SRC"/LICENSE* "$LICENSES/js8call/" 2>/dev/null || cp "$JS8_SRC"/COPYING* "$LICENSES/js8call/"
 
+# --- wsjt-codec (JTTY): the WSJT-X project's release binaries, in a directory of their own ----
+log "wsjt-codec $WSJT_CODEC_TAG ($WSJT_CODEC_COMMIT)"
+case "$(uname -m)" in
+    x86_64) CODEC_ARCH=x86_64; CODEC_SHA="$WSJT_CODEC_SHA256_X86_64" ;;
+    aarch64) CODEC_ARCH=aarch64; CODEC_SHA="$WSJT_CODEC_SHA256_AARCH64" ;;
+    *) echo "no wsjt-codec for $(uname -m)" >&2; exit 1 ;;
+esac
+CODEC_TAR="wsjtx-${WSJT_CODEC_TAG#v}-linux-$CODEC_ARCH-codec.tar.gz"
+wget -q -O "$WORK/$CODEC_TAR" "https://github.com/WSJTX/wsjtx/releases/download/$WSJT_CODEC_TAG/$CODEC_TAR"
+echo "$CODEC_SHA  $WORK/$CODEC_TAR" | sha256sum -c -
+mkdir -p "$STAGE$PKG_LIB/wsjt-codec" "$LICENSES/wsjt-codec"
+tar xzf "$WORK/$CODEC_TAR" -C "$STAGE$PKG_LIB/wsjt-codec" --strip-components=1
+mv "$STAGE$PKG_LIB/wsjt-codec/COPYING" "$STAGE$PKG_LIB/wsjt-codec/THIRD-PARTY.txt" "$LICENSES/wsjt-codec/"
+rm -rf "$STAGE$PKG_LIB/wsjt-codec/share"
+
 # --- self-check ------------------------------------------------------------------
 log "Self-check"
 REF_OUT="$(LC_ALL=C.UTF-8 "$BINDIR/js8ref" decode "$REPO/tests/data/js8/wav/cq_sm0_f0.wav" 1 2>/dev/null || true)"

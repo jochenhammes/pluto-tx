@@ -71,6 +71,10 @@ assert "js8" in js8_decoder.available_backends(), js8_decoder.available_backends
 print("FT8, RADE, JS8 (codec, JSC, js8ref):", paths.program("lpcnet_demo"), paths.program("js8ref"), paths.data_file("jsc.json"))
 frames = js8_message.build_frames("DA2JH", "", "@ALLCALL JS8 SELF TEST", js8.FAST)
 print("JS8 test message ->", len(frames), "frame(s)")
+from pluto_tx import jtty_codec
+assert jtty_codec.self_test(), "JTTY codec"
+assert any("NO FALSE DECODES!" in t for t in jtty_codec.decode_pcm_file("/src/tests/data/jtty/260807_134110.wav")), "JTTY sample"
+print("JTTY:", jtty_codec.codec_program())
 EOF' || fail "components"
 out="$(run_as "/usr/lib/pluto-tx/bin/js8ref decode /src/tests/data/js8/wav/cq_sm0_f0.wav 1" 2>/dev/null)"
 grep -q "@ALLCALL CQ CQ CQ" <<<"$out" || fail "js8ref decode: $out"

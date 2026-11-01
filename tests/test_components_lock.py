@@ -14,6 +14,7 @@ INSTALLERS = {
     "install-rade.sh": ["RADE_C_COMMIT"],
     "install-ft8.sh": ["FT8_LIB_COMMIT"],
     "install-js8.sh": ["JS8_REPO", "JS8_TAG", "JS8_COMMIT"],
+    "install-jtty.sh": ["WSJT_CODEC_TAG", "WSJT_CODEC_COMMIT", "WSJT_CODEC_SHA256_X86_64", "WSJT_CODEC_SHA256_AARCH64"],
 }
 
 

@@ -762,6 +762,17 @@ FT8_DRIFT_MODEL = {
 
 # --- JS8 (pluto_tx/js8*.py, docs/js8/SPEC.md; RX: pluto_advanced_rx/js8_*.py) -------------------------
 # Audio frequency of tone 0 (the signal occupies tone_hz .. tone_hz + 8 tone spacings, 25-160 Hz).
+# --- JTTY (pluto_tx/jtty_codec.py, docs/jtty/SPEC.md): whole messages through WSJT-X's own wsjt-codec.
+JTTY_DEFAULT_TONE_HZ = 1500.0             # the lowest tone; the signal is 127 Hz wide above it
+JTTY_TONE_RANGE_HZ = (200.0, 2800.0)      # the codec renders higher, but no receiver decodes above about 2950 Hz
+JTTY_MAX_TEXT_LEN = 80                    # a receiver keeps no more of a message
+JTTY_AUDIO_LEVEL = 0.7                    # constant-envelope signal, same headroom as FT8 and JS8
+JTTY_SOUNDCARD_LEVEL = 0.5                # into a radio's mic input, as FT8 and JS8
+JTTY_TX_TAIL_S = 0.4                      # hold after the audio ends (resampler/sink latency), then unkey
+# WSJT-X's own list (models/FrequencyList.cpp, v3.3.0-beta5): provisional meeting places, USB dial, change with activity.
+JTTY_DIAL_FREQS_HZ = (1_839_000, 3_572_000, 7_078_000, 10_140_000, 14_090_000, 18_104_000, 21_090_000, 24_920_000,
+                      28_090_000, 50_160_000, 144_160_000)
+
 JS8_DEFAULT_TONE_HZ = 1500.0
 JS8_TONE_RANGE_HZ = (200.0, 3000.0)       # the whole signal stays inside this audio range
 JS8_IQ_LEVEL = FT8_IQ_LEVEL

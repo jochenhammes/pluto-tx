@@ -4,8 +4,10 @@ The one place that knows the two installation layouts:
 
   git checkout   the install-*.sh scripts build next to the code:
                  ft8_lib/libft8wrap.so, rade_c/build/src/{librade.so,lpcnet_demo},
-                 js8call/build-js8ref/js8ref, js8call/jsc.json
+                 js8call/build-js8ref/js8ref, js8call/jsc.json,
+                 wsjt-codec/bin/wsjt-codec (with its own wsjt-codec/lib)
   .deb package   /usr/lib/pluto-tx/{lib,bin}  architecture-dependent, private
+                 /usr/lib/pluto-tx/wsjt-codec/{bin,lib}  kept apart: its bundled libraries are its own
                  /usr/share/pluto-tx/js8/jsc.json
                  (the Python code itself lives in /usr/share/pluto-tx, marked
                  by a file named .pluto-tx-package next to pluto_tx/)
@@ -44,10 +46,15 @@ _CHECKOUT_LIBS = {
 _CHECKOUT_PROGRAMS = {
     "lpcnet_demo": "rade_c/build/src/lpcnet_demo",
     "js8ref": "js8call/build-js8ref/js8ref",
+    "wsjt-codec": "wsjt-codec/bin/wsjt-codec",
+}
+_PACKAGE_PROGRAMS = {
+    "wsjt-codec": "wsjt-codec/bin/wsjt-codec",
 }
 # Environment variables that name one program directly (checked first).
 _PROGRAM_ENV = {
     "js8ref": "JS8REF",
+    "wsjt-codec": "WSJT_CODEC",
 }
 _CHECKOUT_DATA = {
     "jsc.json": "js8call/jsc.json",
@@ -106,7 +113,7 @@ def program(name: str) -> str | None:
         candidates.append(Path(found))
     if name in _CHECKOUT_PROGRAMS:
         candidates.append(REPO_ROOT / _CHECKOUT_PROGRAMS[name])
-    candidates.append(PACKAGE_LIBDIR / "bin" / name)
+    candidates.append(PACKAGE_LIBDIR / _PACKAGE_PROGRAMS.get(name, f"bin/{name}"))
     for p in candidates:
         if p.is_file() and os.access(p, os.X_OK):
             return str(p)
