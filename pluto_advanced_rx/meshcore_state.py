@@ -16,6 +16,8 @@ class MeshcoreState:
         self._rows = []           # oldest first
         self._nodes = {}          # public key hex -> latest advert info
         self._version = 0
+        self._new_rows = []       # not yet taken by take_changed(), oldest first
+        self._changed_nodes = set()
         self._channels = [meshcore_codec.PUBLIC_CHANNEL]
         self._identity = None     # this app's node identity: direct messages addressed to it are decrypted
         self.hide_unverified = False  # rows that could not authenticate themselves (may be CRC-damaged frames)
@@ -54,8 +56,11 @@ class MeshcoreState:
         with self._lock:
             self._rows.append(info)
             del self._rows[:-MAX_ROWS]
+            self._new_rows.append(info)
+            del self._new_rows[:-MAX_ROWS]
             if info["kind"] == "advert" and info["verified"]:
                 self._nodes[info["public_key"]] = info
+                self._changed_nodes.add(info["public_key"])
                 self._retry_pending_direct_messages()
             self._version += 1
         return info
@@ -71,11 +76,14 @@ class MeshcoreState:
                 if fresh["kind"] == "direct_text":
                     fresh["time"] = row["time"]
                     self._rows[i] = fresh
+                    self._new_rows.append(fresh)
 
     def clear(self):
         with self._lock:
             self._rows.clear()
             self._nodes.clear()
+            self._new_rows.clear()
+            self._changed_nodes.clear()
             self._version += 1
 
     def get_snapshot(self):
@@ -85,6 +93,15 @@ class MeshcoreState:
             rows = [r for r in self._rows if r["kind"] != "invalid"
                     and not (self.hide_unverified and not r["verified"])]
             return self._version, list(rows)
+
+    def take_changed(self):
+        """-> (rows, nodes) since the last call, for a caller reporting changes only. Hidden rows stay out, as in
+        get_snapshot(); a direct message decrypted later comes again, now readable."""
+        with self._lock:
+            rows, self._new_rows = self._new_rows, []
+            nodes = [self._nodes[k] for k in self._changed_nodes if k in self._nodes]
+            self._changed_nodes = set()
+            return [r for r in rows if r["kind"] != "invalid" and not (self.hide_unverified and not r["verified"])], nodes
 
     def counts(self):
         """-> (frames received, invalid/damaged, hidden in the table)"""

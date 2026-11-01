@@ -270,5 +270,20 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.get_snapshot()[1][3]["kind"], "other")
 
 
+class TakeChangedTests(unittest.TestCase):
+    def test_new_rows_and_nodes_once_hidden_ones_stay_out(self):
+        from pluto_advanced_rx.meshcore_state import MeshcoreState
+        from pluto_tx.meshcore_identity import Identity
+        state = MeshcoreState()
+        state.set_hide_unverified(True)
+        state.on_frame(mc.build_advert(Identity(bytes(range(32))), "N", 1))
+        state.on_frame(b"\xff")
+        state.on_frame(mc.build_group_text(mc.GroupChannel("x", bytes(16)), "A", "unbekannt"))
+        rows, nodes = state.take_changed()
+        self.assertEqual([r["kind"] for r in rows], ["advert"])
+        self.assertEqual([n["name"] for n in nodes], ["N"])
+        self.assertEqual(state.take_changed(), ([], []))
+
+
 if __name__ == "__main__":
     unittest.main()

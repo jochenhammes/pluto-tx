@@ -113,6 +113,22 @@ class SessionBackend(abc.ABC):
         """ADS-L aircraft heard so far, for a client joining later (sent with 'hello')."""
         return {}
 
+    async def meshcore_clear(self) -> None:
+        raise SessionError("MeshCore is not available")
+
+    async def meshcore_options(self, params: dict) -> None:
+        raise SessionError("MeshCore is not available")
+
+    async def meshcore_channel_set(self, name: str, secret: str) -> None:
+        raise SessionError("MeshCore is not available")
+
+    async def meshcore_channel_delete(self, name: str) -> None:
+        raise SessionError("MeshCore is not available")
+
+    def meshcore_snapshot(self) -> dict:
+        """Nodes and packets heard so far and the channel names, for a client joining later. Never a channel key."""
+        return {}
+
     async def aprs_clear(self) -> None:
         raise SessionError("APRS is not available")
 
@@ -201,7 +217,8 @@ class SessionManager:
 
     REQUESTS = (
         "scan", "connect", "disconnect", "select_mode", "tune", "set_gain",
-        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "adsl_clear", "adsb_clear", "aprs_clear", "aprs_auto_ack", "hb_ack",
+        "ptt_on", "ptt_off", "estop", "set_station", "js8_auto", "adsl_clear", "adsb_clear", "aprs_clear", "aprs_auto_ack", "meshcore_clear", "meshcore_options", "meshcore_channel_set",
+        "meshcore_channel_delete", "hb_ack",
     )
 
     def __init__(self, backend: SessionBackend, tx_log=None):
@@ -350,6 +367,7 @@ class SessionManager:
                 "adsl": self.backend.adsl_snapshot(),
                 "adsb": self.backend.adsb_snapshot(),
                 "aprs": self.backend.aprs_snapshot(),
+                "meshcore": self.backend.meshcore_snapshot(),
                 **self.backend.snapshot(),
             })
             while True:
@@ -435,6 +453,15 @@ class SessionManager:
         elif request == "adsl_clear":
             await b.adsl_clear()
             await self._emit_event("adsl_cleared", {})
+        elif request == "meshcore_clear":
+            await b.meshcore_clear()
+            await self._emit_event("meshcore_cleared", {})
+        elif request == "meshcore_options":
+            await b.meshcore_options(params)
+        elif request == "meshcore_channel_set":
+            await b.meshcore_channel_set(str(params.get("name", "")), str(params.get("secret", "")))
+        elif request == "meshcore_channel_delete":
+            await b.meshcore_channel_delete(str(params.get("name", "")))
         elif request == "aprs_clear":
             await b.aprs_clear()
             await self._emit_event("aprs_cleared", {})

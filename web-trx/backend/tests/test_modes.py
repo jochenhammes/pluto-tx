@@ -242,3 +242,14 @@ def test_js8_tables_match_pluto_tx():
     cli = (PLUTO_TX_CONFIG.parents[1] / "pluto_cli" / "rx.py").read_text()
     choices = re.search(r'"--js8-decoder", choices=(\(.*?\))', cli).group(1)
     assert ast.literal_eval(choices) == modes.JS8_DECODERS
+
+
+def test_meshcore_rx_params_and_preset_count_match_pluto_tx():
+    from pluto_tx import config
+
+    assert modes.MESHCORE_PRESET_COUNT == len(config.MESHCORE_PRESETS)
+    assert modes.normalize_params("rx", "meshcore", {}) == {"preset": 0}
+    assert modes.normalize_params("rx", "meshcore", {"preset": 1}) == {"preset": 1}
+    for bad in ({"preset": 2}, {"preset": -1}, {"preset": "0"}, {"preset": True}, {"other": 1}):
+        with pytest.raises(ValueError):
+            modes.normalize_params("rx", "meshcore", bad)

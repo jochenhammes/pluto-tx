@@ -21,6 +21,7 @@ Scope of this first cut (see docs/PROJECT_PLAN.md section 9):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -44,12 +45,14 @@ from pluto_advanced_rx.adsb_state import AdsbState
 from pluto_advanced_rx.adsl_state import AdslState
 from pluto_advanced_rx.aprs_state import AprsState
 from pluto_advanced_rx.flowgraph import M17_AVAILABLE as RX_M17_AVAILABLE
+from pluto_advanced_rx.flowgraph import MESHCORE_AVAILABLE as RX_MESHCORE_AVAILABLE
 from pluto_advanced_rx.flowgraph import RADE_AVAILABLE as RX_RADE_AVAILABLE
 from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph
 from pluto_advanced_rx.ft8_decoder import available_backends as ft8_rx_backends
 from pluto_advanced_rx.ft8_decoder import sender_call as ft8_sender_call
 from pluto_advanced_rx.js8_assembly import Js8Assembler
 from pluto_advanced_rx.js8_decoder import available_backends as js8_rx_backends
+from pluto_advanced_rx.meshcore_state import MeshcoreState
 from pluto_advanced_rx.pocsag_state import PocsagState
 from pluto_tx import adsl_codec, aprs_codec
 from pluto_tx import config as tx_config
@@ -66,6 +69,11 @@ from pluto_tx.flowgraph import PlutoTxFlowgraph
 # The JS8 codec is pure Python in pluto_tx; it counts as available when it still reproduces JS8Call's tones
 # for a reference frame (a broken js8_tables.py must not send frames nobody can decode).
 JS8_AVAILABLE = tx_js8.codec_self_test()
+
+try:  # needs the `cryptography` package; MeshCore is simply not offered without it
+    from pluto_tx import meshcore_codec, meshcore_identity
+except ImportError:
+    meshcore_codec = meshcore_identity = None
 
 logger = logging.getLogger("web_trx.radio_backend")
 
@@ -94,9 +102,14 @@ RX_DEMOD_MODES = {
     "adsl": AdvancedRxFlowgraph.MODE_FM,  # data only: its audio is never sent anywhere
     "adsb": AdvancedRxFlowgraph.MODE_FM,  # likewise
     "aprs": AdvancedRxFlowgraph.MODE_FM,  # unlike those two audible, like plain FM
+    "meshcore": AdvancedRxFlowgraph.MODE_FM,  # data only; LoRa chirps are nothing to listen to
 }
-RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl", "adsb": "adsb", "aprs": "aprs"}
+RX_DIGIMODES = {"pocsag": "pocsag", "rtty": "rtty", "ft8": "ft8", "js8": "js8", "adsl": "adsl", "adsb": "adsb", "aprs": "aprs", "meshcore": "meshcore"}
 ADSL_STATUS_S = 1.0
+MESHCORE_UPDATE_S = 1.0
+MESHCORE_RTL_GAIN_DB = 40.0  # the RTL-SDR's 20 dB default is too low for this, as for ADS-L and ADS-B
+MESHCORE_CHANNELS_FILE = "meshcore_channels.json"  # next to the settings, 0600: holds channel keys
+MESHCORE_CHANNEL_NAME_MAX = 32
 APRS_UPDATE_S = 1.0
 APRS_ACK_REPEAT_S = 30.0  # digipeated copies of one message arrive within seconds; a later retry deserves a new ack
 ADSB_UPDATE_S = 1.0  # hundreds of messages a second reach the state; the browser gets one update per second
@@ -122,6 +135,8 @@ def rx_bands() -> dict[str, list[float]]:
         "adsl": [min(rx_config.ADSL_CHANNELS_HZ) - rx_config.ADSL_LO_HZ - ADSL_CHANNEL_HALF_HZ,
                  max(rx_config.ADSL_CHANNELS_HZ) - rx_config.ADSL_LO_HZ + ADSL_CHANNEL_HALF_HZ],
         "adsb": [-ADSB_HALF_BAND_HZ, ADSB_HALF_BAND_HZ],
+        # The narrowest preset: rx_bands() knows modes, not their parameters.
+        "meshcore": [-rx_config.MESHCORE_PRESETS[0].bandwidth_hz / 2, rx_config.MESHCORE_PRESETS[0].bandwidth_hz / 2],
     }
 SIDEBAND_RX_MODES = ("ssb", "lsb", "rtty", "ft8", "js8")  # squelch probe after the SSB filter
 FT8_STATUS_S = 15.0  # ft8_status at least once per slot, and on every change
@@ -301,6 +316,10 @@ class GnuRadioBackend(SessionBackend):
         self._adsl_state = AdslState()  # in memory only; a browser joining later gets it with 'hello'
         self._adsb_state = AdsbState()  # likewise
         self._aprs_state = AprsState()  # likewise
+        self._meshcore_state = MeshcoreState()  # likewise
+        self._meshcore_state.set_hide_unverified(True)
+        self._meshcore_channels: dict[str, str] = {}  # name -> key (hex); stays on this side, see meshcore_snapshot()
+        self._meshcore_decrypt_dm = False
         self._aprs_lock = threading.Lock()
         self._aprs_pending: list[dict] = []  # new packets, from the GNU Radio thread to _rx_aux_loop
         self._aprs_auto_ack = False  # deliberately not saved: a restart never sends by itself
@@ -325,6 +344,8 @@ class GnuRadioBackend(SessionBackend):
         self._restoring: set[str] = set()     # directions _restore_connections() is still working on
         self.station = station.from_environment()  # start value; a saved one wins (_load_settings)
         self._load_settings()
+        if meshcore_codec is not None:
+            self._load_meshcore_channels()
 
     # -- SessionBackend --
 
@@ -333,6 +354,8 @@ class GnuRadioBackend(SessionBackend):
                 "fft_sizes": rx_config.FFT_SIZE_PRESETS,
                 "rx_modes": [m for m in RX_DEMOD_MODES if _rx_mode_available(m)],
                 "rx_bands": rx_bands(),
+                "meshcore": {"presets": [{"name": p.name, "frequency_hz": p.frequency_hz, "phy_verified": p.phy_verified}
+                                         for p in rx_config.MESHCORE_PRESETS]},
                 "map_tile_url": os.environ.get("WEB_TRX_MAP_TILE_URL", ""),
                 "rx_sample_rates": {t: list(rx_devices.DEVICE_REGISTRY[t].sample_rate_hz_choices)
                                     for t in RX_DEVICE_TYPES},
@@ -401,7 +424,7 @@ class GnuRadioBackend(SessionBackend):
         st = self._state(direction)
         if direction == "tx" and self.keyed:
             raise SessionError("tx: cannot retune while keyed")
-        if direction == "rx" and st.connection is not None and rx_config.fixed_tune_frequency(st.mode) is not None:
+        if direction == "rx" and st.connection is not None and _fixed_tune_hz(st.mode, st.mode_params) is not None:
             raise SessionError(f"rx: {st.mode.upper()} tunes itself, the frequency can't be changed in this mode")
         if direction == "rx" and st.connection is None and self._freq_before_fixed is not None:
             self._freq_before_fixed = freq_hz  # disconnected: for the next non-ADS-L mode
@@ -721,7 +744,8 @@ class GnuRadioBackend(SessionBackend):
         if mode not in RX_DEMOD_MODES:
             raise SessionError(f"unsupported rx mode '{mode}'")
         if not _rx_mode_available(mode):
-            raise SessionError(f"{mode.upper()} is not available on this server (see pluto-tx install-{mode}.sh)")
+            script = "lora" if mode == "meshcore" else mode
+            raise SessionError(f"{mode.upper()} is not available on this server (see pluto-tx install-{script}.sh)")
         st = self.rx
         async with self._rx_lock:
             # active_digimode is fixed at construction (pluto_cli/rx.py), so a
@@ -731,12 +755,12 @@ class GnuRadioBackend(SessionBackend):
             await self._fixed_tune_rx_gain(mode)
             self._adsb_state.set_reference(station.locator_center(self.station.get("locator", "")))
             tuning_before = st.freq_hz, self._freq_before_fixed
-            fixed_hz = rx_config.mode_default_frequency(mode)
+            fixed_hz = _fixed_tune_hz(mode, params) or rx_config.mode_default_frequency(mode)
             if fixed_hz is not None:
                 if self._freq_before_fixed is None:
                     self._freq_before_fixed = st.freq_hz
                 # APRS only starts there: selecting it again must not undo the operator's own frequency.
-                if rx_config.fixed_tune_frequency(mode) is not None or st.mode != mode:
+                if _fixed_tune_hz(mode, params) is not None or st.mode != mode:
                     st.freq_hz = fixed_hz
             elif self._freq_before_fixed is not None:
                 st.freq_hz, self._freq_before_fixed = self._freq_before_fixed, None
@@ -757,7 +781,7 @@ class GnuRadioBackend(SessionBackend):
         st = self.rx
         cls = rx_devices.DEVICE_REGISTRY[st.device_type]
         stage = next((g for g in cls.gain_stages if g.controls_agc), None)
-        fixed_gain = rx_config.fixed_tune_rtl_gain(mode)
+        fixed_gain = MESHCORE_RTL_GAIN_DB if mode == "meshcore" else rx_config.fixed_tune_rtl_gain(mode)
         if fixed_gain is not None and st.device_type == "rtlsdr" and stage is not None and self._fixed_gain_key is None:
             key = f"stage:{stage.name}"
             if key not in st.gains and st.gains.get("gain_mode") != "agc":
@@ -787,6 +811,8 @@ class GnuRadioBackend(SessionBackend):
             on_adsl_packet=self._on_adsl_packet,
             on_adsb_message=self._adsb_state.on_message,
             on_aprs_frame=self._on_aprs_frame,
+            on_meshcore_packet=self._meshcore_state.on_frame,
+            meshcore_preset_index=params.get("preset", 0),
             on_m17_fields=self._on_m17_fields,
             on_rtty_char=self._on_rtty_char,
             rtty_mark_hz=params.get("mark_hz", rx_config.RTTY_MARK_HZ_DEFAULT),
@@ -821,7 +847,7 @@ class GnuRadioBackend(SessionBackend):
                 if name in st.gains and not (name == "fft_zoom" and rx_config.fixed_tune_frequency(mode) is not None):  # its own view
                     _apply_rx_gain(tb, name, st.gains[name])
             tb.start()
-            tb.set_rx_muted(rx_config.fixed_tune_frequency(mode) is not None or not self._rx_local_audio)
+            tb.set_rx_muted(_rx_silent(mode) or not self._rx_local_audio)
         except Exception:
             tb.shutdown()
             raise
@@ -892,7 +918,7 @@ class GnuRadioBackend(SessionBackend):
                 await self._emit_event("rx_level", {"level_db": round(level_db, 1), "squelch_open": self._squelch_open})
 
     def _deliver_audio(self, pcm16: bytes) -> None:
-        if not self._squelch_open or rx_config.fixed_tune_frequency(self.rx.mode) is not None:
+        if not self._squelch_open or _rx_silent(self.rx.mode):
             return  # the browser's player just runs dry (silence), no bandwidth used
         self._from_gr_thread(self._on_audio(AudioFrame(pcm16=pcm16, sample_rate_hz=AUDIO_RATE_HZ)))
 
@@ -915,6 +941,112 @@ class GnuRadioBackend(SessionBackend):
 
     def adsl_snapshot(self) -> dict:
         return {"aircraft": self._adsl_state.get_aircraft_json()}
+
+    # -- MeshCore --
+
+    def _meshcore_row(self, row: dict) -> dict:
+        return {k: v for k, v in row.items() if k != "hex"}
+
+    def _meshcore_channel_info(self) -> list[dict]:
+        return [{"name": name, "hash": meshcore_codec.channel_hash(bytes.fromhex(secret))}
+                for name, secret in sorted(self._meshcore_channels.items())]
+
+    def meshcore_snapshot(self) -> dict:
+        _version, rows = self._meshcore_state.get_snapshot()
+        return {"nodes": [self._meshcore_row(n) for n in self._meshcore_state.get_nodes()],
+                "packets": [self._meshcore_row(r) for r in rows],
+                "channels": self._meshcore_channel_info(),
+                "options": {"decrypt_dm": self._meshcore_decrypt_dm, "show_unverified": not self._meshcore_state.hide_unverified},
+                "public_key": self._meshcore_public_key()}
+
+    def _meshcore_public_key(self) -> str:
+        """Ours, if the node has an identity already: looking must not create one."""
+        identity = meshcore_identity.load_existing()
+        return identity.public_key.hex() if identity is not None else ""
+
+    async def meshcore_clear(self) -> None:
+        self._meshcore_state.clear()
+
+    async def _emit_meshcore_channels(self) -> None:
+        await self._emit_event("meshcore_channels", {"channels": self._meshcore_channel_info()})
+
+    def _apply_meshcore_channels(self) -> None:
+        self._meshcore_state.set_channels([
+            meshcore_codec.GroupChannel(name, bytes.fromhex(secret)) for name, secret in sorted(self._meshcore_channels.items())])
+
+    async def meshcore_channel_set(self, name: str, secret: str) -> None:
+        name = name.strip()
+        if not name or len(name) > MESHCORE_CHANNEL_NAME_MAX or not name.isprintable():
+            raise SessionError(f"meshcore: channel name must be 1..{MESHCORE_CHANNEL_NAME_MAX} printable characters")
+        if name.lower() == meshcore_codec.PUBLIC_CHANNEL.name.lower():
+            raise SessionError("meshcore: the Public channel needs no key")
+        try:
+            raw = meshcore_codec.parse_channel_secret(secret)
+        except ValueError:
+            raise SessionError("meshcore: channel key must be 32 hex digits") from None
+        self._meshcore_channels[name] = raw.hex()
+        self._save_meshcore_channels()
+        self._apply_meshcore_channels()
+        await self._emit_meshcore_channels()
+
+    async def meshcore_channel_delete(self, name: str) -> None:
+        if self._meshcore_channels.pop(name.strip(), None) is None:
+            raise SessionError("meshcore: no such channel")
+        self._save_meshcore_channels()
+        self._apply_meshcore_channels()
+        await self._emit_meshcore_channels()
+
+    def _meshcore_channels_path(self) -> str | None:
+        if not self._settings_path:
+            return None  # no place for settings at all: the keys last as long as the process
+        return os.path.join(os.path.dirname(os.path.abspath(self._settings_path)), MESHCORE_CHANNELS_FILE)
+
+    def _save_meshcore_channels(self) -> None:
+        path = self._meshcore_channels_path()
+        if path is None:
+            return
+        tmp = path + ".tmp"
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # never readable by others, not even briefly
+        with os.fdopen(fd, "w") as f:
+            json.dump(self._meshcore_channels, f)
+        os.replace(tmp, path)
+
+    def _load_meshcore_channels(self) -> None:
+        path = self._meshcore_channels_path()
+        if path is None or not os.path.exists(path):
+            return
+        try:
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o600)
+            with open(path) as f:
+                saved = json.load(f)
+            self._meshcore_channels = {
+                str(name): meshcore_codec.parse_channel_secret(str(secret)).hex() for name, secret in saved.items()}
+        except (OSError, ValueError, AttributeError):
+            logger.warning("ignoring unreadable %s", MESHCORE_CHANNELS_FILE)  # no content: it holds keys
+            self._meshcore_channels = {}
+        self._apply_meshcore_channels()
+
+    async def meshcore_options(self, params: dict) -> None:
+        if "show_unverified" in params:
+            self._meshcore_state.set_hide_unverified(params["show_unverified"] is not True)
+        if "decrypt_dm" in params:
+            self._meshcore_decrypt_dm = params["decrypt_dm"] is True
+            identity = meshcore_identity.load_or_create() if self._meshcore_decrypt_dm else None  # only now: it writes a file
+            self._meshcore_state.set_identity(identity)
+        await self._emit_event("meshcore_options", {"decrypt_dm": self._meshcore_decrypt_dm,
+                                                    "show_unverified": not self._meshcore_state.hide_unverified,
+                                                    "public_key": self._meshcore_public_key()})
+
+    async def _emit_meshcore_update(self, tb) -> None:
+        rows, nodes = self._meshcore_state.take_changed()
+        frames, invalid, hidden = self._meshcore_state.counts()
+        await self._emit_event("meshcore_update", {
+            "packets": [self._meshcore_row(r) for r in rows], "nodes": [self._meshcore_row(n) for n in nodes],
+            "frames": frames, "invalid": invalid, "hidden": hidden, "decoded": tb.meshcore_deframer.frames_decoded,
+        })
 
     def _on_aprs_frame(self, frame: dict) -> None:
         row = self._aprs_state.on_frame(frame)  # GNU Radio thread
@@ -1009,7 +1141,7 @@ class GnuRadioBackend(SessionBackend):
         (pluto_cli.runtime.run_rx_session does it in a sleep loop): RTTY
         AFC steps (nothing inside the flowgraph calls them), batched RTTY
         text, RADE sync/SNR status."""
-        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = last_aprs = 0.0
+        last_afc = last_rade = last_ft8 = last_js8 = last_adsl = last_adsb = last_aprs = last_meshcore = 0.0
         last_rade_state = last_ft8_state = last_js8_state = None
         while True:
             await asyncio.sleep(RTTY_FLUSH_S)
@@ -1025,6 +1157,9 @@ class GnuRadioBackend(SessionBackend):
                 if mode == "rtty" and now - last_afc >= rx_config.RTTY_AFC_POLL_INTERVAL_S:
                     last_afc = now
                     await asyncio.to_thread(tb.rtty_afc_step)
+                if mode == "meshcore" and now - last_meshcore >= MESHCORE_UPDATE_S:
+                    last_meshcore = now
+                    await self._emit_meshcore_update(tb)
                 if mode == "aprs" and tb.aprs_deframer is not None and now - last_aprs >= APRS_UPDATE_S:
                     last_aprs = now
                     await self._emit_aprs_update(tb)
@@ -1547,7 +1682,21 @@ def _supports_direct_sampling(device_type: str | None) -> bool:
     return bool(device_type) and getattr(rx_devices.DEVICE_REGISTRY[device_type], "supports_direct_sampling", False)
 
 
+def _fixed_tune_hz(mode: str | None, params: dict | None) -> float | None:
+    """The frequency a mode holds the tuner at, if it does. MeshCore's depends on its preset."""
+    if mode == "meshcore":
+        return rx_config.MESHCORE_PRESETS[(params or {}).get("preset", 0)].frequency_hz
+    return rx_config.fixed_tune_frequency(mode)
+
+
+def _rx_silent(mode: str | None) -> bool:
+    """Data modes: nothing to send to a loudspeaker or browser."""
+    return mode == "meshcore" or rx_config.fixed_tune_frequency(mode) is not None
+
+
 def _rx_mode_available(mode: str) -> bool:
+    if mode == "meshcore":
+        return RX_MESHCORE_AVAILABLE
     if mode == "ft8":
         return bool(ft8_rx_backends())
     if mode == "js8":

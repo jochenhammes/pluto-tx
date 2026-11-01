@@ -882,3 +882,122 @@ async def test_aprs_web_transmit_produces_a_decodable_signal(monkeypatch):
     got = []
     AprsFrameDetector(rate / decim, got.append).feed(audio.astype(np.float32))
     assert [f["source"] for f in got] == ["DA2JH"]
+
+
+# -- MeshCore --
+
+MESHCORE_KEY = "00112233445566778899aabbccddeeff"
+mc = pytest.importorskip("pluto_tx.meshcore_codec")
+
+
+def _meshcore_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PLUTO_TX_MESHCORE_IDENTITY", str(tmp_path / "identity.json"))
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    return b, events
+
+
+needs_lora = pytest.mark.skipif(not radio_backend.RX_MESHCORE_AVAILABLE, reason="gr-lora_sdr not loadable (LD_LIBRARY_PATH?)")
+
+
+@needs_lora
+async def test_meshcore_fixed_tune_comes_from_the_preset_and_comes_back(tmp_path, monkeypatch):
+    b, events, _audio, _built = await _adsl_backend(tmp_path, monkeypatch, 2_400_000, __import__("numpy").zeros(1000, "complex64"))
+    await b.select_mode("rx", "meshcore", {"preset": 0})
+    assert b.rx.tb.nominal_freq_hz == 869_618_000
+    assert b.rx.tb.meshcore_preset_index == 0
+    assert ("tuned", {"direction": "rx", "freq_hz": 869_618_000.0}) in events
+    with pytest.raises(SessionError):
+        await b.tune("rx", 433_000_000.0)
+    await b.select_mode("rx", "meshcore", {"preset": 1})
+    assert b.rx.tb.nominal_freq_hz == 869_525_000
+    await b.select_mode("rx", "fm", {})
+    assert b.rx.freq_hz == 433_500_000.0
+    await b.disconnect("rx")
+
+
+async def test_meshcore_rx_reports_only_authenticated_content_without_raw_bytes(tmp_path, monkeypatch):
+    from pluto_tx import meshcore_identity
+
+    b, _events = _meshcore_backend(tmp_path, monkeypatch)
+    node = meshcore_identity.load_or_create(str(tmp_path / "other.json"))
+    b._meshcore_state.on_frame(mc.build_advert(node, "<b>Node</b>", 1, (53.5, 9.0)))
+    b._meshcore_state.on_frame(mc.build_group_text(mc.PUBLIC_CHANNEL, "DA2JH", "Grüße"))
+    private = mc.GroupChannel("x", bytes.fromhex(MESHCORE_KEY))
+    b._meshcore_state.on_frame(mc.build_group_text(private, "DA2JH", "geheim"))
+
+    class Tb:
+        class meshcore_deframer:
+            frames_decoded = 3
+
+    captured = []
+
+    async def emit(name, fields):
+        captured.append((name, fields))
+    b._emit_event = emit
+    await b._emit_meshcore_update(Tb)
+    update = captured[-1][1]
+    json.dumps(update)
+    assert [r["kind"] for r in update["packets"]] == ["advert", "group_text"]
+    assert update["packets"][1]["text"] == "Grüße"
+    assert (update["nodes"][0]["name"], update["nodes"][0]["latitude"]) == ("<b>Node</b>", pytest.approx(53.5, abs=1e-3))
+    assert update["hidden"] == 1
+    assert not any("hex" in r for r in update["packets"] + update["nodes"])
+    assert "geheim" not in json.dumps(update)
+    await b._emit_meshcore_update(Tb)
+    assert captured[-1][1]["packets"] == []
+
+
+async def test_meshcore_channel_decrypts_and_its_key_never_leaves(tmp_path, monkeypatch):
+    b, events = _meshcore_backend(tmp_path, monkeypatch)
+    await b.meshcore_channel_set(" Privat ", MESHCORE_KEY.upper())
+    private = mc.GroupChannel("x", bytes.fromhex(MESHCORE_KEY))
+    row = b._meshcore_state.on_frame(mc.build_group_text(private, "DA2JH", "geheim"))
+    assert (row["channel"], row["text"]) == ("Privat", "geheim")
+    path = tmp_path / "meshcore_channels.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert MESHCORE_KEY in path.read_text()
+    b._save_settings()
+    outputs = [json.dumps(events), json.dumps(b.meshcore_snapshot()), json.dumps(b.snapshot()), json.dumps(b.features()),
+               (tmp_path / "settings.json").read_text()]
+    for text in outputs:
+        assert MESHCORE_KEY not in text.lower()
+    assert b.meshcore_snapshot()["channels"][0]["name"] == "Privat"
+    await b.meshcore_channel_delete("Privat")
+    assert MESHCORE_KEY not in path.read_text()
+    assert b.meshcore_snapshot()["channels"] == []
+
+
+async def test_meshcore_channel_survives_a_restart_and_a_loose_file_gets_tightened(tmp_path, monkeypatch):
+    b, _events = _meshcore_backend(tmp_path, monkeypatch)
+    await b.meshcore_channel_set("Privat", MESHCORE_KEY)
+    path = tmp_path / "meshcore_channels.json"
+    path.chmod(0o644)
+    again, _events2 = _meshcore_backend(tmp_path, monkeypatch)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert again.meshcore_snapshot()["channels"][0]["name"] == "Privat"
+    private = mc.GroupChannel("x", bytes.fromhex(MESHCORE_KEY))
+    assert again._meshcore_state.on_frame(mc.build_group_text(private, "A", "B"))["channel"] == "Privat"
+
+
+async def test_meshcore_channel_refusals_do_not_echo_the_key(tmp_path, monkeypatch):
+    b, _events = _meshcore_backend(tmp_path, monkeypatch)
+    for name, secret in (("A", "nothex-" + MESHCORE_KEY), ("A", MESHCORE_KEY[:-2]), ("", MESHCORE_KEY), ("public", MESHCORE_KEY), ("x" * 33, MESHCORE_KEY)):
+        with pytest.raises(SessionError) as e:
+            await b.meshcore_channel_set(name, secret)
+        assert MESHCORE_KEY not in str(e.value) and MESHCORE_KEY[:-2] not in str(e.value)
+    assert not (tmp_path / "meshcore_channels.json").exists()
+    with pytest.raises(SessionError):
+        await b.meshcore_channel_delete("none")
+
+
+async def test_meshcore_identity_is_not_created_just_by_looking(tmp_path, monkeypatch):
+    b, _events = _meshcore_backend(tmp_path, monkeypatch)
+    assert b.meshcore_snapshot()["public_key"] == ""
+    assert not (tmp_path / "identity.json").exists()
+    await b.meshcore_options({"decrypt_dm": True})
+    assert (tmp_path / "identity.json").exists()
+    assert len(b.meshcore_snapshot()["public_key"]) == 64
+    await b.meshcore_options({"show_unverified": True})
+    assert b.meshcore_snapshot()["options"] == {"decrypt_dm": True, "show_unverified": True}

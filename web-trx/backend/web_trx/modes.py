@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from . import station
 
+MESHCORE_PRESET_COUNT = 2  # pluto_tx.config.MESHCORE_PRESETS, checked by tests/test_modes.py
+
 APRS_KINDS = ("beacon", "message")
 APRS_PATHS = ("WIDE1-1,WIDE2-1", "WIDE2-1", "none")
 APRS_PATH_DEFAULT = "WIDE1-1,WIDE2-1"
@@ -154,12 +156,22 @@ def normalize_params(direction: str, mode: str, params: dict) -> dict:
     if mode in ("adsl", "adsb", "aprs") and direction == "rx":
         _reject_unknown(params, set(), mode)
         return {}
+    if mode == "meshcore" and direction == "rx":
+        _reject_unknown(params, {"preset"}, "meshcore")
+        return {"preset": _meshcore_preset(params)}
     if mode == "aprs" and direction == "tx":
         return _aprs_tx(params)
     if mode == "rade" and direction == "tx":
         _reject_unknown(params, {"eoo"}, "rade")
         return {"eoo": _bool(params, "eoo", False)}
     return dict(params)
+
+
+def _meshcore_preset(params: dict) -> int:
+    preset = params.get("preset", 0)
+    if type(preset) is not int or not 0 <= preset < MESHCORE_PRESET_COUNT:
+        raise ValueError(f"meshcore: preset must be 0..{MESHCORE_PRESET_COUNT - 1}")
+    return preset
 
 
 def _aprs_tx(params: dict) -> dict:
