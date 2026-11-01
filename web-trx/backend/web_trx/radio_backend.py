@@ -37,7 +37,7 @@ from .tx_audio import JitterBuffer
 
 pluto_path.ensure_importable()
 
-from gnuradio import analog, gr
+from gnuradio import analog, blocks, gr
 from gnuradio import filter as gr_filter
 from pluto_advanced_rx import config as rx_config
 from pluto_advanced_rx import devices as rx_devices
@@ -1323,6 +1323,8 @@ class GnuRadioBackend(SessionBackend):
                 st.freq_hz, self._tx_freq_before_meshcore = self._tx_freq_before_meshcore, None
                 if st.tb is not None:
                     await asyncio.to_thread(st.tb.set_frequency, st.freq_hz)
+            if st.tb is not None and st.mode is not None and (mode in ONE_SHOT_TX_MODES) != (st.mode in ONE_SHOT_TX_MODES):
+                await self._teardown_tx()  # the audio chain is there or not, see _build_tx()
             if st.tb is None:
                 try:
                     st.tb = await asyncio.to_thread(self._build_tx, mode, params)
@@ -1357,7 +1359,11 @@ class GnuRadioBackend(SessionBackend):
             # Swap the server's local microphone for the browser's: the
             # selector's mic input gets our jitter-buffered source instead.
             # Before start(), so no lock()/unlock() is needed.
-            mic = _BrowserMicSource(self._mic_buffer)
+            # Modes that render their whole transmission don't use that audio chain, but it would run all the same, with
+            # every voice modulator behind it. That cost a receiver in this process 5-15 % of its samples (measured with
+            # a Pluto as RX and TX: no MeshCore packet decoded), so there it gets a source that ends at once. Going back
+            # to a voice mode rebuilds, see _select_tx_mode().
+            mic = _BrowserMicSource(self._mic_buffer) if mode not in ONE_SHOT_TX_MODES else blocks.vector_source_f([0.0], repeat=False)
             tb.disconnect(tb.mic_source, (tb.source_selector, PlutoTxFlowgraph.SRC_MIC))
             tb.connect(mic, (tb.source_selector, PlutoTxFlowgraph.SRC_MIC))
             tb.web_trx_mic_source = mic  # see _build_rx: connect() keeps no Python reference

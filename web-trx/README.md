@@ -268,7 +268,9 @@ Der Modus **MeshCore (LoRa)** setzt die Frequenz aus dem Preset, sie ist in dies
 
 **Gesendet über Funk:** Pluto+ über Web-TRX, −40 dB, Route Direct: 2 Adverts und 1 Public-Text. Der RTL-SDR las alle 3 mit gültiger Signatur beziehungsweise MAC. Am echten Heltec V3 erschienen in der App der Kontakt und der Text.
 
-**Nicht geprüft:** langer Text, private Kanäle und Direktnachrichten über Funk, Flood-Sendungen, HackRF als Sender, Pluto und HackRF als Empfänger, das zweite Preset.
+**Pluto als Sender und Empfänger zugleich:** Die eigene Sendung über denselben Pluto wurde in 5 von 6 Fällen dekodiert (zuvor 0 von 3). Dafür läuft der Sender in Datenmodi (MeshCore, APRS, POCSAG, RTTY, FT8, JS8, Waterfall Writer) ohne seine Audio-Kette, die den Empfang im selben Prozess Samples kostete. Ein Wechsel zwischen Daten- und Sprachmodus baut den Sender deshalb neu auf und dauert einen Moment. In Sprachmodi (FM, SSB, M17, RADE) läuft die Audio-Kette weiter; dort sind ohne Sendung rund 5–15 % Sample-Verlust am Pluto-RX gemessen. Solange RX und TX am Pluto hängen, läuft der Empfänger auf der Rate des Senders, 2,5 MS/s.
+
+**Nicht geprüft:** langer Text, private Kanäle und Direktnachrichten über Funk, Flood-Sendungen, HackRF als Sender, HackRF als Empfänger, das zweite Preset.
 
 ### ADS-B mit Live-Karte
 

@@ -1158,3 +1158,63 @@ async def test_other_devices_keep_their_rate(tmp_path, monkeypatch):
     assert b.snapshot()["rx"]["rate_locked"] is None
     await b.disconnect("tx")
     await b.disconnect("rx")
+
+
+# -- The TX audio chain only runs for voice modes --
+
+async def _tx_on_fake(tmp_path, monkeypatch):
+    fakes = _repo_module("fakes")
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PLUTO_TX_MESHCORE_IDENTITY", str(tmp_path / "identity.json"))
+    monkeypatch.setitem(radio_backend.tx_devices.DEVICE_REGISTRY, "fake", fakes.FakeTxDevice)
+    monkeypatch.setitem(radio_backend.DEVICE_LABELS, "fake", "fake")
+    radio_backend.PlutoTxFlowgraph._aprs_last_sent = -1e9
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    b.station = {"call": "DA2JH", "locator": "JO43"}
+    b.tx.device_type, b.tx.connection, b.tx.freq_hz = "fake", "x", 145_500_000.0
+    return b, events
+
+
+def _has_browser_mic(tb) -> bool:
+    return isinstance(tb.web_trx_mic_source, radio_backend._BrowserMicSource)
+
+
+async def test_data_modes_build_without_the_audio_chain_and_voice_rebuilds(tmp_path, monkeypatch):
+    b, _events = await _tx_on_fake(tmp_path, monkeypatch)
+    await b.select_mode("tx", "pocsag", modes.normalize_params("tx", "pocsag", {"ric": 1234567, "text": "x"}))
+    data_tb = b.tx.tb
+    assert not _has_browser_mic(data_tb)
+    await b.select_mode("tx", "aprs", modes.normalize_params("tx", "aprs", {"path": "none"}))
+    assert b.tx.tb is data_tb  # between data modes: live, no rebuild
+    await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
+    assert b.tx.tb is not data_tb and _has_browser_mic(b.tx.tb)
+    voice_tb = b.tx.tb
+    await b.select_mode("tx", "ssb", {})
+    assert b.tx.tb is voice_tb
+    await b.select_mode("tx", "aprs", modes.normalize_params("tx", "aprs", {"path": "none"}))
+    assert b.tx.tb is not voice_tb and not _has_browser_mic(b.tx.tb)
+    await b.disconnect("tx")
+
+
+async def test_a_data_mode_still_sends_after_its_audio_chain_ended(tmp_path, monkeypatch):
+    import numpy as np
+    from pluto_advanced_rx.aprs_demod import AprsFrameDetector
+
+    b, events = await _tx_on_fake(tmp_path, monkeypatch)
+    await b.select_mode("tx", "aprs", modes.normalize_params("tx", "aprs", {"path": "none", "comment": "TEST"}))
+    await asyncio.sleep(0.5)  # the chain has long ended before keying
+    await b.ptt(True)
+    await asyncio.sleep(b.tx.tb.aprs_hold_s + 0.5)
+    iq = np.array(b.tx.tb.device.sink.data(), dtype=np.complex64)
+    on = np.flatnonzero(np.abs(iq) > 0.01)
+    assert len(on)
+    iq = iq[on[0]:on[-1]]
+    rate = 2_500_000
+    audio = np.angle(iq[1:] * np.conj(iq[:-1])) * rate / (2 * np.pi * 3000)
+    audio = np.convolve(audio, np.ones(50) / 50, "same")[::50]
+    got = []
+    AprsFrameDetector(rate / 50, got.append).feed(audio.astype(np.float32))
+    assert [f["source"] for f in got] == ["DA2JH"]
+    assert "keyed" in [n for n, _ in events]
+    await b.disconnect("tx")
