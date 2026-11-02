@@ -37,7 +37,7 @@ def load_wav(path):
         return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float64)
 
 
-@unittest.skipUnless(ft8_ctypes.FT8_AVAILABLE, "ft8_lib not built (install-ft8.sh)")
+@unittest.skipUnless(ft8_ctypes.FT8_AVAILABLE, "ft8_lib not built (./install.sh ft8)")
 class CodecTests(unittest.TestCase):
     def test_all_backends_decode_five_signals_with_frequency_dt_and_snr(self):
         x = slot_with([(m, 800 + 400 * i) for i, m in enumerate(MSGS)])

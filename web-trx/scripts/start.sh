@@ -114,7 +114,7 @@ PYTHONPATH="$(python3 -m site --user-site)${PYTHONPATH:+:$PYTHONPATH}"
 [[ -n "$PACKAGE" ]] && PYTHONPATH="${PLUTO_TX_PYTHONDIR:-/usr/lib/pluto-tx/python}:$PYTHONPATH"
 export PYTHONPATH
 
-# The checkout's venv (install-web-trx.sh); the package uses the
+# The checkout's venv (./install.sh web-trx); the package uses the
 # distribution's FastAPI/Uvicorn instead.
 VENV="$ROOT/backend/.venv"
 if [[ -x "$VENV/bin/uvicorn" ]]; then
@@ -122,7 +122,7 @@ if [[ -x "$VENV/bin/uvicorn" ]]; then
 elif [[ -n "$PACKAGE" ]]; then
   UVICORN=(python3 -m uvicorn)
 else
-  echo "Backend-venv fehlt -- einmal ./install-web-trx.sh im pluto-tx-Verzeichnis ausführen." >&2
+  echo "Backend-venv fehlt -- einmal ./install.sh web-trx im pluto-tx-Verzeichnis ausführen." >&2
   exit 1
 fi
 

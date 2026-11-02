@@ -41,7 +41,7 @@ class ReferenceVectorTests(unittest.TestCase):
         for case in cases:
             self.check_case(case)
 
-    @unittest.skipUnless(HAVE_JSC, "JSC word lists missing (js8call/jsc.json, install-js8.sh)")
+    @unittest.skipUnless(HAVE_JSC, "JSC word lists missing (js8call/jsc.json, ./install.sh js8)")
     def test_all_reference_vectors(self):
         cases = load_vectors()
         self.assertEqual(len(cases), 176)

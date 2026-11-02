@@ -78,7 +78,7 @@ class PlanTests(unittest.TestCase):
         self.assertAlmostEqual(js8.transmission_time_s(1, P.NORMAL), 0.5 + 12.64)
 
 
-@unittest.skipUnless(os.access(JS8REF, os.X_OK), "tools/js8ref not built (install-js8.sh)")
+@unittest.skipUnless(os.access(JS8REF, os.X_OK), "tools/js8ref not built (./install.sh js8)")
 class Js8CallDecodesUsTests(unittest.TestCase):
     """The strongest check there is without a radio: JS8Call's own decoder reads our signal."""
 

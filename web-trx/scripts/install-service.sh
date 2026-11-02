@@ -45,7 +45,7 @@ if [[ "$ROOT" =~ [[:space:]] ]]; then
   exit 1
 fi
 if [[ ! -x "$ROOT/backend/.venv/bin/uvicorn" || ! -f "$ROOT/frontend/dist/index.html" ]]; then
-  echo "FEHLER: Web-TRX ist nicht installiert -- zuerst ./install-web-trx.sh im pluto-tx-Verzeichnis ausführen." >&2
+  echo "FEHLER: Web-TRX ist nicht installiert -- zuerst ./install.sh web-trx im pluto-tx-Verzeichnis ausführen." >&2
   exit 1
 fi
 

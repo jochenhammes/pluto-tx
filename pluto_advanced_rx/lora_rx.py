@@ -44,7 +44,7 @@ class LoraRxDecoder(gr.hier_block2):
     def __init__(self, sf, bw, cr, center_freq_hz, has_crc=True, impl_head=False,
                  ldro=2, preamb_len=_tx_config.MESHTASTIC_PREAMBLE_LEN,
                  sync_word=None, samp_rate_mult=4):
-        assert LORA_AVAILABLE, "gr-lora_sdr not installed -- see install-lora.sh"
+        assert LORA_AVAILABLE, "gr-lora_sdr not installed -- see ./install.sh lora"
         # Real bug #3 (see pluto_tx/lora.py's module docstring): frame_sync
         # segfaults unconditionally with center_freq=0, even in a pure
         # baseband/no-real-RF context -- bisected across SF7-SF12 this

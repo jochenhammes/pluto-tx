@@ -1,5 +1,5 @@
 """Persistent subprocess wrapper around lpcnet_demo (built by
-install-rade.sh, part of freedv/rade_c's own build) for the two streaming
+./install.sh rade, part of freedv/rade_c's own build) for the two streaming
 modes used here. No Python bindings exist for this vocoder -- it's a
 standalone CLI tool, not something librade.so exports (confirmed via nm -D:
 the FARGAN/LPCNet speech<->feature-vector functions are entirely absent
@@ -79,7 +79,7 @@ class LpcnetDemoProcess:
             raise ValueError(f"unknown mode {mode!r}")
         exe = paths.program("lpcnet_demo")
         if exe is None:
-            raise RuntimeError("lpcnet_demo not found on PATH -- run install-rade.sh")
+            raise RuntimeError("lpcnet_demo not found on PATH -- run ./install.sh rade")
         if shutil.which("stdbuf") is None:
             raise RuntimeError("stdbuf (coreutils) not found -- required to avoid a stdio-buffering "
                                 "deadlock with lpcnet_demo, see this module's docstring")

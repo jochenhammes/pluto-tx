@@ -7,7 +7,7 @@ device-interface classes -- those are for live serial/BLE communication
 with a real Meshtastic device, not raw-byte decoding of a payload this
 project's own LoRa PHY already extracted from the air. Requires the
 `meshtastic` and `cryptography` pip packages (installed --user, see
-install-lora.sh's own comment for why pip is used here specifically --
+./install.sh lora's own comment for why pip is used here specifically --
 unlike gr-lora_sdr, this is a pure-Python protocol library with no native
 build, a normal PyPI install is the right tool, not a from-source build).
 

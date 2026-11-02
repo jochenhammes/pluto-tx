@@ -39,8 +39,8 @@ Debug-/Teststrategie und bekannte Stolpersteine: [`docs/DEBUGGING.md`](docs/DEBU
 ## Installation
 
 Voraussetzung ist ein eingerichtetes pluto-tx (`./install.sh` im
-Repo-Wurzelverzeichnis; optional `install-m17.sh`, `install-rade.sh`,
-`install-ft8.sh`). Kurz: `pluto-tx` bzw. `pluto-advanced-rx` starten und
+Repo-Wurzelverzeichnis; optional `./install.sh m17`, `./install.sh rade`,
+`./install.sh ft8`). Kurz: `pluto-tx` bzw. `pluto-advanced-rx` starten und
 funktionieren. Web-TRX nutzt dieselben Bibliotheken (GNU Radio, libiio,
 SoapySDR, gr-m17 in `~/.local`, `rade_c/`, `ft8_lib/`) und verändert an
 ihnen nichts.
@@ -52,7 +52,7 @@ python3 -c "import gnuradio, iio; print('GNU Radio + libiio ok')"
 node --version     # >= 18 (für den Frontend-Build)
 ```
 
-`install-web-trx.sh` prüft alles Weitere selbst (python3-venv, openssl)
+`./install.sh web-trx` prüft alles Weitere selbst (python3-venv, openssl)
 und installiert fehlende Systempakete per `apt-get`. Node.js installiert
 es bewusst **nicht**: Ist keines oder ein zu altes (< 18) vorhanden, eine
 aktuelle LTS-Version z. B. über [nvm](https://github.com/nvm-sh/nvm)
@@ -63,7 +63,7 @@ installieren.
 Im pluto-tx-Verzeichnis (nicht als root, nicht mit sudo):
 
 ```bash
-./install-web-trx.sh
+./install.sh web-trx
 ```
 
 Das Skript
@@ -169,7 +169,7 @@ web-trx start
 ```bash
 web-trx stop
 git pull                  # im pluto-tx-Verzeichnis
-./install-web-trx.sh      # Abhängigkeiten + Frontend neu bauen
+./install.sh web-trx      # Abhängigkeiten + Frontend neu bauen
 web-trx start
 ```
 
@@ -177,15 +177,15 @@ web-trx start
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
-| `start.sh`: „Backend-venv fehlt“ | `./install-web-trx.sh` im pluto-tx-Verzeichnis ausführen. |
-| `install-web-trx.sh`: venv ohne `--system-site-packages` | Altes venv beiseitelegen (`mv web-trx/backend/.venv ~/web-trx-venv.alt`), Skript erneut ausführen. |
+| `start.sh`: „Backend-venv fehlt“ | `./install.sh web-trx` im pluto-tx-Verzeichnis ausführen. |
+| `./install.sh web-trx`: venv ohne `--system-site-packages` | Altes venv beiseitelegen (`mv web-trx/backend/.venv ~/web-trx-venv.alt`), Skript erneut ausführen. |
 | `no pluto-tx checkout at …` | `WEB_TRX_PLUTO_TX_PATH` in `web-trx.env` zeigt auf ein falsches Verzeichnis. Zeile entfernen, Standard ist dieses Repo. |
-| M17 nicht wählbar („gr-m17 is not importable“) | gr-m17 nicht gebaut (`./install-m17.sh`). Den Server immer über `web-trx start` bzw. `scripts/start.sh` starten, das setzt `LD_LIBRARY_PATH` und die Python-Pfade für `~/.local`. |
+| M17 nicht wählbar („gr-m17 is not importable“) | gr-m17 nicht gebaut (`./install.sh m17`). Den Server immer über `web-trx start` bzw. `scripts/start.sh` starten, das setzt `LD_LIBRARY_PATH` und die Python-Pfade für `~/.local`. |
 | Mikrofon-Fehler beim PTT | Seite über `http://` statt `https://` geöffnet, oder Mikrofon im Browser blockiert. |
 | „could not connect to PlutoSDR“ | Pluto nicht erreichbar oder `plutoplus.local` löst falsch auf. Die IP direkt als Verbindung eintragen, z. B. `ip:192.168.2.1`. |
 | Gerät belegt | Läuft parallel die pluto-tx-GUI oder `pluto-cli` auf demselben Gerät? Die jeweils andere Anwendung beenden. Die TX-/RX-App warnen selbst, wenn Web-TRX das Gerät offen hat. |
 | Wasserfall bleibt leer | Empfänger über „Verbinden“ starten. Das Log (`web-trx log`) zeigt Fehler beim Aufbau des Flowgraphs. |
-| App zeigt „Web-TRX: not installed“ | `./install-web-trx.sh` ausführen; der Tooltip nennt, was fehlt. |
+| App zeigt „Web-TRX: not installed“ | `./install.sh web-trx` ausführen; der Tooltip nennt, was fehlt. |
 
 ## Betrieb
 
@@ -261,7 +261,7 @@ Als Sender wählbar, die Modusliste zeigt dann nur, was er über USB-Audio sende
 
 ### JTTY
 
-Der Modus **JTTY (WSJT-X)** braucht `install-jtty.sh`, sonst fehlt er in der Auswahl. Unten steht je Nachricht eine Zeile, die mitwächst: UTC, Audiofrequenz, SNR, Text. Nicht abgeschlossene Zeilen sind abgeblendet, `...` steht für verlorene Rahmen. Die Felder **Audio Hz** und **± Hz** legen fest, wo der Decoder sucht; er durchsucht nicht das ganze Band. **Treffpunkt** stellt nur die Frequenz ein, gesendet wird nichts.
+Der Modus **JTTY (WSJT-X)** braucht `./install.sh jtty`, sonst fehlt er in der Auswahl. Unten steht je Nachricht eine Zeile, die mitwächst: UTC, Audiofrequenz, SNR, Text. Nicht abgeschlossene Zeilen sind abgeblendet, `...` steht für verlorene Rahmen. Die Felder **Audio Hz** und **± Hz** legen fest, wo der Decoder sucht; er durchsucht nicht das ganze Band. **Treffpunkt** stellt nur die Frequenz ein, gesendet wird nichts.
 
 Senden: Text bis 80 Zeichen, die Zeile darunter zeigt vorab, was hinausgeht, mit Rahmenzahl und Dauer. **Aussenden** sendet genau einmal und enttastet selbst. NOTAUS bricht ab. Außerhalb der Amateurbänder wird abgewiesen. **Driftausgleich** (Standard an) gleicht die Drift des Pluto während der Sendung aus. Ab 1 GHz sucht der Empfänger mindestens ±500 Hz.
 
@@ -453,7 +453,7 @@ docs/       Projektplan, Debugging-Strategie, FT8-Plan, JS8
 run/        Laufzeitdaten (nicht eingecheckt)
 ```
 
-Außerhalb dieses Ordners gehören dazu: `../install-web-trx.sh`,
+Außerhalb dieses Ordners gehören dazu: `../scripts/install/web-trx.sh`,
 `../pluto_tx/webtrx_control.py` (Start/Stopp/Status für Apps und
 Kommandozeile), `../pluto_tx/webtrx_widget.py` (die Zeile in den Apps)
 und `../.github/workflows/web-trx.yml` (CI).
@@ -467,7 +467,7 @@ nie pytest aus der Repo-Wurzel starten.
 
 ```bash
 cd web-trx/backend
-python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e ".[dev]"   # macht sonst install-web-trx.sh
+python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e ".[dev]"   # macht sonst ./install.sh web-trx
 .venv/bin/python -m pytest            # Tabellen-Tests prüfen gegen ../../pluto_tx/config.py
 .venv/bin/ruff check web_trx tests
 .venv/bin/uvicorn web_trx.server:create_app --factory --reload --port 8321   # SimBackend

@@ -484,7 +484,7 @@ docs/js8/SPEC.md for where each table comes from and what it means.
 JS8Call is (C) Jordan Sherer KN4CRD, Allan Bazinet W6BAZ and contributors, GPLv3; these tables are
 derived from it and distributed under the same license (GPLv3, like pluto-tx).
 
-The JSC word lists (2 x 262144 entries) are not in here: install-js8.sh extracts them into
+The JSC word lists (2 x 262144 entries) are not in here: ./install.sh js8 extracts them into
 js8call/jsc.json at install time, and load_jsc() reads them from there.
 """
 import json
@@ -499,7 +499,7 @@ JSC_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 def load_jsc(path=JSC_DEFAULT_PATH):
     """-> dict with 'map', 'list', 'prefix': lists of (str, size, index) as in JSC::map/list/prefix,
-    or None if the file is missing (install-js8.sh not run)."""
+    or None if the file is missing (./install.sh js8 not run)."""
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:

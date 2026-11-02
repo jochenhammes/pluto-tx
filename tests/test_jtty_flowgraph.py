@@ -42,7 +42,7 @@ def send(text, tone_hz=1500.0, device_type="fake", frequency=FREQ):
     return iq, fg
 
 
-@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 class TransmitTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -99,7 +99,7 @@ class TransmitTests(unittest.TestCase):
     def test_problem_without_the_codec(self):
         fg = txf.PlutoTxFlowgraph(device_type="fake", mode=JTTY, frequency=FREQ, jtty_text="TEST")
         with mock.patch.object(jtty_codec, "codec_program", return_value=None):
-            self.assertRegex(fg.jtty_problem(), "install-jtty.sh")
+            self.assertRegex(fg.jtty_problem(), "./install.sh jtty")
 
     def test_settings_change_is_rendered_again(self):
         fg = txf.PlutoTxFlowgraph(device_type="fake", mode=JTTY, frequency=FREQ, jtty_text="ONE")
@@ -118,7 +118,7 @@ class TransmitTests(unittest.TestCase):
         self.assertEqual(fg.mode, txf.PlutoTxFlowgraph.MODE_RTTY)
 
 
-@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 class DriftTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -189,7 +189,7 @@ class DriftTests(unittest.TestCase):
         fg.wait()
 
 
-@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 class SoundcardTests(unittest.TestCase):
     """Soundcard and AIOC take the audio itself: the radio's USB makes the signal."""
 
@@ -225,7 +225,7 @@ class SoundcardTests(unittest.TestCase):
         self.assertIsNone(fg.jtty_problem())  # the radio's own frequency is not known here
 
 
-@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 class CliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

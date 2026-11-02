@@ -30,7 +30,7 @@ allem interoperabel, was auf den Bändern läuft. Dazu ist v2.5.2 genau der
 Stand des Ubuntu-Pakets, sodass Quelltext und Paket-Binary übereinstimmen.
 
 Die Zeilenangaben unten beziehen sich auf diesen Commit. Die Dateien liegen
-im Klon unter `js8call/` (install-js8.sh), in J0 unter `~/js8-ref/src/`.
+im Klon unter `js8call/` (./install.sh js8), in J0 unter `~/js8-ref/src/`.
 
 ## 1. Physikalische Schicht
 
@@ -399,8 +399,8 @@ aus Rahmen und Flags. Seine Ausgabe steht in den Referenzvektoren
 |---|---|---|---|
 | 1 | 8-GFSK, Gauß-Pulsformung | **CPFSK ohne Gauß**; volle Amplitude ab Symbol 0; nur ein Ausklingen von 0,017 Symbolen am Ende | J1: CPFSK-Synthese, nicht `gfsk_iq` mit BT |
 | 2 | Bitreihenfolge „wie FT8“, Graycode | **kein Graycode**; Parität vor Daten; Costas-Arrays anders als FT8 | J1 `js8_phy` nach 1.4 |
-| 3 | Referenz-Decoder `js8` evtl. vorhanden | existiert nicht; ersetzt durch `tools/js8ref` aus den Originalquellen | install-js8.sh baut `js8ref` (braucht `qt6-base-dev`, `libfftw3-dev`, `libboost-dev`) |
-| 4 | Fehlt JSC → Senden mit Huffman | gilt **nur für NORMAL**; FAST, TURBO und SLOW senden und lesen Freitext nur mit JSC | JSC ist für Freitext außerhalb von NORMAL Pflicht; install-js8.sh erzeugt `js8call/jsc.json` |
+| 3 | Referenz-Decoder `js8` evtl. vorhanden | existiert nicht; ersetzt durch `tools/js8ref` aus den Originalquellen | ./install.sh js8 baut `js8ref` (braucht `qt6-base-dev`, `libfftw3-dev`, `libboost-dev`) |
+| 4 | Fehlt JSC → Senden mit Huffman | gilt **nur für NORMAL**; FAST, TURBO und SLOW senden und lesen Freitext nur mit JSC | JSC ist für Freitext außerhalb von NORMAL Pflicht; ./install.sh js8 erzeugt `js8call/jsc.json` |
 | 5 | TX-Referenz-WAVs von der JS8Call-GUI über einen Loopback | Die Töne stammen aus JS8Calls eigenem `buildMessageFrames` + `JS8::encode` (bitgenau); das Audio aus einem 1:1-Port von `Modulator::readData`. Ein GUI-Mitschnitt wurde **nicht** gemacht (siehe Bericht) | GUI-Mitschnitt optional nachholen |
 | 6 | 30 min Off-Air-Mitschnitte auf 7,078 / 14,078 MHz | Versucht, 0 Decodes; am Radio-Server ist keine geeignete KW-Antenne angeschlossen | entfällt vorerst; Gegenprobe mit echten Signalen später (anderer Standort bzw. Antenne) |
 | 7 | Speeds, Periode, Startverzögerung, LDPC(174,87)+CRC12, 72+3 Bit, Rahmentypen, aufeinanderfolgende Slots, 7,078/14,078 MHz | **bestätigt** | — |

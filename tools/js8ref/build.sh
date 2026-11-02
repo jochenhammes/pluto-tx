@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the JS8 reference harness (js8ref) from the pinned JS8Call source.
 #   tools/js8ref/build.sh [JS8CALL_SRC] [OUT_DIR]
-# Defaults: JS8CALL_SRC=<repo>/js8call (install-js8.sh), OUT_DIR=<JS8CALL_SRC>/build-js8ref.
+# Defaults: JS8CALL_SRC=<repo>/js8call (./install.sh js8), OUT_DIR=<JS8CALL_SRC>/build-js8ref.
 # Needs g++ (C++20), Qt6 Core headers (qt6-base-dev), libfftw3-dev, libboost-dev. Without root the
 # Qt6 headers can come from an unpacked qt6-base-dev .deb: QT6_INCLUDE=<dir>/usr/include/<multiarch>/qt6
 set -euo pipefail

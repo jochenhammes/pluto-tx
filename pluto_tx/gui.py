@@ -329,13 +329,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo.addItem("M17", PlutoTxFlowgraph.MODE_M17)
         if not M17_AVAILABLE:
             # gr-m17 is an optional, from-source dependency (see
-            # install-m17.sh) -- grey out rather than hide, so the operator
+            # ./install.sh m17) -- grey out rather than hide, so the operator
             # can see the mode exists and why it's unavailable.
             m17_item_idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_M17)
             item = self.mode_combo.model().item(m17_item_idx)
             item.setEnabled(False)
             self.mode_combo.setItemData(
-                m17_item_idx, "gr-m17 is not installed -- see install-m17.sh / README", QtCore.Qt.ToolTipRole
+                m17_item_idx, "gr-m17 is not installed -- see ./install.sh m17 / README", QtCore.Qt.ToolTipRole
             )
         self.mode_combo.addItem("FreeDV", PlutoTxFlowgraph.MODE_FREEDV)
         if not FREEDV_AVAILABLE:
@@ -352,12 +352,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo.addItem("RADE", PlutoTxFlowgraph.MODE_RADE)
         if not RADE_AVAILABLE:
             # rade_c is an optional, from-source dependency (see
-            # install-rade.sh) -- grey out rather than hide, same as M17.
+            # ./install.sh rade) -- grey out rather than hide, same as M17.
             rade_item_idx = self.mode_combo.findData(PlutoTxFlowgraph.MODE_RADE)
             item = self.mode_combo.model().item(rade_item_idx)
             item.setEnabled(False)
             self.mode_combo.setItemData(
-                rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
+                rade_item_idx, "librade.so/lpcnet_demo not found -- see ./install.sh rade / README",
                 QtCore.Qt.ToolTipRole,
             )
         # File Broadcast: always available, no gating block (pure Python/
@@ -637,23 +637,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if not FT8_AVAILABLE:
             ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_FT8))
             ft8_item.setEnabled(False)
-            ft8_item.setToolTip("ft8_lib is not built -- run install-ft8.sh")
+            ft8_item.setToolTip("ft8_lib is not built -- run ./install.sh ft8")
         self.digimode_combo.addItem("JS8 (JS8Call)", PlutoTxFlowgraph.MODE_JS8)
         self.digimode_combo.addItem("JTTY (WSJT-X)", PlutoTxFlowgraph.MODE_JTTY)
         if not jtty_codec.available():
             jtty_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_JTTY))
             jtty_item.setEnabled(False)
-            jtty_item.setToolTip("wsjt-codec is not installed -- run install-jtty.sh")
+            jtty_item.setToolTip("wsjt-codec is not installed -- run ./install.sh jtty")
         self.digimode_combo.addItem("Meshtastic (LoRa)", PlutoTxFlowgraph.MODE_MESHTASTIC)
         self.digimode_combo.addItem("MeshCore (LoRa)", PlutoTxFlowgraph.MODE_MESHCORE)
         if not MESHCORE_AVAILABLE:
             mc_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHCORE))
             mc_item.setEnabled(False)
-            mc_item.setToolTip("gr-lora_sdr / the cryptography package is not installed -- see install-lora.sh / README")
+            mc_item.setToolTip("gr-lora_sdr / the cryptography package is not installed -- see ./install.sh lora / README")
         if not LORA_AVAILABLE:
             lora_item = self.digimode_combo.model().item(self.digimode_combo.findData(PlutoTxFlowgraph.MODE_MESHTASTIC))
             lora_item.setEnabled(False)
-            lora_item.setToolTip("gr-lora_sdr / the meshtastic package is not installed -- see install-lora.sh / README")
+            lora_item.setToolTip("gr-lora_sdr / the meshtastic package is not installed -- see ./install.sh lora / README")
         # Sync to the flowgraph's actual mode BEFORE wiring the change
         # signal, same reasoning/ordering as mode_combo's own identical
         # comment above -- avoids firing _on_digimode_changed() ->

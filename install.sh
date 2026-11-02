@@ -1,256 +1,227 @@
 #!/usr/bin/env bash
-# Installs everything the pluto_tx / pluto_advanced_rx apps need
-# on a Debian/Ubuntu Linux machine: GNU Radio (which pulls in gr-iio and
-# PyQt5 as hard dependencies of its own "gnuradio" package), raw
-# python3-libiio (used directly by safety.py/netutil.py for the TX
-# attenuation/LO-powerdown safety layer and the connect-timeout/device-scan
-# helpers -- a different Python module ("iio") from gnuradio.iio, not
-# pulled in by "gnuradio" itself), libiio-utils (iio_info/iio_attr, handy
-# for manual troubleshooting), avahi-daemon (actually RESOLVES "*.local"
-# mDNS hostnames like plutoplus.local -- libiio only gets the avahi CLIENT
-# libraries for free as a hard dependency; the daemon itself is merely an
-# apt "Suggests", so it's easy to end up without it on a fresh install),
-# python3-pyqtgraph (pluto_advanced_rx's interactive waterfall widget --
-# only a "Recommends" of "gnuradio", not a hard dependency, so also easy to
-# end up without on a fresh install), and the HackRF/RTL-SDR/SoapySDR pieces
-# pluto_tx (HackRF TX) and pluto_advanced_rx (HackRF/RTL-SDR RX) need for
-# their non-Pluto device backends (gnuradio.soapy itself ships inside
-# "gnuradio" already -- these packages are the missing driver/tooling bits).
+# Installs pluto-tx, pluto-advanced-rx, pluto-cli and Web-TRX from this checkout, on Debian or Ubuntu.
+# (Normal operation is easier with the .deb package: see README.)
 #
-# Usage:
-#   ./install.sh
+#   ./install.sh                 menu: what is there, how long each feature takes
+#   ./install.sh --all           everything
+#   ./install.sh m17 rade        only these (the base comes along)
+#   ./install.sh --list          what exists and what is installed; changes nothing
+#   ./install.sh --dry-run ...   what would happen; changes nothing
+#   ./install.sh --force ...     also what is already current
+#   ./install.sh --yes ...       no questions; without features: the base
+#   ./install.sh web-trx -- --reuse-dist DIR
+#                                options after -- go to the one feature named
 #
-# Safe to re-run: apt-get install on already-installed packages is a no-op.
-set -euo pipefail
+# Same command to update: only what changed is built again. A failed feature does not stop the others.
+# Not with sudo: it calls sudo itself where needed.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/scripts/install/lib.sh"
+. "$INSTALL_DIR/features.sh"
 
-# This script runs as a normal user and calls `sudo apt-get` internally only
-# where actually needed -- running the WHOLE script with sudo (or as root)
-# sets $HOME=/root, which silently sends the launcher scripts below to
-# /root/.local/bin instead of the real user's -- a real installation this
-# was found on ended up with a broken 'pluto-tx' command for exactly this
-# reason. Refuse rather than silently install to the wrong place.
-if [ "$(id -u)" = "0" ]; then
-    echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
-    echo "Richtig: ./install.sh   (das Skript ruft sudo intern fuer apt-get auf)" >&2
-    exit 1
-fi
-# Last-resort fallback: some container/CI environments still end up with
-# HOME=/root even for a non-root invocation (e.g. via a root-owned sudo
-# wrapper further up the call chain). If SUDO_USER is set, trust it over a
-# possibly-wrong $HOME.
-if [ -n "${SUDO_USER:-}" ]; then
-    HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-    export HOME
-    echo "HINWEIS: HOME auf $HOME korrigiert (SUDO_USER=$SUDO_USER)." >&2
-fi
+usage() { sed -n '2,/^# Not with sudo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-echo "== pluto-tx / pluto-advanced-rx installer =="
-echo "Repo directory: $SCRIPT_DIR"
-echo
-
-if ! command -v apt-get >/dev/null 2>&1; then
-    cat >&2 <<'EOF'
-This installer only supports Debian/Ubuntu-family systems (apt-get not
-found). Install these manually instead, then re-run this script to get the
-launcher scripts and the self-test:
-  - GNU Radio 3.10+ with the gr-iio ("iio") blocks and PyQt5 support
-  - python3-libiio (raw libiio Python bindings, importable as "iio")
-  - libiio-utils (iio_info, iio_attr -- optional but handy)
-  - an mDNS resolver/daemon (e.g. avahi-daemon) if you want to use
-    hostnames like plutoplus.local instead of a bare IP address
-  - python3-pyqtgraph, if you want to use pluto_advanced_rx's interactive
-    waterfall
-  - soapysdr-module-hackrf, hackrf, and python3-soapysdr, if you want to use
-    pluto_tx's HackRF One TX backend or pluto_advanced_rx's HackRF RX backend
-  - soapysdr-module-rtlsdr and rtl-sdr, if you want to use pluto_advanced_rx's
-    RTL-SDR RX backend
-  - Pillow (python3-pil) and a monospace TTF font (e.g. fonts-dejavu-mono), if
-    you want to use pluto_tx's Digitext digimode
-EOF
-    exit 1
-fi
-
-PACKAGES=(
-    gnuradio          # pulls in gr-iio (libgnuradio-iio) and python3-pyqt5 as hard deps
-    python3-libiio    # raw libiio Python bindings ("import iio") -- NOT pulled in by gnuradio
-    libiio-utils      # iio_info, iio_attr -- optional, useful for manual troubleshooting
-    avahi-daemon      # resolves "*.local" mDNS hostnames; libiio only gets the client libs for free
-    python3-pyqtgraph # pluto_advanced_rx's interactive waterfall -- only a gnuradio "Recommends", not a hard dep
-    soapysdr-module-hackrf # gr-soapy's HackRF driver .so -- gnuradio.soapy itself is already
-                            # part of "gnuradio" above; this is the one missing piece for the
-                            # HackRF backends in pluto_tx (TX) and pluto_advanced_rx (RX)
-    hackrf            # hackrf_info etc., for manual troubleshooting -- mirrors libiio-utils above
-    soapysdr-module-rtlsdr # gr-soapy's RTL-SDR driver .so, for pluto_advanced_rx's RTL-SDR RX backend
-    rtl-sdr           # rtl_test etc., for manual troubleshooting -- mirrors libiio-utils above
-    python3-soapysdr  # raw SoapySDR Python bindings, used only for structured HackRF/RTL-SDR
-                       # device enumeration in the GUI Scan buttons -- gnuradio.soapy's own
-                       # source/sink blocks don't need this, they link libsoapysdr directly in C++
-    python3-pil        # Pillow, for pluto_tx's Digitext digimode (text-to-image rendering,
-                        # pluto_tx/digitext.py) -- a plain Python dependency, no from-source build
-    fonts-dejavu-mono   # DejaVu Sans Mono specifically (verified via `dpkg -S`: the Mono variant
-                        # is its OWN package, separate from fonts-dejavu-core, which only has the
-                        # proportional Sans/Serif faces) -- digitext.py's preferred font, not
-                        # guaranteed present on a minimal system otherwise; falls back to Pillow's
-                        # own built-in bitmap font if this is somehow still missing
-    libhamlib-utils   # rigctld, CAT for the Xiegu X6200 (devices/x6200.py, rigctl.py); started at connect time only
-    python3-serial    # pyserial ("import serial"), for pluto_tx's AIOC TX device backend
-                       # (devices/aioc.py, aioc_ptt.py) -- serial DTR/RTS PTT to a radio
-                       # connected via an AIOC adapter (e.g. a Quansheng UV-K5)
-    git               # to clone/update this repo
-)
-
-echo "Installing: ${PACKAGES[*]}"
-echo "(you may be asked for your sudo password)"
-echo
-export NEEDRESTART_MODE=a  # avoid an interactive "restart services?" prompt if 'needrestart' happens to be installed
-sudo apt-get update
-sudo apt-get install -y "${PACKAGES[@]}"
-
-echo
-echo "Enabling avahi-daemon (mDNS hostname resolution, e.g. plutoplus.local)..."
-if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl enable --now avahi-daemon \
-        || echo "WARNING: could not enable/start avahi-daemon -- '.local' hostnames may not resolve; use a bare IP instead." >&2
-else
-    echo "No systemctl found -- start avahi-daemon yourself if you want '.local' hostname resolution." >&2
-fi
-
-echo
-echo "Setting up non-root USB access for HackRF/RTL-SDR..."
-# PlutoSDR's own udev rule (shipped by libiio0, a python3-libiio dependency)
-# is world-accessible (MODE="666") -- nothing further needed for it. HackRF/
-# RTL-SDR are different: their udev rules (shipped by libhackrf0/librtlsdr0,
-# pulled in transitively by the hackrf/rtl-sdr packages above) grant access
-# only to the "plugdev" group (MODE="0660", GROUP="plugdev") -- verified by
-# reading the installed rule files this session, not assumed. plugdev is a
-# base-passwd system group (Priority: required), so it always exists on
-# Debian/Ubuntu; adding the user to it is something this script CAN do, but
-# a NEW group membership only takes effect in a FRESH login session (a new
-# shell in the current session is not enough) -- that final step is
-# unavoidably manual, so it's called out explicitly below.
-if id -nG "$USER" | tr ' ' '\n' | grep -qx plugdev; then
-    echo "$USER is already in the plugdev group."
-else
-    echo "Adding $USER to the plugdev group (needed for non-root HackRF/RTL-SDR USB access)..."
-    sudo usermod -aG plugdev "$USER"
-    PLUGDEV_JUST_ADDED=1
-fi
-
-# RTL-SDR dongles are auto-claimed by the Linux kernel's own DVB-T driver
-# (dvb_usb_rtl28xxu) the moment they're plugged in -- the single most common
-# real-world "RTL-SDR on Linux" gotcha, and unrelated to the plugdev
-# permission above (this is the KERNEL grabbing the device before librtlsdr/
-# gr-soapy ever get a chance to, not a file-permission problem -- typically
-# surfaces as "usb_claim_interface error -6"). Verified on this system this
-# session: the module is present/loadable and not blacklisted anywhere.
-# Only relevant if you actually use an RTL-SDR dongle as an SDR receiver,
-# not as a DVB-T TV tuner -- if you need both uses on the same machine,
-# remove the blacklist file below instead of running this script.
-RTL_BLACKLIST_FILE="/etc/modprobe.d/blacklist-rtl-sdr.conf"
-if [ -f "$RTL_BLACKLIST_FILE" ]; then
-    echo "RTL-SDR's DVB-T kernel driver is already blacklisted ($RTL_BLACKLIST_FILE)."
-else
-    echo "Blacklisting the RTL-SDR DVB-T kernel driver (dvb_usb_rtl28xxu)..."
-    sudo tee "$RTL_BLACKLIST_FILE" >/dev/null <<'BLACKLIST_EOF'
-# Written by pluto-tx's install.sh: dvb_usb_rtl28xxu is the Linux kernel's
-# own DVB-T driver for RTL2832U-based USB dongles. It auto-claims the
-# device as soon as it's plugged in, which blocks librtlsdr/gr-soapy (used
-# by pluto_advanced_rx's RTL-SDR RX backend) from ever opening it. Remove
-# this file if you also want to use the same dongle as a normal DVB-T TV
-# tuner.
-blacklist dvb_usb_rtl28xxu
-BLACKLIST_EOF
-fi
-if lsmod | grep -q '^dvb_usb_rtl28xxu'; then
-    echo "NOTE: dvb_usb_rtl28xxu is currently loaded. The blacklist above only"
-    echo "stops it from being loaded again -- unplug and replug your RTL-SDR (or"
-    echo "run 'sudo rmmod dvb_usb_rtl28xxu' now) to actually unload it, instead"
-    echo "of rebooting."
-fi
-
-echo
-echo "Verifying the Python side..."
-python3 - <<'EOF'
-import sys
-try:
-    from gnuradio import gr, blocks, filter, analog, audio, iio, soapy, qtgui  # noqa: F401
-    from gnuradio.fft import window  # noqa: F401
-    from gnuradio.filter import firdes  # noqa: F401
-    import iio as libiio  # noqa: F401  -- raw python3-libiio, distinct from gnuradio.iio above
-    from PyQt5 import QtCore, QtWidgets, sip  # noqa: F401
-    import pyqtgraph  # noqa: F401  -- pluto_advanced_rx's interactive waterfall
-    import SoapySDR  # noqa: F401  -- HackRF/RTL-SDR device scanning in the GUI Scan buttons
-    from PIL import Image, ImageDraw, ImageFont  # noqa: F401  -- pluto_tx's Digitext digimode
-    import serial  # noqa: F401  -- pluto_tx's AIOC TX device backend (devices/aioc.py)
-except ImportError as e:
-    print(f"FAILED: {e}", file=sys.stderr)
-    sys.exit(1)
-print("All required Python modules import cleanly.")
-EOF
-
-echo
-echo "Setting up launcher scripts in ~/.local/bin ..."
-mkdir -p "$HOME/.local/bin"
-
-# Keep the LD_LIBRARY_PATH/PATH lines that install-m17.sh / install-rade.sh /
-# install-lora.sh added to an existing launcher: re-running this script used to
-# rewrite the launchers without them, which silently disabled M17, RADE and LoRa
-# until those installers were run again.
-write_launcher() {
-    local name="$1" module_invocation="$2"
-    local launcher="$HOME/.local/bin/$name"
-    local existing_ld="" existing_path=""
-    if [ -f "$launcher" ]; then
-        existing_ld="$(grep -oP '(?<=export LD_LIBRARY_PATH=")[^"]*(?=:\$\{LD_LIBRARY_PATH:-\}")' "$launcher" 2>/dev/null || true)"
-        existing_path="$(grep -oP '(?<=export PATH=")[^"]*(?=:\$\{PATH:-\}")' "$launcher" 2>/dev/null || true)"
-    fi
-    {
-        echo '#!/usr/bin/env bash'
-        if [ -n "$existing_ld" ]; then
-            echo "export LD_LIBRARY_PATH=\"$existing_ld:\${LD_LIBRARY_PATH:-}\""
-        fi
-        if [ -n "$existing_path" ]; then
-            echo "export PATH=\"$existing_path:\${PATH:-}\""
-        fi
-        echo "cd \"$SCRIPT_DIR\" && exec python3 -m $module_invocation \"\$@\""
-    } > "$launcher"
-    chmod +x "$launcher"
+in_list() {
+    local needle="$1" item; shift
+    for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
+    return 1
 }
 
-write_launcher "pluto-tx" "pluto_tx.app --gui"
-write_launcher "pluto-advanced-rx" "pluto_advanced_rx.app"
-write_launcher "pluto-cli" "pluto_cli.app"
+requested=() extra=()
+all=0 dry=0 force=0 yes=0 list=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --all) all=1 ;;
+        --list) list=1 ;;
+        --dry-run) dry=1 ;;
+        --force) force=1 ;;
+        --yes|-y) yes=1 ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; extra=("$@"); break ;;
+        -*) echo "Unbekannte Option: $1 (siehe ./install.sh --help)" >&2; exit 64 ;;
+        *)
+            if ! in_list "$1" "${FEATURES[@]}"; then
+                echo "Unbekanntes Feature: $1. Vorhanden: ${FEATURES[*]}" >&2
+                exit 64
+            fi
+            requested+=("$1") ;;
+    esac
+    shift
+done
+if [ ${#extra[@]} -gt 0 ] && [ ${#requested[@]} -ne 1 ]; then
+    echo "Optionen nach -- gelten fuer genau ein Feature." >&2
+    exit 64
+fi
 
-echo "Created $HOME/.local/bin/pluto-tx, pluto-advanced-rx and pluto-cli"
+refuse_root
 
+show_status() {
+    local id n=1
+    for id in "${FEATURES[@]}"; do
+        printf '  %-8s %-9s %-12s %s\n' "$id" "$(feature_status "$id")" "$(feature_cost "$id")" "$(feature_label "$id")"
+        n=$((n + 1))
+    done
+}
+
+if [ "$list" = 1 ]; then
+    show_status
+    exit 0
+fi
+
+menu() {
+    local -a selected=()
+    local id n answer word status
+    for id in "${FEATURES[@]}"; do
+        status="$(feature_status "$id")"
+        if [ "$id" = base ] || [ "$status" = veraltet ]; then selected+=(1); else selected+=(0); fi
+    done
+    while true; do
+        echo
+        echo "Was soll installiert werden?  ([x] = wird installiert)"
+        n=1
+        for id in "${FEATURES[@]}"; do
+            printf ' [%s] %2d %-8s %-9s %-12s %s\n' "$([ "${selected[$((n - 1))]}" = 1 ] && echo x || echo ' ')" \
+                "$n" "$id" "$(feature_status "$id")" "$(feature_cost "$id")" "$(feature_label "$id")"
+            n=$((n + 1))
+        done
+        echo
+        read -r -p "Nummern umschalten, a = alles, Enter = los, q = abbrechen: " answer || answer=q
+        case "$answer" in
+            '') break ;;
+            q) echo "Abgebrochen."; exit 0 ;;
+            a) n=0
+               for id in "${FEATURES[@]}"; do
+                   in_list "$id" "${NOT_IN_ALL[@]}" || selected[n]=1
+                   n=$((n + 1))
+               done ;;
+            *) for word in $answer; do
+                   if [[ "$word" =~ ^[0-9]+$ ]] && [ "$word" -ge 1 ] && [ "$word" -le ${#FEATURES[@]} ]; then
+                       n=$((word - 1))
+                       selected[n]=$((1 - selected[n]))
+                   else
+                       echo "Keine Nummer aus der Liste: $word"
+                   fi
+               done ;;
+        esac
+    done
+    n=0
+    for id in "${FEATURES[@]}"; do
+        [ "${selected[$n]}" = 1 ] && requested+=("$id")
+        n=$((n + 1))
+    done
+}
+
+if [ "$all" = 1 ]; then
+    for id in "${FEATURES[@]}"; do
+        in_list "$id" "${NOT_IN_ALL[@]}" || requested+=("$id")
+    done
+elif [ ${#requested[@]} -eq 0 ]; then
+    if [ "$yes" = 0 ] && { [ -t 0 ] && [ -t 1 ] || [ -n "${PLUTO_INSTALL_FORCE_MENU:-}" ]; }; then
+        menu
+    fi
+fi
+
+# Installation order, with the base first, whatever the order of the arguments.
+plan=(base)
+for id in "${FEATURES[@]}"; do
+    if [ "$id" != base ] && [ ${#requested[@]} -gt 0 ] && in_list "$id" "${requested[@]}"; then plan+=("$id"); fi
+done
+
+todo=()
+for id in "${plan[@]}"; do
+    if [ "$force" = 1 ] || [ "$(feature_status "$id")" != aktuell ]; then todo+=("$id"); fi
+done
+
+if [ "$dry" = 1 ]; then
+    echo "Es wuerde installiert (nichts wird geaendert):"
+    for id in "${plan[@]}"; do
+        if [ ${#todo[@]} -gt 0 ] && in_list "$id" "${todo[@]}"; then
+            printf '  %-8s %s (%s)\n' "$id" "$(feature_label "$id")" "$(feature_cost "$id")"
+        else
+            printf '  %-8s aktuell, nichts zu tun\n' "$id"
+        fi
+    done
+    echo "Danach: Starter in ~/.local/bin schreiben, Doctor."
+    exit 0
+fi
+
+mkdir -p "$LOG_DIR"
+PLUTO_INSTALL_NOTICES="$(mktemp)"
+export PLUTO_INSTALL_NOTICES
+sudo_keeper=""
+cleanup() {
+    [ -n "$sudo_keeper" ] && kill "$sudo_keeper" 2>/dev/null
+    rm -f "$PLUTO_INSTALL_NOTICES" "$PLUTO_INSTALL_NOTICES.apt-updated"
+}
+trap cleanup EXIT
+
+# Ask once, up front: a build must not stop half an hour in, waiting for a password.
+if [ ${#todo[@]} -gt 0 ] && command -v sudo >/dev/null 2>&1 && [ -z "${PLUTO_INSTALL_NO_SUDO:-}" ]; then
+    echo "Fuer apt-get und Systemdateien kann das Passwort noetig sein."
+    if sudo -v; then
+        ( while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
+        sudo_keeper=$!
+    fi
+fi
+
+declare -A result
+for id in "${plan[@]}"; do
+    result[$id]=aktuell
+done
+
+failed=0
+for id in ${todo[@]+"${todo[@]}"}; do
+    log="$LOG_DIR/$id.log"
+    echo
+    echo "=== $id: $(feature_label "$id") ==="
+    started=$SECONDS
+    (
+        export PLUTO_INSTALL_YES="$yes"
+        bash "$INSTALL_DIR/$id.sh" ${extra[@]+"${extra[@]}"}
+    ) 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    case "$rc" in
+        0) stamp_write "$id"; result[$id]="installiert ($((SECONDS - started)) s)" ;;
+        "$EXIT_SKIPPED") result[$id]=uebersprungen ;;
+        *) result[$id]="FEHLER, siehe $log"; failed=1 ;;
+    esac
+    if [ "$id" = base ] && [ "$rc" != 0 ]; then
+        echo "Ohne die Grundinstallation lohnen die uebrigen Features nicht: Abbruch." >&2
+        for later in "${plan[@]}"; do
+            [ "$later" = base ] || result[$later]="nicht versucht"
+        done
+        break
+    fi
+done
+
+launchers_ok=1
+bash "$INSTALL_DIR/write-launchers.sh" || launchers_ok=0
+
+echo
+echo "=== Ergebnis ==="
+for id in "${plan[@]}"; do
+    printf '  %-8s %s\n' "$id" "${result[$id]}"
+done
+if [ "$launchers_ok" = 0 ]; then
+    echo "  Starter in ~/.local/bin: FEHLER"
+    failed=1
+fi
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
-    *)
-        echo
-        echo "NOTE: $HOME/.local/bin is not on your PATH yet. Add this to your"
-        echo "~/.bashrc (or ~/.zshrc) and open a new shell:"
-        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-        ;;
+    *) notice "$HOME/.local/bin fehlt im PATH. In die .bashrc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
-
-if [ "${PLUGDEV_JUST_ADDED:-}" = "1" ]; then
+if [ -s "$PLUTO_INSTALL_NOTICES" ]; then
     echo
-    echo "IMPORTANT: you were just added to the 'plugdev' group (needed for"
-    echo "non-root HackRF/RTL-SDR USB access). This only takes effect in a NEW"
-    echo "login session -- log out and back in (or reboot) before using a"
-    echo "HackRF or RTL-SDR device. PlutoSDR access is unaffected, works now."
+    echo "=== Hinweise ==="
+    sed 's/^/  /' "$PLUTO_INSTALL_NOTICES"
+fi
+
+if [ -z "${PLUTO_INSTALL_NO_DOCTOR:-}" ] && python3 -c 'import sys' 2>/dev/null; then
+    echo
+    echo "=== Doctor ==="
+    eval "$(grep -hE '^export (LD_LIBRARY_PATH|PATH)=' "$HOME/.local/bin/pluto-cli" 2>/dev/null)"
+    (cd "$REPO_DIR" && PATH="$HOME/.local/bin:$PATH" python3 -m pluto_tx.doctor) || true
 fi
 
 echo
-echo "== Done =="
-echo "Start the apps with:"
-echo "    pluto-tx"
-echo "    pluto-advanced-rx"
-echo "    pluto-cli          (headless CLI -- see pluto_cli/README.md)"
-echo "(all accept --uri/--freq/etc. -- see e.g. 'pluto-tx --help'/'pluto-cli --help'."
-echo " Without a launcher on PATH, run them directly from $SCRIPT_DIR instead:"
-echo "    python3 -m pluto_tx.app --gui"
-echo "    python3 -m pluto_advanced_rx.app"
-echo "    python3 -m pluto_cli.app)"
+echo "Starten: pluto-tx, pluto-advanced-rx, pluto-cli$(in_list web-trx "${plan[@]}" && echo ', web-trx start')"
+exit "$failed"

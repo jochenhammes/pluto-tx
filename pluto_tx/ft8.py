@@ -5,7 +5,7 @@ standard QSO message texts (compose()) and UTC slot planning (plan_transmission(
 
 Message packing (text -> 77-bit payload -> 79 tone indices 0..7) is done
 by ft8_ctypes.encode_message(), which calls into kgoba/ft8_lib (a real,
-existing open-source FT8 codec, built by install-ft8.sh) -- NOT
+existing open-source FT8 codec, built by ./install.sh ft8) -- NOT
 reimplemented here. This module's own job is turning those 79 tone
 indices into the actual waveform, in pure Python/numpy. Verified with
 WSJT-X's jt9 as an independent decoder, in software and over the air.

@@ -1,5 +1,5 @@
 """ctypes wrapper around librade.so's rade_api.h (RADE V1 modem: features <->
-IQ). Built from source by install-rade.sh (freedv/rade_c) -- no upstream
+IQ). Built from source by ./install.sh rade (freedv/rade_c) -- no upstream
 Python bindings exist. Mirrors freedv_ctypes.py's overall shape (lazy
 dlopen, an *_AVAILABLE flag, a Session class wrapping one native handle).
 
@@ -117,7 +117,7 @@ class RadeSession:
 
     def __init__(self):
         if not RADE_AVAILABLE:
-            raise RuntimeError("RADE V1 support not available (see install-rade.sh)")
+            raise RuntimeError("RADE V1 support not available (see ./install.sh rade)")
         self._r = _lib.rade_open(b"", 0)  # V1: flags=0, model_file ignored (built-in weights)
         if not self._r:
             raise RuntimeError("rade_open() failed")

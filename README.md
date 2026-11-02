@@ -46,64 +46,48 @@ Frequenzwahl, Bandplan und Sendeleistung liegt beim Betreiber.
 
 ## Installation
 
-```
-./install.sh
-```
+Zwei Wege, je nach Zweck:
 
-Für Debian/Ubuntu (`apt-get`). Installiert `gnuradio` (zieht `gr-iio` und
-`python3-pyqt5` mit), `python3-libiio`/`libiio-utils` (TX-Sicherheitsschicht
-+ Fehlersuche), `avahi-daemon` (löst `*.local`-Hostnamen wie
-`plutoplus.local` auf), `python3-pyqtgraph` (Wasserfall), HackRF-/
-RTL-SDR-Unterstützung (`soapysdr-module-hackrf`/`-rtlsdr`, `hackrf`,
-`rtl-sdr`, `python3-soapysdr`), `python3-pil`/`fonts-dejavu-mono`
-(Waterfall Writer) und `git`. Prüft danach per echtem
-Python-Import, ob alles verfügbar ist, und legt `~/.local/bin/pluto-tx`,
-`pluto-advanced-rx`, `pluto-cli` an. Beliebig oft wiederholbar.
-
-Der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:...`) erreichbar
-sein — für USB ist nichts weiter nötig. Für HackRF/RTL-SDR richtet das
-Skript zusätzlich ein: den aktuellen User zur Gruppe `plugdev`
-hinzufügen (**wirkt erst nach Neu-Login**) und den Kernel-DVB-T-Treiber
-`dvb_usb_rtl28xxu` blacklisten (RTL-SDR-Sticks werden sonst automatisch
-vom Kernel als TV-Tuner beansprucht — ein bereits gestecktes Gerät
-braucht dafür ein Aus-/Einstecken oder `sudo rmmod dvb_usb_rtl28xxu`).
-
-### Optional: M17
+- **Paket (für den normalen Betrieb):** das `.deb` aus den [GitHub-Releases](https://github.com/jochenhammes/pluto-tx/releases) enthält alle Features, siehe [`packaging/README.md`](packaging/README.md).
+- **Aus dem Checkout (für Entwicklung und den neuesten Stand):** ein Befehl für alles:
 
 ```
-./install-m17.sh
+./install.sh                 # Menü: zeigt Stand und Bauzeit je Feature
+./install.sh --all           # alles
+./install.sh m17 rade        # gezielt; die Grundinstallation kommt automatisch dazu
+./install.sh --list          # was es gibt und was installiert ist; ändert nichts
+./install.sh --dry-run ...   # zeigt, was passieren würde; ändert nichts
+./install.sh --force ...     # auch, was schon aktuell ist
+./install.sh --yes ...       # keine Rückfragen; ohne Features: nur die Grundinstallation
 ```
 
-`install.sh` installiert bewusst kein `gnuradio.m17` (kein apt-Paket,
-braucht C++/CMake-Build, [gr-m17](https://github.com/M17-Project/gr-m17)).
-Ohne dieses Skript ist der M17-Moduseintrag in beiden Apps ausgegraut,
-der Rest läuft normal. Baut `gr-m17` (gepinnter Commit) nach
-`$HOME/.local`, regeneriert die Starter mit passendem `LD_LIBRARY_PATH`.
+Nur Debian/Ubuntu, nicht mit `sudo` starten (das Skript ruft es selbst auf). Derselbe Befehl aktualisiert: Es wird nur neu gebaut, was sich geändert hat. Ein fehlgeschlagenes Feature hält die anderen nicht auf; am Ende stehen ein Ergebnis je Feature, die Logdatei unter `~/.cache/pluto-tx/install/` und der Bericht des Doctors (`python3 -m pluto_tx.doctor`). Ohne ein Feature ist sein Eintrag in den Apps ausgegraut, der Rest läuft normal.
 
-### Optional: Meshtastic (LoRa)
+| Feature | Inhalt | Woher |
+|---|---|---|
+| `base` | Apps und Starter, FM, SSB, FreeDV, Waterfall Writer, PSK31, RTTY, POCSAG, APRS; Pluto, HackRF, RTL-SDR, X6200, AIOC | apt |
+| `m17` | M17 | [gr-m17](https://github.com/M17-Project/gr-m17), Build nach `~/.local` |
+| `lora` | Meshtastic und MeshCore | [gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr) (GPL-3.0), Build nach `~/.local` |
+| `rade` | RADE V1 | [rade_c](https://github.com/freedv/rade_c), Build in `rade_c/` |
+| `ft8` | FT8 | [ft8_lib](https://github.com/kgoba/ft8_lib) (MIT), Build in `ft8_lib/` |
+| `wsjtx` | besserer FT8-Decoder `jt9`, findet rund 1,5-mal so viele Signale wie ft8_lib | apt |
+| `jtty` | JTTY | Release des WSJT-X-Projekts mit Prüfsumme, in `wsjt-codec/` |
+| `js8` | JS8: JSC-Wortlisten für Freitext in Fast, Turbo und Slow, Decoder `js8ref` | [JS8Call-improved](https://github.com/JS8Call-improved/JS8Call-improved), in `js8call/` |
+| `js8call` | die Anwendung JS8Call zum Gegenprüfen; nicht in `--all` | apt |
+| `espdr` | ESP32-S3 als Sender: esptool 5, udev-Regel | pipx, dieses Repository |
+| `web-trx` | Browser-Oberfläche; braucht Node.js ≥ 18, das nicht mitinstalliert wird. Ohne Node.js wird es übersprungen. Betrieb: [`web-trx/README.md`](web-trx/README.md) | venv, Frontend-Build |
 
-```
-./install-lora.sh
-```
+Alle Fremdversionen stehen an einer Stelle: [`packaging/components.lock`](packaging/components.lock).
 
-Baut [`gr-lora_sdr`](https://github.com/tapparelj/gr-lora_sdr) (GPL-3.0,
-gepinnter Commit) nach `$HOME/.local` und regeneriert die Starter. Die
-Protokollschicht braucht zusätzlich die pip-Pakete `meshtastic` und
-`cryptography` (`pip install --user --break-system-packages meshtastic
-cryptography` bei PEP-668-Systemen). Ohne das ist der
-Meshtastic-Eintrag im Digimode-Kombo beider Apps ausgegraut, der Rest
-läuft normal. **MeshCore** braucht nur `gr-lora_sdr` und `cryptography`
-(nicht das `meshtastic`-Paket).
+**Grundinstallation:** Sie nimmt den Benutzer in die Gruppen `plugdev` (HackRF, RTL-SDR) und `dialout` (X6200, AIOC, ESP32-S3) auf; das **wirkt erst nach Neu-Login**. Sie sperrt den Kernel-DVB-T-Treiber `dvb_usb_rtl28xxu`, der RTL-SDR-Sticks sonst als TV-Tuner beansprucht; ein bereits gestecktes Gerät braucht ein Aus- und Einstecken oder `sudo rmmod dvb_usb_rtl28xxu`. Der Pluto muss per Netzwerk (`ip:...`) oder USB (`usb:...`) erreichbar sein.
 
-### FreeDV braucht kein separates Skript
+**Früher hießen die Features eigene Skripte:** `./install-m17.sh` ist jetzt `./install.sh m17`, ebenso `lora`, `rade`, `ft8`, `jtty`, `js8`, `espdr`, `web-trx`; `./install-js8.sh --with-js8call` ist `./install.sh js8 js8call`; `wsjtx` kam früher mit `./install-ft8.sh`. Optionen stehen hinter `--`, etwa `./install.sh web-trx -- --reuse-dist DIR` oder `./install.sh espdr -- --no-udev`. Vorhandene Starter werden beim ersten Lauf als `*.bak` gesichert.
 
-`libcodec2` mit LPCNet/2020/2020B-Support ist bereits transitive
-Abhängigkeit von `gnuradio` — FreeDV funktioniert direkt nach
-`install.sh`.
+FreeDV braucht kein eigenes Feature: `libcodec2` mit LPCNet/2020/2020B-Support kommt mit `gnuradio`.
 
-### AIOC-Adapter (Quansheng UV-K5 & Co.) braucht kein separates Skript
+### AIOC-Adapter (Quansheng UV-K5 & Co.)
 
-`pyserial` (`python3-serial`) installiert `install.sh` bereits mit. Der
+Der
 "AIOC"-Gerätetyp in `pluto-tx` sendet FM/RADE/Waterfall-Writer/PSK31/RTTY/
 POCSAG als reines Audiosignal an ein per [AIOC](https://github.com/skuep/AIOC)
 angeschlossenes analoges Funkgerät (das Funkgerät moduliert selbst,
@@ -118,7 +102,7 @@ eigenständige Skript `pluto_tx/tx-stdin.py` (Audio von stdin senden,
 z. B. für eine TTS-Pipe ohne die GUI) nutzt dieselbe PTT-Logik
 (`pluto_tx/aioc_ptt.py`) und funktioniert unabhängig von der App weiter.
 
-### Optional: ESP32-S3 als 13-cm-Sender (FM und M17, experimentell)
+### ESP32-S3 als 13-cm-Sender (FM und M17, experimentell)
 
 Der Gerätetyp "ESP32-S3 (13 cm)" sendet mit einem ESP32-S3-Entwicklungsboard (mit **zwei** USB-Ports) im 13-cm-Band (2320–2450 MHz). Das Board hat
 keinen I/Q-Ausgang: Es steuert den Testton seines WLAN-Funkteils in Frequenz (und ein wenig in der Amplitude), 40 000-mal pro Sekunde. Das genügt
@@ -126,10 +110,7 @@ für Signale mit **konstanter Hüllkurve**: `pluto-tx` rechnet das Basisband des
 sind **nur FM und M17** wählbar; alles mit Amplitudenmodulation (SSB, PSK31, FT8, FreeDV, RADE, ...) und LoRa ist bei diesem Gerät gesperrt
 (GUI: ausgegraut mit Hinweis, `pluto-cli`: Fehlermeldung, Flowgraph: Rückfall auf FM).
 
-```
-./install.sh            # zuerst
-./install-espdr.sh      # esptool 5 (pipx), udev-Regel für das Board; --dry-run zeigt nur, was passieren würde
-```
+Einrichten: `./install.sh espdr` (esptool 5 über pipx, udev-Regel für das Board).
 
 Der Code für das Board (`espdr/`, einschließlich der Firmware-Images) gehört zu diesem Repository: Er ist eine Kopie aus
 [esp32-sdr-trx](https://github.com/jochenhammes/esp32-sdr-trx) (Zero-Clause-BSD-Lizenz, Stand in `espdr/UPSTREAM`), die `tools/sync-espdr.sh`
@@ -151,68 +132,6 @@ Vor der ersten Sendung einmal den Lizenzhinweis bestätigen (das sendet nichts):
   M17-Empfänger folgen dem. Bei etwa 10 % der Frequenzen liegt das Signal wegen der Einstellmöglichkeiten des Chips ein paar kHz neben dem Wunsch (die Warnung nennt die tatsächliche Frequenz).
 - Die Latenz von PTT bis Träger beträgt mindestens 100 ms, das Ende des Trägers kommt etwa 125 ms nach dem Loslassen; die Frequenz lässt sich während der Sendung nicht ändern.
 - Eine Sendung braucht eine **Amateurfunklizenz**, und du bist für das verantwortlich, was du sendest. Nur 2320–2450 MHz.
-
-### Optional: FT8
-
-```
-./install-ft8.sh
-```
-
-Baut [`kgoba/ft8_lib`](https://github.com/kgoba/ft8_lib) (MIT, gepinnter
-Commit) nach `ft8_lib/` im Projektverzeichnis (Encoder für TX, Ersatz-Decoder
-für RX) und installiert, falls noch nicht vorhanden, das apt-Paket `wsjtx`,
-dessen Decoder `jt9` die RX-App bevorzugt nutzt (findet rund 1,5-mal so viele
-Signale wie ft8_lib). Ohne das Skript ist FT8 in beiden Apps ausgegraut.
-
-### Optional: JTTY
-
-```bash
-./install-jtty.sh
-```
-
-Lädt `wsjt-codec` aus dem Release des WSJT-X-Projekts, prüft die Prüfsumme und legt es nach `./wsjt-codec`. Ein installiertes WSJT-X und sein `jt9` bleiben unberührt. Ohne das Skript ist JTTY ausgegraut, alles andere läuft normal.
-
-### Optional: JS8
-
-```
-./install-js8.sh [--with-js8call]
-```
-
-Der JS8-Codec selbst ist reines Python und im Repo. Das Skript:
-- klont [JS8Call-improved](https://github.com/JS8Call-improved/JS8Call-improved)
-  am gepinnten Stand (v2.5.2, `f0f0d01b`) nach `js8call/`;
-- entnimmt daraus die JSC-Wortlisten (nötig für Freitext in Fast/Turbo/Slow)
-  und prüft, dass die eingecheckten Tabellen zum Quelltext passen;
-- baut `tools/js8ref`, JS8Calls eigenen Decoder als Kommandozeilenprogramm.
-  Die RX-App nutzt ihn bevorzugt, sonst den eigenen numpy-Decoder.
-- schließt mit einem Selbsttest ab.
-
-`--with-js8call` installiert zusätzlich das apt-Paket `js8call`, zum
-Gegenprüfen mit der echten JS8Call-Oberfläche. Ohne das Skript funktionieren
-JS8-TX, -RX und Freitext in Normal trotzdem.
-
-### Optional: RADE V1
-
-```
-./install-rade.sh
-```
-
-Ohne dieses Skript ist der RADE-Moduseintrag in beiden Apps ausgegraut,
-der Rest läuft normal. Baut [`freedv/rade_c`](https://github.com/freedv/rade_c)
-(gepinnter Commit) nach `rade_c/` im Projektverzeichnis und regeneriert
-alle drei Starter mit passendem `LD_LIBRARY_PATH`/`PATH`.
-
-### Optional: Web-TRX (Browser-Oberfläche)
-
-```
-./install-web-trx.sh
-```
-
-Legt für `web-trx/` ein Python-venv (mit `--system-site-packages`, damit
-GNU Radio und libiio sichtbar sind) an, baut das Frontend (braucht Node.js
-≥ 18, das Skript installiert es nicht selbst) und legt den Starter
-`~/.local/bin/web-trx` an. `install.sh` und die übrigen Starter bleiben
-unberührt. Details, Konfiguration und Betrieb: [`web-trx/README.md`](web-trx/README.md).
 
 ## Erste Schritte
 
@@ -651,7 +570,8 @@ Gain-Register allein stoppt die Sendung nachweislich nicht).
 ## Struktur
 
 ```
-install.sh / install-m17.sh / install-rade.sh / install-lora.sh / install-ft8.sh / install-js8.sh / install-web-trx.sh / install-espdr.sh
+install.sh                # Einstieg der Installation aus dem Checkout
+scripts/install/          # ein Skript je Feature, lib.sh, features.sh, packages-base.txt
 espdr/                    # Kopie aus esp32-sdr-trx (0BSD): Host-Teil des ESP32-S3-Senders + Firmware-Images; `tools/sync-espdr.sh`, nicht hier ändern
 pluto_tx/                 # Sende-App
 ├── config.py                # geräteunabhängige Konstanten
@@ -683,7 +603,7 @@ pluto_advanced_rx/         # Empfänger-App mit interaktivem Wasserfall
 ├── ft8_decoder.py / ft8_rx.py   # FT8: Slot-Decoder (jt9 oder ft8_lib), UTC-Slot-Empfänger
 ├── js8_decoder.py / js8_rx.py / js8_assembly.py  # JS8: Slot-Decoder (js8ref oder eigener), Empfänger je Speed, Mehrrahmen-Zusammensetzung
 └── ...
-tools/js8ref/              # JS8Calls Decoder als Kommandozeilenprogramm (Referenz, von install-js8.sh gebaut)
+tools/js8ref/              # JS8Calls Decoder als Kommandozeilenprogramm (Referenz, von ./install.sh js8 gebaut)
 tests/                     # Unit-/Loopback-Tests: python3 -m unittest discover tests
 pluto_cli/                 # headless CLI, importiert die beiden Apps oben, siehe pluto_cli/README.md
 web-trx/                   # Browser-Oberfläche: backend/ (FastAPI), frontend/ (Svelte), scripts/, docs/ -- siehe web-trx/README.md
@@ -771,11 +691,11 @@ Das Verzeichnis `espdr/` (Host-Teil des ESP32-S3-Senders und seine Firmware-Imag
 Repositories steht unter GPLv3. Die Kopie erzeugt `tools/sync-espdr.sh`, der Stand steht in `espdr/UPSTREAM`.
 
 Die optionalen Abhängigkeiten `gr-m17` (GPLv2), `rade_c`/RADE
-(BSD-2-Clause) und `ft8_lib` (MIT) werden von `install-m17.sh`/`install-rade.sh`/
-`install-ft8.sh` separat aus ihren jeweiligen Quellen gebaut, nicht in diesem Repo
+(BSD-2-Clause) und `ft8_lib` (MIT) werden von `./install.sh m17`/`rade`/
+`ft8` separat aus ihren jeweiligen Quellen gebaut, nicht in diesem Repo
 vendort. WSJT-X (`jt9`, GPLv3) wird als eigenständiges Programm aufgerufen.
 `pluto_tx/js8_tables.py` ist aus dem JS8Call-Quelltext (GPLv3) abgeleitet;
-`install-js8.sh` klont JS8Call separat und baut `tools/js8ref` gegen die
+`./install.sh js8` klont JS8Call separat und baut `tools/js8ref` gegen die
 unveränderten Quellen.
 
 ## Danksagungen

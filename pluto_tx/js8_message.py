@@ -8,7 +8,7 @@ differences, all on inputs JS8Call's GUI never produces:
   - build_message_frames() raises ValueError where JS8Call would loop forever (text it cannot encode --
     the GUI filters those characters out first, see normalize_text()),
   - out-of-range values that would be undefined behaviour in C++ (alphabet .at() past the end) unpack to "",
-  - without the JSC word lists (js8call/jsc.json, install-js8.sh) compressed data frames cannot be built
+  - without the JSC word lists (js8call/jsc.json, ./install.sh js8) compressed data frames cannot be built
     and decode as "[JSC]".
 
 Qt semantics that matter here: QRegularExpression::match() searches (unanchored unless the pattern has ^),
@@ -1006,7 +1006,7 @@ def build_message_frames(mycall, mygrid, selected_call, text, force_identify=Tru
             else:
                 if not jsc_available() and submode != js8_phy.NORMAL:
                     raise ValueError("JS8 free text in this speed needs the JSC word lists "
-                                     "(js8call/jsc.json, run install-js8.sh)")
+                                     "(js8call/jsc.json, run ./install.sh js8)")
                 raise ValueError(f"JS8 cannot encode this text: {line!r}")
         if line_frames:
             line_frames[0][1] |= FLAG_FIRST

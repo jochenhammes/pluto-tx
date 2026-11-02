@@ -146,7 +146,7 @@ class ReferenceDataTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.isdir(os.path.join(JS8CALL_SRC, "JS8_Mode")),
-                     "JS8Call source not present (install-js8.sh / JS8CALL_SRC)")
+                     "JS8Call source not present (./install.sh js8 / JS8CALL_SRC)")
 class ExtractorReproducibleTests(unittest.TestCase):
     def test_extractor_reproduces_checked_in_tables(self):
         with tempfile.TemporaryDirectory() as tmp:

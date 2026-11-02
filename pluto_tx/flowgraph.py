@@ -51,10 +51,10 @@ from .js8_source import Js8SequenceSource
 from . import lora_airtime
 from . import paths
 
-FT8_AVAILABLE = ft8.ft8_ctypes.FT8_AVAILABLE  # needs libft8wrap.so (install-ft8.sh)
+FT8_AVAILABLE = ft8.ft8_ctypes.FT8_AVAILABLE  # needs libft8wrap.so (./install.sh ft8)
 
 # LoRa/Meshtastic is optional: gr-lora_sdr is a from-source build (see
-# install-lora.sh) and the protocol layer needs the `meshtastic` +
+# ./install.sh lora) and the protocol layer needs the `meshtastic` +
 # `cryptography` pip packages. Same posture as M17_AVAILABLE above -- the app
 # stays fully usable without them, the GUI greys the mode out.
 try:
@@ -76,7 +76,7 @@ MESHCORE_AVAILABLE = _LORA_CORE_AVAILABLE and meshcore_codec is not None
 _LORA_TX_BRANCH = LORA_AVAILABLE or MESHCORE_AVAILABLE  # the LoRa encoder branch exists for either digimode
 
 # M17 digital voice is optional: gr-m17 is a from-source build (see
-# install-m17.sh), not something every pluto_tx user necessarily has. The
+# ./install.sh m17), not something every pluto_tx user necessarily has. The
 # app must stay fully usable for FM/SSB without it -- import lazily and let
 # the GUI grey out the M17 mode entry when unavailable, rather than a hard
 # top-level ImportError that would break the whole app.
@@ -101,7 +101,7 @@ from .freedv import FreeDVEncoder
 FREEDV_AVAILABLE = _freedv_ctypes.FREEDV_AVAILABLE
 
 # RADE V1 is also optional, same reasoning as M17: from-source build (see
-# install-rade.sh), not something every user has.
+# ./install.sh rade), not something every user has.
 from . import rade_ctypes as _rade_ctypes
 from .rade import RadeEncoder
 RADE_AVAILABLE = _rade_ctypes.RADE_AVAILABLE
@@ -2130,7 +2130,7 @@ class PlutoTxFlowgraph(gr.top_block):
     def ft8_problem(self):
         """None if the current FT8 message can be sent, else a short reason."""
         if not FT8_AVAILABLE:
-            return "FT8 not available (run install-ft8.sh)"
+            return "FT8 not available (run ./install.sh ft8)"
         lo, hi = config.FT8_TONE_RANGE_HZ
         if not lo <= self.ft8_tone_hz <= hi:
             return f"audio offset must be {lo:.0f}..{hi:.0f} Hz"

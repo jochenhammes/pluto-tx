@@ -113,7 +113,7 @@ def add_common_args(parser):
     parser.add_argument(
         "--ft8-decoder", choices=("auto", "jt9", "ft8lib"), default=rx_config.FT8_DECODER_BACKEND,
         help="FT8 decoder for --digimode ft8: jt9 = WSJT-X's (apt install wsjtx, finds the most), "
-             "ft8lib = kgoba/ft8_lib (install-ft8.sh), auto = jt9 if installed (default: auto). "
+             "ft8lib = kgoba/ft8_lib (./install.sh ft8), auto = jt9 if installed (default: auto). "
              "Tune --freq to the USB dial frequency, e.g. 14074000 or 144174000.",
     )
     parser.add_argument(
@@ -139,7 +139,7 @@ def add_common_args(parser):
     )
     parser.add_argument(
         "--js8-decoder", choices=("auto", "js8", "own"), default=rx_config.JS8_DECODER_BACKEND,
-        help="JS8 decoder for --digimode js8: js8 = JS8Call's own (tools/js8ref, install-js8.sh), own = "
+        help="JS8 decoder for --digimode js8: js8 = JS8Call's own (tools/js8ref, ./install.sh js8), own = "
              "the built-in numpy decoder, auto = js8 if built (default: auto)",
     )
     parser.add_argument(
@@ -390,7 +390,7 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
     if args.digimode == "jtty":
         from pluto_tx import jtty_codec
         if not jtty_codec.available():
-            emitter.error("JTTY is not available -- wsjt-codec is not installed, see install-jtty.sh")
+            emitter.error("JTTY is not available -- wsjt-codec is not installed, see ./install.sh jtty")
             return 1
     if args.digimode == "aprs":
         # A starting point, not a lock: an explicit --freq wins, as other regions use other frequencies.
@@ -427,14 +427,14 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         from pluto_advanced_rx.flowgraph import MESHCORE_AVAILABLE
         if not MESHCORE_AVAILABLE:
             emitter.error("MeshCore is not available -- gr-lora_sdr / the cryptography package is not installed, "
-                          "see install-lora.sh")
+                          "see ./install.sh lora")
             return 1
         frequency = rx_config.MESHCORE_PRESETS[meshcore_preset_index].frequency_hz
         emitter.emit("meshcore_listen", preset=args.meshcore_preset, freq_hz=frequency)
     if args.digimode == "meshtastic":
         if not LORA_AVAILABLE:
             emitter.error("Meshtastic is not available -- gr-lora_sdr / the meshtastic package is not installed, "
-                          "see install-lora.sh")
+                          "see ./install.sh lora")
             return 1
         from pluto_tx import meshtastic_codec
         try:
@@ -576,7 +576,7 @@ def run_lsb(args):
 
 def add_rade_subparser(subparsers):
     p = subparsers.add_parser(
-        "rade", help="RADE (radio autoencoder) digital voice (requires librade.so, see install-rade.sh)",
+        "rade", help="RADE (radio autoencoder) digital voice (requires librade.so, see ./install.sh rade)",
         description=__doc__,
     )
     add_common_args(p)
@@ -586,14 +586,14 @@ def add_rade_subparser(subparsers):
 def run_rade(args):
     emitter = runtime.Emitter(args.json)
     if not RADE_AVAILABLE:
-        emitter.error("RADE is not available -- librade.so/lpcnet_demo not found, see install-rade.sh")
+        emitter.error("RADE is not available -- librade.so/lpcnet_demo not found, see ./install.sh rade")
         return 1
     return _build_and_run(args, AdvancedRxFlowgraph.MODE_RADE, emitter)
 
 
 def add_m17_subparser(subparsers):
     p = subparsers.add_parser(
-        "m17", help="M17 digital voice (requires gr-m17, see install-m17.sh)", description=__doc__,
+        "m17", help="M17 digital voice (requires gr-m17, see ./install.sh m17)", description=__doc__,
     )
     add_common_args(p)
     p.set_defaults(func=run_m17)
@@ -602,7 +602,7 @@ def add_m17_subparser(subparsers):
 def run_m17(args):
     emitter = runtime.Emitter(args.json)
     if not M17_AVAILABLE:
-        emitter.error("M17 is not available -- gr-m17 is not installed, see install-m17.sh")
+        emitter.error("M17 is not available -- gr-m17 is not installed, see ./install.sh m17")
         return 1
     return _build_and_run(args, AdvancedRxFlowgraph.MODE_M17, emitter)
 

@@ -359,7 +359,7 @@ class StatusTests(unittest.TestCase):
         self.addCleanup(inst.cleanup)
         st = inst.ctl.status()
         self.assertEqual(st.state, wc.NOT_INSTALLED)
-        self.assertIn("install-web-trx.sh", st.detail)
+        self.assertIn("./install.sh web-trx", st.detail)
         self.assertIs(st.holds("pluto"), False)
         self.assertEqual(run_cli("--dir", str(inst.dir), "status")[0], 5)
 

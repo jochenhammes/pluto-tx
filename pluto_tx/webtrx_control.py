@@ -188,12 +188,12 @@ class WebTrxControl:
 
     def installed(self) -> tuple[bool, str]:
         # The package runs the backend with the distribution's Uvicorn, a
-        # checkout with the venv from install-web-trx.sh.
+        # checkout with the venv from ./install.sh web-trx.
         backend = "backend/web_trx/server.py" if self.package else "backend/.venv/bin/uvicorn"
         missing = [p for p in ("scripts/start.sh", "scripts/stop.sh", backend,
                                "frontend/dist/index.html") if not (self.dir / p).exists()]
         if missing:
-            hint = "reinstall the pluto-tx package" if self.package else "run ./install-web-trx.sh"
+            hint = "reinstall the pluto-tx package" if self.package else "run ./install.sh web-trx"
             return False, "missing: " + ", ".join(missing) + f" ({hint})"
         return True, ""
 
