@@ -54,6 +54,8 @@ class RxDevice(abc.ABC):
     # keep meaning "no RF" for its existing consumers (File Broadcast
     # gating, etc.) regardless of this.
     audio_tuning_range_hz: Optional[tuple] = None
+    # What can be received, as demodulator or digimode names, or None for everything: a transceiver's audio can't carry ADS-B.
+    supported_rx_modes: Optional[frozenset] = None
     # Upper bound for the waterfall's zoom slider -- FftProbe.MAX_ZOOM by
     # default. A backend with a much lower sample rate than RF's needs a
     # tighter cap: zoom is a real zoom-FFT (fft_probe.py), needing

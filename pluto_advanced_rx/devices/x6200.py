@@ -19,6 +19,8 @@ class X6200RxDevice(AudioDevice):
     connection_kind = "rig"
     frequency_range_hz = (100_000.0, 54_000_000.0)
     audio_tuning_range_hz = None
+    # USB only so far: nothing here switches the radio's sideband yet, and it would need NFM for FM, POCSAG and APRS.
+    supported_rx_modes = frozenset({"ssb", "rade", "psk31", "rtty", "ft8", "js8", "jtty"})
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)

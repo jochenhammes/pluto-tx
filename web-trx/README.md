@@ -257,7 +257,7 @@ Störstrahlung des Rechners die Empfindlichkeit deutlich: Die eigene Testsendung
 
 ### Xiegu X6200
 
-Als Sender wählbar, die Modusliste zeigt dann nur, was er über USB-Audio senden kann (SSB in USB-D und LSB-D, die Digimodes, RADE). Die Leistung steht in Prozent seiner Höchstleistung, Standardgrenze 10 %. Grenzen und Sicherheit: [`docs/x6200/SPEC.md`](../docs/x6200/SPEC.md). Der Empfang über den X6200 ist im Backend eingetragen, im Browser aber noch nicht getestet.
+Als Sender wählbar, die Modusliste zeigt dann nur, was er über USB-Audio senden kann (SSB in USB-D und LSB-D, die Digimodes, RADE). Die Leistung steht in Prozent seiner Höchstleistung, Standardgrenze 10 %. Grenzen und Sicherheit: [`docs/x6200/SPEC.md`](../docs/x6200/SPEC.md). Auch als Empfänger wählbar, bisher nur in USB und im Browser nur mit JTTY geprüft. Der gemeinsame `rigctld` bleibt laufen, bis man ihn beendet.
 
 ### JTTY
 

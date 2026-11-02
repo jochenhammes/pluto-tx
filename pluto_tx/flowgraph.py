@@ -2041,6 +2041,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 min_freq_hz=self.digitext_min_freq_hz, tail_s=config.DIGITEXT_TAIL_S + self.device.tx_end_loss_s,
                 col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
             )
+            self._digitext_audio, self.digitext_duration_s = self._with_start_silence(self._digitext_audio, self.digitext_duration_s)
             self._digitext_audio_dirty = False
 
     def set_psk31_text(self, text: str):
@@ -2062,6 +2063,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.psk31_text, config.AUDIO_RATE, self.psk31_tone_hz,
                 tail_s=config.PSK31_TAIL_S + self.device.tx_end_loss_s, preamble_chars=config.PSK31_PREAMBLE_CHARS,
             )
+            self._psk31_audio, self.psk31_duration_s = self._with_start_silence(self._psk31_audio, self.psk31_duration_s)
             self._psk31_audio_dirty = False
 
     def set_rtty_text(self, text: str):
@@ -2085,6 +2087,13 @@ class PlutoTxFlowgraph(gr.top_block):
         self.rtty_reverse = bool(reverse)
         self._rtty_audio_dirty = True
 
+    def _with_start_silence(self, audio, duration_s):
+        """For a one-shot source that already runs while the device keys: silence until the radio transmits."""
+        lost = self.device.tx_start_loss_s
+        if not lost:
+            return audio, duration_s
+        return np.concatenate([np.zeros(int(lost * config.AUDIO_RATE), dtype=np.float32), audio]), duration_s + lost
+
     def _ensure_rtty_audio(self):
         """Mirrors _ensure_psk31_audio() exactly -- the dirty flag covers
         all five operator-adjustable RTTY parameters (text/mark/shift/
@@ -2096,6 +2105,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 tail_s=config.RTTY_TAIL_S + self.device.tx_end_loss_s, preamble_s=config.RTTY_PREAMBLE_S,
                 stop_bits=config.RTTY_STOP_BITS,
             )
+            self._rtty_audio, self.rtty_duration_s = self._with_start_silence(self._rtty_audio, self.rtty_duration_s)
             self._rtty_audio_dirty = False
 
     # --- FT8 ------------------------------------------------------------

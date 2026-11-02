@@ -360,6 +360,16 @@ class FlowgraphTests(Base):
                 self.assertFalse(self.rig.ptt)
                 fg.shutdown_safe()
 
+    def test_one_shot_sources_wait_for_the_slow_keying(self):
+        from pluto_tx import config, flowgraph as txf
+        fg = self.make(txf.PlutoTxFlowgraph.MODE_RTTY)
+        fg.set_rtty_text("TEST DE DA2JH")
+        fg._ensure_rtty_audio()
+        lead = int(fg.device.tx_start_loss_s * config.AUDIO_RATE)
+        self.assertGreater(lead, 0)
+        self.assertEqual(float(abs(fg._rtty_audio[:lead]).max()), 0.0)
+        self.assertGreater(float(abs(fg._rtty_audio[lead:lead + 4800]).max()), 0.1)
+
     def test_an_unsupported_mode_does_not_fall_back_to_fm(self):
         from pluto_tx import flowgraph as txf
         fg = self.make(txf.PlutoTxFlowgraph.MODE_FM)
@@ -417,6 +427,18 @@ class RxDeviceTests(Base):
         dev.set_frequency(7_078_000.0)
         self.assertEqual(self.rig.frequency, 7_078_000.0)
         self.assertEqual(dev.read_hw_state()["s_meter_db"], -29.0)
+
+    def test_cli_refuses_what_its_audio_cannot_carry(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from pluto_cli import app, rx as cli_rx
+        for argv, ok in ((["fm"], False), (["ssb", "--digimode", "adsb"], False), (["lsb"], False)):
+            out = io.StringIO()
+            with redirect_stdout(out), mock.patch.object(cli_rx.runtime, "probe_or_exit"):
+                code = app.main(["rx", *argv, "--device", "x6200", "--uri", "/dev/null|x", "--duration", "0.1", "--json"])
+            self.assertEqual(code, 1, argv)
+            self.assertIn("cannot receive", out.getvalue(), json.dumps(argv))
 
     def test_frequency_out_of_range_stays_off_the_radio(self):
         dev, _cls = self.make()

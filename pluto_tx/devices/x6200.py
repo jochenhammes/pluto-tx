@@ -127,6 +127,7 @@ class X6200Device(TxDevice):
     )
     default_power_ceiling = 10.0     # of 8 W, 5 W on battery
     tx_end_loss_s = 0.3              # audio still on its way through PipeWire and the radio when the source ends
+    tx_start_loss_s = 1.3            # measured: 1.2 s of RTTY's preamble did not reach the air; USB-D sends nothing on silence
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz)

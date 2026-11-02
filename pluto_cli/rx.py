@@ -372,6 +372,10 @@ def _build_and_run(args, mode, emitter, **mode_kwargs):
         emitter.error(f"--direct-sampling is only available for --device rtlsdr, not {args.device}")
         return 1
     selected_device = rx_devices.DEVICE_REGISTRY[args.device]
+    wanted = args.digimode or args.func.__name__.removeprefix("run_")
+    if selected_device.supported_rx_modes is not None and wanted not in selected_device.supported_rx_modes:
+        emitter.error(f"--device {args.device} cannot receive {wanted}: it carries {', '.join(sorted(selected_device.supported_rx_modes))}")
+        return 1
     frequency = args.freq if args.freq is not None else rx_config.DEFAULT_FREQUENCY
     if selected_device.frequency_range_hz == (0.0, 0.0):
         # A sound card has no RF to tune: --freq shifts its audio band instead, so an RF value would move the signal out of it.

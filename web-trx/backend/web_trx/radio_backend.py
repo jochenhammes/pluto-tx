@@ -376,6 +376,7 @@ class GnuRadioBackend(SessionBackend):
                         "clock_synced": clock.ntp_synchronized()},
                 "jtty": {"available": jtty_codec.available()},
                 "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)],
+                "rx_device_modes": {t: [m for m in RX_DEMOD_MODES if _rx_mode_available(m) and _device_receives(t, m)] for t in RX_DEVICE_TYPES},
                 "tx_device_modes": {t: [m for m in TX_MODES if _tx_mode_available(m) and _device_sends(t, m)] for t in TX_DEVICE_TYPES}}
 
     def device_types(self) -> dict[str, list[list[str]]]:
@@ -779,6 +780,8 @@ class GnuRadioBackend(SessionBackend):
     # -- RX --
 
     async def _select_rx_mode(self, mode: str, params: dict) -> None:
+        if self.rx.device_type and not _device_receives(self.rx.device_type, mode):
+            raise SessionError(f"{rx_devices.DEVICE_REGISTRY[self.rx.device_type].display_name} cannot receive {mode.upper()}")
         if mode not in RX_DEMOD_MODES:
             raise SessionError(f"unsupported rx mode '{mode}'")
         if not _rx_mode_available(mode):
@@ -1830,6 +1833,11 @@ def _rx_mode_available(mode: str) -> bool:
     if mode == "jtty":
         return jtty_codec.available()
     return {"m17": RX_M17_AVAILABLE, "rade": RX_RADE_AVAILABLE}.get(mode, True)
+
+
+def _device_receives(device_type: str, mode: str) -> bool:
+    supported = rx_devices.DEVICE_REGISTRY[device_type].supported_rx_modes
+    return supported is None or mode in supported
 
 
 def _device_sends(device_type: str, mode: str) -> bool:

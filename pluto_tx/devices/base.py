@@ -78,6 +78,9 @@ class TxDevice(abc.ABC):
     # digimodes (POCSAG, RTTY, PSK31, Waterfall Writer) append this much silence/carrier so the real
     # signal is transmitted completely.
     tx_end_loss_s: float = 0.0
+    # Seconds a device needs from the start of a one-shot source until it transmits, where keying is slow (CAT). Only for
+    # silence that is really silent on the air, as on a transceiver in a data mode: an SDR would send a bare carrier.
+    tx_start_loss_s: float = 0.0
     supports_frequency_correction: bool = True
     # True only for an audio-only device that still has REAL PTT hardware to key
     # (AIOC: serial DTR/RTS to the connected radio) -- False (default, e.g.

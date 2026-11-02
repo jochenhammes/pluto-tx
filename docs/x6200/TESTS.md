@@ -53,7 +53,7 @@ Dummy-Load, Empfang am HackRF über die Abstrahlung. Rufzeichen DA2JH im Text.
 |---|---|---|---|---|
 | 22:27 | 14,090 MHz USB-D | 5 % | JTTY, 6 Rahmen und 1 Rahmen, CLI | 2 von 2, +10 dB, 1504 Hz |
 | 22:42 | 14,092 MHz USB-D | 5 % | JS8, CQ | dekodiert, +9 dB, vollständig |
-| 22:43 | 14,092 MHz USB-D | 5 % | RTTY, 45 Baud | teilweise: `TESTHDE DA2/'# DA2JH X6200 RTTY TEST 78` |
+| 22:43 | 14,092 MHz USB-D | 5 % | RTTY, 45 Baud | am HackRF in Echtzeit teilweise; aus der IQ-Aufnahme fehlerfrei: `TEST DE DA2JH DA2JH X6200 RTTY TEST 73` |
 | 22:48 | 14,092 MHz USB-D | 5 % | FT8, CQ | dekodiert, +14 dB, DT 0,2 s |
 | 22:49 | 14,092 MHz USB-D | 5 % | PSK31 | teilweise: `DE DA23 tqH X6,Te SK31 TEST 73` |
 | 22:50 | 14,092 MHz USB-D | 5 % | SSB, Zweiton | +700/+1900 Hz 44 dB, Gegenseite rund 16 dB |
@@ -71,10 +71,19 @@ HackRF sendet über die Whip-Antenne bei VGA 0 bis 20 dB ohne Verstärker auf 14
 | 22:37 | VGA 0 und 10 dB | nicht dekodierbar |
 | 22:37 | VGA 20 dB | Rohaudio: Anfang der Nachricht, −11 dB |
 | 22:38 | VGA 20 dB, Vorverstärker an, volle CLI | 3 von 4 erkannt, 2 vollständig, −10 bis −12 dB |
+| 23:35 | VGA 20 dB, Vorverstärker an, Web-TRX im Browser | 2 von 2, −12 dB |
+
+## Web-TRX, Empfänger und Sender zugleich
+
+Beide am selben X6200, gemeinsamer `rigctld`. Der Empfänger wurde 1,5 s nach dem Aussenden getrennt: keine Fehler, PTT danach aus.
 
 ## Offene Punkte
 
-- **RTTY und PSK31** sind nur teilweise lesbar, obwohl FT8 und JTTY dort +10 bis +14 dB haben. Ursache offen.
+- **RTTY in Echtzeit am HackRF** ist nur teilweise lesbar, aus der Aufnahme derselben Sendung aber fehlerfrei; das Signal hat keine Aussetzer (Hüllkurve im 1-ms-Raster, 22 ms je Bit, 170 Hz Shift). Der X6200 sendet also sauber, die Fehler entstehen im Echtzeit-Empfang am HackRF. Dazu passen die dort gemessenen Sample-Verluste bei JTTY.
+- **PSK31:** in Echtzeit am HackRF teilweise lesbar. Ursache offen; der Decoder braucht die Nachführung, die Prüfung aus der Aufnahme war deshalb nicht aussagekräftig.
+- **Vorlauf bei RTTY, PSK31 und Waterfall Writer:** Vor dem Tasten laufen 1,3 s Stille, damit der Vorspann auf Sendung geht. Zuvor gingen rund 1,2 s verloren. Ein Lauf mit Vorlauf zeigte den Vorspann, aber Fehler am Textende; das ist einmal gemessen und nicht weiter untersucht.
+- **Empfang nur in USB:** Das Empfangsgerät schaltet das Seitenband noch nicht um, LSB und FM sind deshalb gesperrt.
+- **Waterfall Writer und Web-TRX:** Der Empfang über den X6200 in Web-TRX ist nur mit JTTY geprüft.
 - **Ausfall einer Abfrage:** Einmal, unter der Last der Testsuite, antwortete `rigctld` 1,5 s lang nicht auf `l RFPOWER`, vor dem Tasten. In 162 gezielten Abfragen danach nicht wieder (alle unter 55 ms). Der Client wartet jetzt länger und fragt einmal nach.
 - **rigctld bleibt laufen:** Einmal gestartet, hält er den seriellen Port, bis man ihn beendet. Andere Programme nutzen ihn über Netz (Hamlib NET rigctl, Port 4532).
 - **Hänger:** Beim allerersten `kill -9`-Test blieb die App über 150 s vor dem Tasten stehen, PTT aus. In den folgenden Läufen mit Stack-Dump nicht wieder aufgetreten, Ursache unbekannt.
