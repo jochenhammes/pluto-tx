@@ -222,6 +222,12 @@ DEFAULT_FFT_SIZE = 2048
 MIC_SILENCE_UNKEY_S = 1.5
 DEFAULT_TX_TIMEOUT_S = 180.0
 MIC_BLOCK_S = 0.01  # granularity of the paced mic source
+# Towards a sound card (X6200, AIOC): every block costs each Python block behind it a turn on the GIL, and at 10 ms a waiting
+# transmitter ran 2500 of them a second, which made a HackRF receiver in this process overflow 15 times a second and cost RADE
+# its sync (measured). The lead keeps the card from running dry on the larger blocks: a source paced by the wall clock has no
+# margin of its own, and without it the card ran dry 12 times in 30 s.
+MIC_SOUND_CARD_BLOCK_S = 0.04
+MIC_SOUND_CARD_LEAD_S = 0.2
 
 DEVICE_LABELS = {"pluto": "PlutoSDR", "hackrf": "HackRF One", "rtlsdr": "RTL-SDR", "x6200": "Xiegu X6200"}
 RX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "rtlsdr", "x6200") if t in rx_devices.DEVICE_REGISTRY)
@@ -259,12 +265,13 @@ class _BrowserMicSource(gr.sync_block):
     buffer with silence, and live audio would then queue behind it
     (seconds of latency). Silence whenever no browser audio is due."""
 
-    def __init__(self, buffer: JitterBuffer):
+    def __init__(self, buffer: JitterBuffer, block_s: float = MIC_BLOCK_S, lead_s: float = 0.0):
         gr.sync_block.__init__(self, name="web_trx_browser_mic", in_sig=None, out_sig=[np.float32])
         self._buffer = buffer
         self._rate = buffer.rate_hz
         self._t0: float | None = None
-        self._produced = 0
+        self._produced = -int(lead_s * buffer.rate_hz)
+        self._block = int(block_s * buffer.rate_hz)
 
     def work(self, input_items, output_items):
         out = output_items[0]
@@ -276,9 +283,9 @@ class _BrowserMicSource(gr.sync_block):
             # Stalled (downstream backpressure, scheduler hiccup) -- don't
             # burst to catch up, restart the clock instead.
             self._t0, self._produced, due = now, 0, 0
-        if due <= 0:
-            time.sleep(MIC_BLOCK_S)
-            due = int(MIC_BLOCK_S * self._rate)
+        if due < self._block:
+            time.sleep((self._block - due) / self._rate)
+            due = self._block
         n = min(len(out), due)
         out[:n] = self._buffer.pull(n)
         self._produced += n
@@ -1405,6 +1412,11 @@ class GnuRadioBackend(SessionBackend):
             await self._emit_event("tuned", {"direction": "tx", "freq_hz": st.freq_hz})
         await self._emit_event("tx_power", _power_info(st.tb))
 
+    def _browser_mic(self, tb) -> _BrowserMicSource:
+        if tb.device.is_audio_only():
+            return _BrowserMicSource(self._mic_buffer, MIC_SOUND_CARD_BLOCK_S, MIC_SOUND_CARD_LEAD_S)
+        return _BrowserMicSource(self._mic_buffer)
+
     def _build_tx(self, mode: str, params: dict | None = None):
         st = self.tx
         tb = PlutoTxFlowgraph(
@@ -1420,7 +1432,7 @@ class GnuRadioBackend(SessionBackend):
             # every voice modulator behind it. That cost a receiver in this process 5-15 % of its samples (measured with
             # a Pluto as RX and TX: no MeshCore packet decoded), so there it gets a source that ends at once. Going back
             # to a voice mode rebuilds, see _select_tx_mode().
-            mic = _BrowserMicSource(self._mic_buffer) if mode not in ONE_SHOT_TX_MODES else blocks.vector_source_f([0.0], repeat=False)
+            mic = self._browser_mic(tb) if mode not in ONE_SHOT_TX_MODES else blocks.vector_source_f([0.0], repeat=False)
             tb.disconnect(tb.mic_source, (tb.source_selector, PlutoTxFlowgraph.SRC_MIC))
             tb.connect(mic, (tb.source_selector, PlutoTxFlowgraph.SRC_MIC))
             tb.web_trx_mic_source = mic  # see _build_rx: connect() keeps no Python reference

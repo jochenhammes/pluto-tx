@@ -1329,6 +1329,39 @@ async def test_x6200_refuses_a_mode_it_cannot_send(tmp_path, monkeypatch):
 
 
 @needs_jtty
+def _mic_blocks(source, count):
+    import numpy as np
+    out = np.zeros(48_000, np.float32)
+    return [source.work([], [out]) for _ in range(count)]
+
+
+def test_browser_mic_towards_a_sound_card_runs_ahead_in_large_blocks():
+    from web_trx.tx_audio import JitterBuffer
+    source = radio_backend._BrowserMicSource(JitterBuffer(48_000), radio_backend.MIC_SOUND_CARD_BLOCK_S, radio_backend.MIC_SOUND_CARD_LEAD_S)
+    first, *rest = _mic_blocks(source, 6)
+    assert first >= 48_000 * radio_backend.MIC_SOUND_CARD_LEAD_S        # the margin, at once
+    assert all(n >= 48_000 * radio_backend.MIC_SOUND_CARD_BLOCK_S for n in rest)
+
+
+def test_browser_mic_towards_a_transmitter_keeps_its_small_blocks():
+    from web_trx.tx_audio import JitterBuffer
+    source = radio_backend._BrowserMicSource(JitterBuffer(48_000))
+    first, *rest = _mic_blocks(source, 6)
+    assert first < 48_000 * 0.05                                         # no lead: no added delay
+    assert all(n < 48_000 * 0.04 for n in rest)
+
+
+async def test_browser_mic_follows_the_device_kind(tmp_path, monkeypatch):
+    b, _events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        await b.select_mode("tx", "ssb", modes.normalize_params("tx", "ssb", {}))
+        assert b.tx.tb.web_trx_mic_source._block == int(48_000 * radio_backend.MIC_SOUND_CARD_BLOCK_S)
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
 async def test_x6200_frequency_follows_the_front_panel(tmp_path, monkeypatch):
     b, events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
     try:

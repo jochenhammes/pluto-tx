@@ -86,15 +86,21 @@ Beide am selben X6200, gemeinsamer `rigctld`. Der Empfänger wurde 1,5 s nach de
 - **Das Gerät antwortete um 00:32 UTC nicht mehr auf CI-V**, der USB-Teil blieb sichtbar. Vermutlich Akku leer oder automatisches Abschalten, Start bei 62 % um 22:14 UTC. Wann genau, ist unbekannt. Die Ausfälle um Minute 25 und 28 können daran liegen; der Langlauf-Befund aus `docs/jtty/TESTS.md` ist damit weder bestätigt noch widerlegt.
 - Die Sendeversuche danach wurden sauber abgewiesen, vor jedem Tasten. Es lief keine Sendung, als das Gerät ausfiel. Der Lauf mit starkem Signal (X6200 sendet, HackRF empfängt 30 Minuten) brachte deshalb kein Ergebnis.
 
-## Offen: RADE aus dem Browser, Empfang in Web-TRX mit HackRF
+## RADE aus dem Browser, Empfang mit HackRF im selben Web-TRX
 
-Gemeldet am 2026-11-02: Aus `pluto-tx` gesendet dekodiert der HackRF in Web-TRX, aus demselben Browser gesendet nicht (gleiche Datei, Frequenz und Leistung, 0,1 W), obwohl der Wasserfall ein Signal zeigt. Ohne Funk nicht nachstellbar:
+Gemeldet am 2026-11-02: Aus `pluto-tx` gesendet dekodiert der HackRF in Web-TRX, aus demselben Browser gesendet nicht, obwohl der Wasserfall ein Signal zeigt. Das Signal war in Ordnung, der Empfänger verlor Daten: Solange ein Sender im selben Prozess läuft, auch im Leerlauf und auch in SSB, meldete der HackRF bei 4 MS/s rund 15 `O` je Sekunde.
 
-- Aufnahme hinter dem Sendeweg: `pluto-tx`-Weg und Browser-Weg gleiche Pegel, beide dekodieren (Datei-Aufnahme 24,3 von 26 s; stummer virtueller Ausgang rund 21 s einer Aufnahme von 25,5 s).
-- Echtes Backend mit Browser-Takt, simuliertem CAT, stummem virtuellem Ausgang: 26,8 s dekodiert, mit und ohne Empfänger im selben Prozess, 0 bis 2 `aU`.
-- Empfänger bleibt mit laufendem Sender bei 0,5 % Verlust und rund 93 % Synchronisation (simulierte Quelle, kein echter HackRF).
+Gemessen an 28,300 MHz, rund 0,1 W, Empfang HackRF LNA 24 dB, VGA 12 dB, Zoom 64, je 30 s (Rahmen mit Synchronisation):
 
-Das echte Log zeigt rund 20 `O` je Sekunde vom HackRF-Empfang, mit und ohne Sendung gleich, und nur 10 Rahmen mit Synchronisation. 117 von 121 `aU` fielen vor 17:45, in den Läufen danach nur 3 während der Sendungen, sie erklären den Ausfall also nicht allein. Die meisten Browser-Sendungen waren kürzer als 15 s. Nicht geprüft: echter Browser und echter HackRF zusammen.
+| Sender | Empfänger | Vorher | Mit Korrektur |
+|---|---|---|---|
+| CLI, eigener Prozess | CLI, eigener Prozess | 248, 6 `O` | nicht betroffen |
+| Web-TRX-Backend | CLI, eigener Prozess | 256, 6 `O` | nicht betroffen |
+| CLI, eigener Prozess | Web-TRX (40 s) | 216, 6 `O` | nicht betroffen |
+| Web-TRX-Backend | Web-TRX, selber Prozess | 8, 500 `O`, 0 % | 219–224, 6 `O`, 84–90 % |
+| echter Browser, Datei im Loop (40 s) | Web-TRX, selber Prozess | kein Dekodieren | 328, 34 `O` |
+
+Ursache ist der GIL: Der Web-TRX-Sendeweg rief seine Python-Blöcke im Leerlauf rund 2500-mal je Sekunde auf, jeweils mit rund 43 Werten, und die FFT für Zoom 64 lief dazu im Datenstrom des HackRF. Zoom 1 oder 2 MS/s beheben es ebenfalls. Bei einem Sender mit Soundkarte (X6200, AIOC) liefert die Browser-Quelle jetzt 40-ms-Blöcke und läuft der Karte 0,2 s voraus, denn nur mit größeren Blöcken lief die Karte 12-mal in 30 s leer. Pluto und HackRF als Sender behalten die alten Werte, bei ihnen ist das Problem also nicht behoben und auch nicht gemessen.
 
 ## Offene Punkte
 
