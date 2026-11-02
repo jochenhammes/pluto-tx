@@ -181,6 +181,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.device.set_direct_sampling(direct_sampling)
         # Constructed first, gain configured right after -- mirrors
         # TxDevice.build_sink()'s "construct, then configure power" split.
+        self.device.select_demod("lsb" if demod_mode == self.MODE_LSB else "ssb")
         self.pluto_source = self.device.build_source()
         self.device.set_gain_mode(gain_mode)  # no-op unless device.supports_agc_mode
         if self.device.supports_agc_mode:
@@ -1125,6 +1126,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         prev_producer = producers[prev_mode]
         new_producer = producers[mode]
         self.demod_mode = mode
+        self.device.select_demod("lsb" if mode == self.MODE_LSB else "ssb")
 
         if new_producer is not prev_producer:
             # Entering/leaving RADE or M17 mode: reroute nf_gain's upstream

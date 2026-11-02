@@ -929,6 +929,13 @@ class GnuRadioBackend(SessionBackend):
         while True:
             await asyncio.sleep(RIG_FOLLOW_PERIOD_S)
             await self._follow_rig_frequency()
+            await self._check_rig_ptt()
+
+    async def _check_rig_ptt(self) -> None:
+        tb = self.tx.tb
+        if self.keyed and tb is not None and self.tx.device_type == "x6200" and await asyncio.to_thread(tb.device.released_ptt):
+            await self._emit_event("error", {"message": "tx: das Funkgerät hat die Sendung selbst abgebrochen (SWR-Schutz?)"})
+            await self._unkey()
 
     async def _follow_rig_frequency(self) -> None:
         for direction, st in (("tx", self.tx), ("rx", self.rx)):

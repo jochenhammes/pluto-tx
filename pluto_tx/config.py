@@ -764,6 +764,7 @@ FT8_DRIFT_MODEL = {
 # --- JS8 (pluto_tx/js8*.py, docs/js8/SPEC.md; RX: pluto_advanced_rx/js8_*.py) -------------------------
 # Audio frequency of tone 0 (the signal occupies tone_hz .. tone_hz + 8 tone spacings, 25-160 Hz).
 # --- JTTY (pluto_tx/jtty_codec.py, docs/jtty/SPEC.md): whole messages through WSJT-X's own wsjt-codec.
+FREEDV_SOUNDCARD_LEVEL = 1.0              # FreeDV modem audio as it comes from freedv_tx(), set after measuring its peak
 SSB_SOUNDCARD_LEVEL = 0.5                 # SSB voice as audio, into a transceiver's data input
 JTTY_DEFAULT_TONE_HZ = 1500.0             # the lowest tone; the signal is 127 Hz wide above it
 JTTY_TONE_RANGE_HZ = (200.0, 2800.0)      # the codec renders higher, but no receiver decodes above about 2950 Hz

@@ -208,9 +208,9 @@ class DeviceTests(Base):
         self.assertTrue(X6200Device.is_audio_only())
         self.assertTrue(X6200Device.has_frequency_control())
         self.assertTrue(X6200Device.needs_ptt_control)
-        for mode in ("jtty", "ft8", "js8", "rtty", "psk31", "digitext", "rade", "ssb", "lsb"):
+        for mode in ("jtty", "ft8", "js8", "rtty", "psk31", "digitext", "rade", "ssb", "lsb", "freedv"):
             self.assertTrue(X6200Device.supports_mode(mode), mode)
-        for mode in ("fm", "pocsag", "aprs", "m17", "meshcore", "meshtastic", "baseband", "filebroadcast", "freedv"):
+        for mode in ("fm", "pocsag", "aprs", "m17", "meshcore", "meshtastic", "baseband", "filebroadcast"):
             self.assertFalse(X6200Device.supports_mode(mode), mode)
 
     def test_keying_order_power_and_mode_before_ptt_seen_before_return(self):
@@ -310,6 +310,19 @@ class DeviceTests(Base):
         self.rig.log.clear()
         self.assertEqual(dev.read_hw_state(), first)
         self.assertEqual(self.rig.log, [])
+
+    def test_radio_dropping_out_is_noticed(self):
+        dev = self.make()
+        self.assertFalse(dev.released_ptt())   # not keyed: nothing to drop out of
+        dev.pre_key()
+        dev._cat_busy_until = 0.0
+        self.assertFalse(dev.released_ptt())
+        self.rig.commanded_ptt = False          # its SWR protection, as seen around 28.3 MHz
+        self.rig.ptt_changed_at = 0.0
+        self.assertTrue(dev.released_ptt())
+        self.assertIn("warning", dev.read_hw_state())
+        dev.post_unkey()
+        self.assertFalse(dev.released_ptt())
 
     def test_no_keying_without_the_guard(self):
         dev = self.make()
@@ -411,6 +424,22 @@ class FlowgraphTests(Base):
         time.sleep(fg.jtty_hold_s)
         fg.unkey_ptt()
         self.assertFalse(fg.keyed)
+        self.assertFalse(self.rig.ptt)
+
+    def test_freedv_reaches_the_sound_card_only_while_keyed(self):
+        from pluto_tx import flowgraph as txf
+        if not txf.FREEDV_AVAILABLE:
+            self.skipTest("FreeDV not available")
+        fg = self.make(txf.PlutoTxFlowgraph.MODE_FREEDV)
+        fg.start()
+        time.sleep(0.2)
+        self.assertEqual(fg.freedv_audio_gain.k(), 0.0)
+        fg.key_ptt()
+        self.assertGreater(fg.freedv_audio_gain.k(), 0.0)
+        self.assertTrue(self.rig.ptt)
+        self.assertEqual(self.rig.mode, "PKTUSB")
+        fg.unkey_ptt()
+        self.assertEqual(fg.freedv_audio_gain.k(), 0.0)
         self.assertFalse(self.rig.ptt)
 
     def test_follows_the_front_panel_without_writing_back(self):
@@ -560,7 +589,8 @@ class GuiTests(Base):
                 self.assertEqual(w._current_mode, mode)
                 w._sync_mode_combo_availability()   # runs again on connecting
                 self.assertEqual(w._current_mode, mode)
-        for mode in (F.MODE_FM, F.MODE_M17, F.MODE_FREEDV):
+        self.assertTrue(w.mode_combo.model().item(w.mode_combo.findData(F.MODE_FREEDV)).isEnabled())
+        for mode in (F.MODE_FM, F.MODE_M17):
             self.assertFalse(w.mode_combo.model().item(w.mode_combo.findData(mode)).isEnabled(), mode)
         for mode in (F.MODE_MESHTASTIC, F.MODE_MESHCORE, F.MODE_POCSAG, F.MODE_APRS):
             self.assertFalse(w.digimode_combo.model().item(w.digimode_combo.findData(mode)).isEnabled(), mode)
@@ -614,6 +644,34 @@ class GuiTests(Base):
         self.assertFalse(w.freq_spin.isVisible())
 
 
+class RxGuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt5 import QtCore, QtWidgets
+        QtCore.QStandardPaths.setTestModeEnabled(True)
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def enabled(self, combo):
+        return {combo.itemData(i) for i in range(combo.count()) if combo.model().item(i).isEnabled()}
+
+    def test_lists_only_what_the_device_can_receive_and_gives_the_rest_back(self):
+        from pluto_advanced_rx import gui
+        from pluto_advanced_rx.flowgraph import AdvancedRxFlowgraph as F
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        before = self.enabled(w.demod_combo), self.enabled(w.digimode_combo)
+        w.demod_combo.setCurrentIndex(w.demod_combo.findData(F.MODE_FM))
+        w.digimode_combo.setCurrentIndex(w.digimode_combo.findData("adsb"))
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("x6200"))
+        self.assertEqual(self.enabled(w.demod_combo) - {F.MODE_RADE}, {F.MODE_SSB, F.MODE_LSB})
+        self.assertFalse({"pocsag", "aprs", "adsl", "adsb", "meshtastic", "meshcore"} & self.enabled(w.digimode_combo))
+        self.assertIn("psk31", self.enabled(w.digimode_combo))
+        self.assertIn(w.demod_combo.currentData(), self.enabled(w.demod_combo))
+        self.assertIn(w.digimode_combo.currentData(), self.enabled(w.digimode_combo))
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("hackrf"))
+        self.assertEqual((self.enabled(w.demod_combo), self.enabled(w.digimode_combo)), before)
+
+
 class RxFollowTests(Base):
     def test_tuned_away(self):
         from pluto_advanced_rx.devices.x6200 import X6200RxDevice
@@ -654,12 +712,24 @@ class RxDeviceTests(Base):
         import json
         from contextlib import redirect_stdout
         from pluto_cli import app, rx as cli_rx
-        for argv, ok in ((["fm"], False), (["ssb", "--digimode", "adsb"], False), (["lsb"], False)):
+        for argv, ok in ((["fm"], False), (["ssb", "--digimode", "adsb"], False), (["fm"], False)):
             out = io.StringIO()
             with redirect_stdout(out), mock.patch.object(cli_rx.runtime, "probe_or_exit"):
                 code = app.main(["rx", *argv, "--device", "x6200", "--uri", "/dev/null|x", "--duration", "0.1", "--json"])
             self.assertEqual(code, 1, argv)
             self.assertIn("cannot receive", out.getvalue(), json.dumps(argv))
+
+    def test_lsb_selects_the_lower_data_mode(self):
+        from pluto_advanced_rx.devices import x6200 as rx
+        dev, _cls = self.make()
+        with mock.patch.object(rx, "_set_pipewire_volume"), mock.patch.object(rx, "_AudioToComplexSource"):
+            dev.build_source()
+        self.assertEqual(self.rig.mode, "PKTUSB")
+        self.assertEqual(self.rig.commands("M")[0].split()[1], "PKTUSB")
+        dev.select_demod("lsb")
+        self.assertEqual(self.rig.mode, "PKTLSB")
+        dev.select_demod("ssb")
+        self.assertEqual(self.rig.mode, "PKTUSB")
 
     def test_frequency_out_of_range_stays_off_the_radio(self):
         dev, _cls = self.make()

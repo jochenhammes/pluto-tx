@@ -173,6 +173,9 @@ class RxDevice(abc.ABC):
         backends with no AGC (e.g. HackRF's RX side)."""
         pass
 
+    def select_demod(self, mode_name):
+        """For a transceiver, whose sideband is the radio's: the demodulator in use. Nothing to do on an SDR."""
+
     def tuned_away_hz(self):
         """The frequency a transceiver was tuned to on its own front panel, if that differs from the one set here; else None."""
         return None

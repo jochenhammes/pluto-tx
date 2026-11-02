@@ -1191,6 +1191,11 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.device.is_audio_only():
             self.ssb_audio_gain = blocks.multiply_const_ff(0.0)
             self.connect(self.limiter, self.ssb_audio_gain)
+        # FreeDV's modem audio, likewise before its Hilbert transform: real FreeDV feeds a radio's mic input the same way.
+        self.freedv_audio_gain = None
+        if FREEDV_AVAILABLE and self.device.is_audio_only():
+            self.freedv_audio_gain = blocks.multiply_const_ff(0.0)
+            self.connect(self.freedv_audio_resampler_up, self.freedv_audio_gain)
         # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
         # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
@@ -1398,6 +1403,8 @@ class PlutoTxFlowgraph(gr.top_block):
         if self.ssb_audio_gain is not None:
             producers[self.MODE_SSB] = self.ssb_audio_gain
             producers[self.MODE_LSB] = self.ssb_audio_gain
+        if self.freedv_audio_gain is not None:
+            producers[self.MODE_FREEDV] = self.freedv_audio_gain
         return producers
 
     def _wire_soundcard_audio_producer(self, gain_block):
@@ -2534,6 +2541,14 @@ class PlutoTxFlowgraph(gr.top_block):
             self.ssb_audio_gain.set_k(config.SSB_SOUNDCARD_LEVEL)
             self._keyed = True
             return
+        if self.mode == self.MODE_FREEDV and self.device.is_audio_only():
+            if self.device.needs_ptt_control:
+                self.device.pre_key()
+            self.ptt_mute.set_k(1.0)
+            self.tx_gain.set_k(1.0 + 0j)
+            self.freedv_audio_gain.set_k(config.FREEDV_SOUNDCARD_LEVEL)
+            self._keyed = True
+            return
         if self.mode == self.MODE_DIGITEXT:
             # Rebuild digitext_source fresh (reset to the start) right
             # before every transmission -- vector_source_f has no seek/
@@ -2785,6 +2800,14 @@ class PlutoTxFlowgraph(gr.top_block):
             self.ptt_mute.set_k(0.0)
             self.tx_gain.set_k(0.0 + 0j)
             self.ssb_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
+        if self.mode == self.MODE_FREEDV and self.device.is_audio_only():
+            self.ptt_mute.set_k(0.0)
+            self.tx_gain.set_k(0.0 + 0j)
+            self.freedv_audio_gain.set_k(0.0)
             if self.device.needs_ptt_control:
                 self.device.post_unkey()
             self._keyed = False

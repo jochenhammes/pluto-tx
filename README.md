@@ -618,7 +618,7 @@ weitere Rezepte) in [`pluto_cli/README.md`](pluto_cli/README.md).
 | **HackRF One** | alle Modi | alle Modi |
 | **RTL-SDR** (USB oder per `rtl_tcp` im Netzwerk) | — (kein TX-fähiges Gerät) | alle Modi |
 | **Soundkarte / externes Funkgerät** | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, APRS, FT8, JS8, JTTY | alle Modi außer LoRa, ADS-L und ADS-B (Audio Input, z.B. für RADE über ein SSB-Funkgerät) |
-| **Xiegu X6200** mit OpenX6X00 (USB-Audio und Hamlib-CAT, siehe [`docs/x6200/SPEC.md`](docs/x6200/SPEC.md)) | SSB, LSB, RADE, Waterfall Writer, PSK31, RTTY, FT8, JS8, JTTY | SSB, LSB, die Digimodes über Audio; Abstimmung über CAT |
+| **Xiegu X6200** mit OpenX6X00 (USB-Audio und Hamlib-CAT, siehe [`docs/x6200/SPEC.md`](docs/x6200/SPEC.md)) | SSB, LSB, FreeDV 2020, RADE, Waterfall Writer, PSK31, RTTY, FT8, JS8, JTTY | SSB, LSB, RADE, die Digimodes über Audio; Abstimmung über CAT |
 | **AIOC-Adapter / analoges Funkgerät** (z. B. Quansheng UV-K5) | FM, RADE, Waterfall Writer, PSK31, RTTY, POCSAG, APRS, FT8, JS8, JTTY (Audio + echtes serielles PTT) | — (kein RX-Backend) |
 | **ESP32-S3-Board** (nur 13 cm, experimentell) | nur FM und M17 (konstante Hüllkurve; Frequenz 2320–2450 MHz) | — (kein RX-Backend) |
 

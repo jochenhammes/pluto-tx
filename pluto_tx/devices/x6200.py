@@ -123,7 +123,7 @@ class X6200Device(TxDevice):
     default_bandwidth_hz = None
     supports_frequency_correction = False
     needs_ptt_control = True
-    supported_modes = frozenset({"ssb", "lsb", "rade", "digitext", "psk31", "rtty", "ft8", "js8", "jtty"})
+    supported_modes = frozenset({"ssb", "lsb", "freedv", "rade", "digitext", "psk31", "rtty", "ft8", "js8", "jtty"})
     supported_modes_reason = "it takes USB audio only in USB-D and LSB-D, so nothing that needs FM or AM"
     power_stages = (
         PowerStage(name="rfpower", label="RF power", kind="continuous_db", min_value=MIN_POWER_PCT, max_value=100.0, unit="%",
@@ -202,6 +202,15 @@ class X6200Device(TxDevice):
         lo, hi = self.frequency_range_hz
         if self._client is not None and lo <= freq_hz <= hi and not self._keyed:
             self._client.set_frequency(freq_hz)
+
+    def released_ptt(self):
+        """Measured around one frequency with a high SWR: the radio stops transmitting after 0.7 s and says nothing."""
+        if not self._keyed or self._client is None or time.monotonic() < self._cat_busy_until:
+            return False
+        try:
+            return not self._client.get_ptt() and self._keyed
+        except RigError:
+            return False
 
     def tuned_away_hz(self):
         if self._client is None or self._keyed or time.monotonic() < self._cat_busy_until:
@@ -347,6 +356,8 @@ class X6200Device(TxDevice):
             state["frequency_hz"] = self._client.get_frequency()
             state["mode"] = self._client.get_mode()
             state["ptt"] = self._client.get_ptt()
+            if self._keyed and not state["ptt"]:
+                state["warning"] = "radio stopped transmitting on its own: SWR protection?"
             state["rf_power_pct"] = round(self._client.get_level("RFPOWER") * 100.0, 1)
             if state["ptt"]:
                 state["swr"] = self._client.get_level("SWR")

@@ -1407,5 +1407,5 @@ async def test_x6200_sends_jtty_through_web_trx(tmp_path, monkeypatch):
 def test_x6200_lists_only_what_its_audio_can_carry():
     modes_by_device = make_backend()[0].features()["rx_device_modes"]
     assert "ssb" in modes_by_device["x6200"]
-    assert not {"fm", "adsb", "adsl", "m17", "meshcore", "aprs", "pocsag", "lsb"} & set(modes_by_device["x6200"])
+    assert not {"fm", "adsb", "adsl", "m17", "meshcore", "aprs", "pocsag"} & set(modes_by_device["x6200"])
     assert "adsb" in modes_by_device["pluto"]

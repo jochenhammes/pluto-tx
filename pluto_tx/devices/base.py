@@ -200,6 +200,10 @@ class TxDevice(abc.ABC):
         (e.g. Pluto: power the LO down; see each backend for what, if
         anything, it can actually do here)."""
 
+    def released_ptt(self):
+        """True if a transceiver dropped out of a keyed transmission on its own, as with its SWR protection."""
+        return False
+
     def tuned_away_hz(self):
         """The frequency a transceiver was tuned to on its own front panel, if that differs from the one set here; else None."""
         return None

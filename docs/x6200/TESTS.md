@@ -102,14 +102,32 @@ Gemessen an 28,300 MHz, rund 0,1 W, Empfang HackRF LNA 24 dB, VGA 12 dB, Zoom 64
 
 Ursache ist der GIL: Der Web-TRX-Sendeweg rief seine Python-Blöcke im Leerlauf rund 2500-mal je Sekunde auf, jeweils mit rund 43 Werten, und die FFT für Zoom 64 lief dazu im Datenstrom des HackRF. Zoom 1 oder 2 MS/s beheben es ebenfalls. Bei einem Sender mit Soundkarte (X6200, AIOC) liefert die Browser-Quelle jetzt 40-ms-Blöcke und läuft der Karte 0,2 s voraus, denn nur mit größeren Blöcken lief die Karte 12-mal in 30 s leer. Pluto und HackRF als Sender behalten die alten Werte, bei ihnen ist das Problem also nicht behoben und auch nicht gemessen.
 
+## FreeDV, Dauerlauf, Abbruch durch das Gerät
+
+- **FreeDV 2020** über Funk, 28,092 MHz, 5 %, HackRF: 19 von 20 s synchron mit libcodec2 aus dem Empfangsaudio, Signal rund 16 dB über dem Rauschen, Spitze am Eingang des Geräts 0,5.
+- **Dauerlauf:** HackRF empfängt 30 Minuten im eigenen Prozess (18:37–19:07, 28,092 MHz, 5 %). 5 von 5 Nachrichten im Empfangsfenster vollständig, bis Minute 27, +5 bis +9 dB, kein Absturz, 6 `O`. Die sechste fiel hinter das Ende des Fensters. Dazu eine erfundene Nachricht „]K?.O“ bei −17 dB, die der Codec als fertig meldet; das ist der bekannte Effekt aus `docs/jtty/TESTS.md`. Der Ausfall nach 26 Minuten trat hier nicht auf.
+- **Abbruch durch das Gerät:** Das Gerät beendet manche Sendungen selbst, die PTT fällt ohne Meldung.
+  - Von 28,28 bis 28,32 MHz bei 3 und 5 % mit RADE nach 0,7–1,8 s, das Meter zeigt SWR rund 2,2. Auf 28,092, 28,20, 28,40 und 14,236 MHz bei 5 % nicht, ebenso wenig auf 28,30 MHz bei 1,2 %.
+  - Bei Sprache auch anderswo unregelmäßig: 28,092 MHz nach 1,8 und 3,3 s, 14,236 MHz nach rund 3 s, SWR dabei 1 bis 1,24.
+  - **Ohne die App nachgestellt:** nur `pw-play` und CAT-PTT, 14,236 MHz, 2 %: Sprache brach in 2 von 5 Läufen ab (3,5 und 6,9 s), Dauerton in 0 von 3.
+  - Ohne Ton bleibt die PTT stehen, auch beim Schreiben von Leistung, Frequenz und Modus. Die Ursache im Gerät ist unbekannt: SWR-Schutz, gespeicherter Tuner-Wert oder Einstrahlung in den Aufbau sind Vermutungen.
+  - pluto-tx zeigt es jetzt als `warning` im HW-Feld. Web-TRX meldet einen Fehler und beendet die Sendung. Die CLI bemerkt es nicht.
+
+## Desktop-Apps am echten Gerät
+
+Beide Fenster offscreen am echten X6200, mit dem echten Tasten über die Bedienelemente:
+
+- **pluto-tx** (14,236 MHz, 2 %, Datei als Quelle): Verbinden, SSB und LSB-D, Regler wirkt ungetastet, E-STOP 196 ms, Re-Arm und erneutes Tasten, Frequenz vom Gerät übernommen und beim Tasten gehalten, SSB wählbar nach RTTY, keine Ausnahme. Das erste Tasten fiel in beiden Läufen ab, siehe oben, und die Warnung erschien.
+- **pluto-advanced-rx** (ohne Senden): Verbinden, Frequenz, Wasserfall, USB und LSB schalten `PKTUSB`/`PKTLSB`, keine Ausnahme. Empfang eines echten Signals in diesem Fenster ist nicht geprüft, die Frequenz folgt dem Gerät dort nicht. Modi, die das Gerät nicht empfangen kann, sind jetzt grau.
+
 ## Offene Punkte
 
-- **Dauerlauf mit starkem Signal** steht noch aus, ebenso das Verhalten bei Akku-Ende während einer Sendung.
+- **Akku-Ende während einer Sendung** ist nicht gemessen.
 
 - **RTTY in Echtzeit am HackRF** ist nur teilweise lesbar, aus der Aufnahme derselben Sendung aber fehlerfrei; das Signal hat keine Aussetzer (Hüllkurve im 1-ms-Raster, 22 ms je Bit, 170 Hz Shift). Der X6200 sendet also sauber, die Fehler entstehen im Echtzeit-Empfang am HackRF. Dazu passen die dort gemessenen Sample-Verluste bei JTTY.
 - **PSK31:** in Echtzeit am HackRF teilweise lesbar. Ursache offen; der Decoder braucht die Nachführung, die Prüfung aus der Aufnahme war deshalb nicht aussagekräftig.
 - **Vorlauf bei RTTY, PSK31 und Waterfall Writer:** Vor dem Tasten laufen 1,3 s Stille, damit der Vorspann auf Sendung geht. Zuvor gingen rund 1,2 s verloren. Ein Lauf mit Vorlauf zeigte den Vorspann, aber Fehler am Textende; das ist einmal gemessen und nicht weiter untersucht.
-- **Empfang nur in USB:** Das Empfangsgerät schaltet das Seitenband noch nicht um, LSB und FM sind deshalb gesperrt.
+- **Empfang:** LSB schaltet das Gerät auf `PKTLSB`, ein LSB-Signal über Funk ist nicht geprüft. FM ist gesperrt: Das NFM des Geräts gibt Sprache ab, die FM-Zweige erwarten aber den Eingang des Diskriminators. Eine Sendung stellt das Gerät auf den Sendemodus und nicht zurück.
 - **Waterfall Writer und Web-TRX:** Der Empfang über den X6200 in Web-TRX ist nur mit JTTY geprüft.
 - **Ausfall einer Abfrage:** Einmal, unter der Last der Testsuite, antwortete `rigctld` 1,5 s lang nicht auf `l RFPOWER`, vor dem Tasten. In 162 gezielten Abfragen danach nicht wieder (alle unter 55 ms). Der Client wartet jetzt länger und fragt einmal nach.
 - **rigctld bleibt laufen:** Einmal gestartet, hält er den seriellen Port, bis man ihn beendet. Andere Programme nutzen ihn über Netz (Hamlib NET rigctl, Port 4532).

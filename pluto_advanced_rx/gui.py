@@ -1528,6 +1528,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._direct_active = False
         self._freq_before_direct = None
         self._sync_device_dependent_widgets()
+        self._apply_device_mode_support()
+
+    def _apply_device_mode_support(self):
+        """Greys out what the device cannot receive (X6200: what its audio cannot carry), as in pluto-tx, and moves away from
+        it. Availability of the optional modules stays: an item comes back only as it was before."""
+        supported = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()].supported_rx_modes
+        was_enabled = self.__dict__.setdefault("_mode_was_enabled", {})
+        demod_names = {AdvancedRxFlowgraph.MODE_FM: "fm", AdvancedRxFlowgraph.MODE_SSB: "ssb", AdvancedRxFlowgraph.MODE_LSB: "lsb",
+                       AdvancedRxFlowgraph.MODE_RADE: "rade", AdvancedRxFlowgraph.MODE_M17: "m17", AdvancedRxFlowgraph.MODE_BASEBAND: "baseband"}
+        for combo, name_of in ((self.demod_combo, demod_names.get), (self.digimode_combo, str)):
+            for i in range(combo.count()):
+                item = combo.model().item(i)
+                name = name_of(combo.itemData(i))
+                if supported is not None and name not in supported:
+                    was_enabled.setdefault((id(combo), i), item.isEnabled())
+                    item.setEnabled(False)
+                elif (id(combo), i) in was_enabled:
+                    item.setEnabled(was_enabled.pop((id(combo), i)))
+        for combo in (self.demod_combo, self.digimode_combo):
+            if not combo.model().item(combo.currentIndex()).isEnabled():
+                combo.setCurrentIndex(next(i for i in range(combo.count()) if combo.model().item(i).isEnabled()))
 
     def _sync_device_dependent_widgets(self):
         """Range/item-list/visibility updates only, never touches self.tb.

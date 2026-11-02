@@ -25,9 +25,8 @@ Das USB-Audio geht nur in USB-D und LSB-D auf Sendung. Darum:
 | JTTY, FT8, JS8, RTTY, PSK31, Waterfall Writer, RADE, SSB (USB) | USB-D |
 | SSB (LSB) | LSB-D |
 | FM, POCSAG, APRS, AM | nicht möglich, wird abgewiesen; nur über den TCI-Server der Firmware denkbar |
-| M17, FreeDV, Baseband, LoRa, File Broadcast | nicht möglich |
-
-FreeDV hat in pluto-tx keinen Audiozweig. Er wäre machbar, gehört aber nicht zum jetzigen Stand.
+| FreeDV 2020 | USB-D, Modem-Audio vor dem Hilbert-Schritt, nicht in Web-TRX |
+| M17, Baseband, LoRa, File Broadcast | nicht möglich |
 
 ## Sicherheit
 

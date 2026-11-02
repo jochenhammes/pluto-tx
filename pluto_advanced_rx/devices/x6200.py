@@ -5,6 +5,8 @@ so the flowgraph's audio rotator stays at 0 Hz. Measured (docs/x6200/TESTS.md): 
 and at PipeWire's 100 % capture volume its noise already clips.
 
 connection as on the TX side: "<rig>|<audio>", with <audio> an ALSA device or "monitor:<PipeWire source node>"."""
+import sys
+
 from pluto_tx.devices.x6200 import CI_V_ADDRESS, PIPEWIRE_PREFIX, _scan_serial_ports, _set_pipewire_volume, audio_next_to, civ_id, parse_connection, resolve_rig_and_audio, rigctld_address
 from pluto_tx.rigctl import DEFAULT_TCP_PORT, RigctlClient, RigctldManager, RigError
 
@@ -19,8 +21,8 @@ class X6200RxDevice(AudioDevice):
     connection_kind = "rig"
     frequency_range_hz = (100_000.0, 54_000_000.0)
     audio_tuning_range_hz = None
-    # USB only so far: nothing here switches the radio's sideband yet, and it would need NFM for FM, POCSAG and APRS.
-    supported_rx_modes = frozenset({"ssb", "rade", "psk31", "rtty", "ft8", "js8", "jtty"})
+    # Not FM, POCSAG and APRS: the radio's NFM hands over speech, while the flowgraph's FM branches expect the discriminator's input.
+    supported_rx_modes = frozenset({"ssb", "lsb", "rade", "psk31", "rtty", "ft8", "js8", "jtty"})
 
     def __init__(self, connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size=None):
         super().__init__(connection, frequency_hz, sample_rate_hz, bandwidth_hz, buffer_size)
@@ -28,6 +30,7 @@ class X6200RxDevice(AudioDevice):
         self._rig_spec, self._audio = resolve_rig_and_audio(rig, audio, "Audio/Source")
         self._client = None
         self._manager = None
+        self._rig_mode = "PKTUSB"
 
     @classmethod
     def is_audio_only(cls):
@@ -48,6 +51,7 @@ class X6200RxDevice(AudioDevice):
         self._client = RigctlClient(host, port)
         self._client.connect()
         self.set_frequency(self.frequency_hz)
+        self._client.set_mode(self._rig_mode)
         if self._audio.startswith(PIPEWIRE_PREFIX):
             _set_pipewire_volume(self._audio[len(PIPEWIRE_PREFIX):], CAPTURE_VOLUME)
         self._source = _AudioToComplexSource(self.sample_rate_hz, self._audio)
@@ -58,6 +62,14 @@ class X6200RxDevice(AudioDevice):
         lo, hi = self.frequency_range_hz
         if self._client is not None and freq_hz and lo <= freq_hz <= hi:
             self._client.set_frequency(freq_hz)
+
+    def select_demod(self, mode_name):
+        self._rig_mode = "PKTLSB" if mode_name == "lsb" else "PKTUSB"
+        if self._client is not None:
+            try:
+                self._client.set_mode(self._rig_mode)
+            except RigError as e:  # a mode switch in the GUI must not take the receiver down; read_hw_state() reports it
+                print(f"WARNING: X6200 mode not set: {e}", file=sys.stderr)
 
     def tuned_away_hz(self):
         if self._client is None:
