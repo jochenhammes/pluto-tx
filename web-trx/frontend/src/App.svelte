@@ -32,8 +32,11 @@
   // Which modes exist comes from the backend (features.rx_modes/tx_modes:
   // e.g. RADE only where librade is installed).
   const DEFAULT_MODES = ["fm", "ssb", "lsb", "m17", "pocsag"];
-  $: rxModes = (features.rx_modes ?? DEFAULT_MODES).map((m) => [m, MODE_LABELS[m] ?? m] as [string, string]);
-  $: txModes = (features.tx_modes ?? DEFAULT_MODES).map((m) => [m, MODE_LABELS[m] ?? m] as [string, string]);
+  $: rxModes = (features.rx_device_modes?.[rxDeviceType] ?? features.rx_modes ?? DEFAULT_MODES).map((m) => [m, MODE_LABELS[m] ?? m] as [string, string]);
+  $: if (rxModes.length && !rxModes.some(([m]) => m === rxMode)) rxMode = rxModes[0][0];
+  // A radio carries only some modes (X6200: nothing that needs FM): the list follows the chosen device.
+  $: txModes = (features.tx_device_modes?.[txDeviceType] ?? features.tx_modes ?? DEFAULT_MODES).map((m) => [m, MODE_LABELS[m] ?? m] as [string, string]);
+  $: if (txModes.length && !txModes.some(([m]) => m === txMode)) txMode = txModes[0][0];
   // One-shot text modes: a single "send" click, the server renders the
   // whole transmission and unkeys on its own. Everything else takes the mic.
   // FT8: the click arms a series of slot-timed transmissions instead.
@@ -70,6 +73,8 @@
   let zoomIndex = 0;
   $: zoom = ZOOM_STEPS[zoomIndex] ?? 1;
   let features: {
+    tx_device_modes?: Record<string, string[]>;
+    rx_device_modes?: Record<string, string[]>;
     fft_zoom_max?: number; fft_avg_max?: number; fft_sizes?: number[]; map_tile_url?: string; rx_modes?: string[]; tx_modes?: string[];
     rx_sample_rates?: Record<string, number[]>;
     rx_gain?: Record<string, RxGainInfo>;

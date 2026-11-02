@@ -17,6 +17,7 @@ audio rate -> complex resampler up to TX rate, not real-resample-then-Hilbert.
 import math
 import os
 import sys
+import threading
 import time
 import wave
 
@@ -202,6 +203,8 @@ class PlutoTxFlowgraph(gr.top_block):
 
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
+        self._freq_lock = threading.RLock()  # a poll of the radio must not undo a retune in progress on another thread
+        self._followed_hz = None
         self.power_ceiling = power_ceiling
         self.target_power = power_ceiling
         self._keyed = False
@@ -230,7 +233,8 @@ class PlutoTxFlowgraph(gr.top_block):
             # LoRa is RF-only (125-500 kHz wide) -- a 48 kHz soundcard can't carry it.
             mode = self.MODE_FM
         if not device_cls.supports_mode(self.MODE_NAMES.get(mode, "")):
-            mode = self.MODE_FM  # a device that carries only some modes (the ESP32-S3: constant-envelope ones)
+            # a device that carries only some modes (the ESP32-S3: constant-envelope ones; the X6200: no FM over USB audio)
+            mode = self.MODE_FM if device_cls.supports_mode("fm") else self.MODE_RTTY
         self.mode = mode  # the ACTUAL mode (post-fallback) -- GUI reads this
         # to sync mode_combo's initial selection, otherwise it always shows
         # "FM" regardless of what mode the flowgraph was actually built with.
@@ -602,6 +606,9 @@ class PlutoTxFlowgraph(gr.top_block):
         self.digitext_layout = digitext_layout
         self.digitext_zoom = digitext_zoom
         self.digitext_min_freq_hz = digitext_min_freq_hz
+        if self.device.is_audio_only() and self.device.has_frequency_control():
+            # A transceiver's filter ends near 3 kHz; the default of 4 kHz is for an SDR's wide audio.
+            self.digitext_min_freq_hz = min(digitext_min_freq_hz, config.DIGITEXT_TRANSCEIVER_MIN_FREQ_HZ)
         self._digitext_audio = None
         self._digitext_audio_dirty = True
         self.digitext_duration_s = 0.0
@@ -1178,6 +1185,17 @@ class PlutoTxFlowgraph(gr.top_block):
         # unkey_ptt()'s MODE_FM + is_audio_only() branch.
         self.fm_audio_gain = blocks.multiply_const_ff(0.0)
         self.connect(self.fm_audio_adder, self.fm_audio_gain)
+        # SSB voice as audio, for a transceiver that makes the sideband itself: the same processed audio the SDR path's
+        # Hilbert transform gets. The radio decides upper or lower (X6200: USB-D, LSB-D).
+        self.ssb_audio_gain = None
+        if self.device.is_audio_only():
+            self.ssb_audio_gain = blocks.multiply_const_ff(0.0)
+            self.connect(self.limiter, self.ssb_audio_gain)
+        # FreeDV's modem audio, likewise before its Hilbert transform: real FreeDV feeds a radio's mic input the same way.
+        self.freedv_audio_gain = None
+        if FREEDV_AVAILABLE and self.device.is_audio_only():
+            self.freedv_audio_gain = blocks.multiply_const_ff(0.0)
+            self.connect(self.freedv_audio_resampler_up, self.freedv_audio_gain)
         # Wired to the shared _soundcard_sink (or its own null_sink) at the end of
         # __init__ -- see _soundcard_audio_producer_map()/its wiring comment.
 
@@ -1382,6 +1400,11 @@ class PlutoTxFlowgraph(gr.top_block):
             producers[self.MODE_POCSAG] = self.pocsag_audio_gain
         if self.aprs_audio_gain is not None:
             producers[self.MODE_APRS] = self.aprs_audio_gain
+        if self.ssb_audio_gain is not None:
+            producers[self.MODE_SSB] = self.ssb_audio_gain
+            producers[self.MODE_LSB] = self.ssb_audio_gain
+        if self.freedv_audio_gain is not None:
+            producers[self.MODE_FREEDV] = self.freedv_audio_gain
         return producers
 
     def _wire_soundcard_audio_producer(self, gain_block):
@@ -1509,7 +1532,7 @@ class PlutoTxFlowgraph(gr.top_block):
             return "no callsign set"
         if not aprs_codec.valid_callsign(self.aprs_callsign):
             return f"invalid callsign {self.aprs_callsign!r}"
-        if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
+        if self.device.has_frequency_control() and config.in_amateur_band(self.nominal_freq_hz) is None:
             return "frequency is outside the amateur bands"
         try:
             self._aprs_build_frame()
@@ -1551,7 +1574,7 @@ class PlutoTxFlowgraph(gr.top_block):
 
     def jtty_problem(self):
         """None if the current JTTY settings can be sent now, else a short reason."""
-        if not self.device.is_audio_only() and config.in_amateur_band(self.nominal_freq_hz) is None:
+        if self.device.has_frequency_control() and config.in_amateur_band(self.nominal_freq_hz) is None:
             return "frequency is outside the amateur bands"
         try:
             self._jtty_render()
@@ -2028,6 +2051,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 min_freq_hz=self.digitext_min_freq_hz, tail_s=config.DIGITEXT_TAIL_S + self.device.tx_end_loss_s,
                 col_downsample=config.DIGITEXT_COL_DOWNSAMPLE, zoom=self.digitext_zoom,
             )
+            self._digitext_audio, self.digitext_duration_s = self._with_start_silence(self._digitext_audio, self.digitext_duration_s)
             self._digitext_audio_dirty = False
 
     def set_psk31_text(self, text: str):
@@ -2049,6 +2073,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.psk31_text, config.AUDIO_RATE, self.psk31_tone_hz,
                 tail_s=config.PSK31_TAIL_S + self.device.tx_end_loss_s, preamble_chars=config.PSK31_PREAMBLE_CHARS,
             )
+            self._psk31_audio, self.psk31_duration_s = self._with_start_silence(self._psk31_audio, self.psk31_duration_s)
             self._psk31_audio_dirty = False
 
     def set_rtty_text(self, text: str):
@@ -2072,6 +2097,13 @@ class PlutoTxFlowgraph(gr.top_block):
         self.rtty_reverse = bool(reverse)
         self._rtty_audio_dirty = True
 
+    def _with_start_silence(self, audio, duration_s):
+        """For a one-shot source that already runs while the device keys: silence until the radio transmits."""
+        lost = self.device.tx_start_loss_s
+        if not lost:
+            return audio, duration_s
+        return np.concatenate([np.zeros(int(lost * config.AUDIO_RATE), dtype=np.float32), audio]), duration_s + lost
+
     def _ensure_rtty_audio(self):
         """Mirrors _ensure_psk31_audio() exactly -- the dirty flag covers
         all five operator-adjustable RTTY parameters (text/mark/shift/
@@ -2083,6 +2115,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 tail_s=config.RTTY_TAIL_S + self.device.tx_end_loss_s, preamble_s=config.RTTY_PREAMBLE_S,
                 stop_bits=config.RTTY_STOP_BITS,
             )
+            self._rtty_audio, self.rtty_duration_s = self._with_start_silence(self._rtty_audio, self.rtty_duration_s)
             self._rtty_audio_dirty = False
 
     # --- FT8 ------------------------------------------------------------
@@ -2217,7 +2250,7 @@ class PlutoTxFlowgraph(gr.top_block):
                 js8_phy.frame_to_bits(frame, flags)
             except ValueError as e:
                 return str(e)
-        if not self.device.is_audio_only():
+        if self.device.has_frequency_control():
             f_lo, f_hi = self.js8_occupied_hz()
             band = config.in_amateur_band(f_lo)
             if band is None or config.in_amateur_band(f_hi) != band:
@@ -2365,17 +2398,30 @@ class PlutoTxFlowgraph(gr.top_block):
         self.limiter_smooth.set_enabled(enabled)
 
     def set_fine_offset(self, offset_hz: float):
-        self.fine_offset_hz = offset_hz
-        self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
+        with self._freq_lock:
+            self.fine_offset_hz = offset_hz
+            self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
 
     def set_frequency(self, freq_hz: float):
-        self.nominal_freq_hz = freq_hz
-        self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
+        with self._freq_lock:
+            self.nominal_freq_hz = freq_hz
+            self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
+
+    def follow_device_frequency(self):
+        """-> the new nominal frequency if a transceiver was retuned on its front panel since the last call, else None."""
+        with self._freq_lock:
+            followed, self._followed_hz = self._followed_hz, None
+            tuned = None if self._keyed else self.device.tuned_away_hz()
+            if tuned is not None:
+                self.device.frequency_hz = tuned
+                self.nominal_freq_hz = followed = tuned - self.fine_offset_hz
+            return followed
 
     def set_target_power(self, value: float):
         stage = self.device.primary_stage
         self.target_power = max(stage.min_value, min(self.power_ceiling, value))
-        if self._keyed:
+        # A transceiver's power is a setting of its own that the operator can see on it, so it follows at once.
+        if self._keyed or (self.device.is_audio_only() and self.device.has_frequency_control()):
             self.device.set_power(stage.name, self.target_power)
 
     def set_secondary_power(self, stage_name: str, value):
@@ -2449,6 +2495,11 @@ class PlutoTxFlowgraph(gr.top_block):
         Soundcard device entry when RADE is unavailable), but cheap
         insurance against an AttributeError if ever constructed some other
         way."""
+        if self.device.is_audio_only() and self.device.has_frequency_control():
+            # A transceiver on CAT: its power and mode are the radio's own, and the audio branches below never touch RF power.
+            self._followed_hz = self.follow_device_frequency()  # pre_key() tunes the radio: not back to where it was
+            self.device.set_power(self.device.primary_stage.name, self.target_power)
+            self.device.select_mode(self.MODE_NAMES.get(self.mode, ""))
         self._m17_ending = False
         self._rade_ending = False
         if self.mode == self.MODE_MESHTASTIC and self._meshtastic_pending is None:
@@ -2480,6 +2531,22 @@ class PlutoTxFlowgraph(gr.top_block):
             self.ptt_mute.set_k(1.0)
             self.tx_gain.set_k(1.0 + 0j)
             self.rade_audio_gain.set_k(1.0)
+            self._keyed = True
+            return
+        if self.mode in (self.MODE_SSB, self.MODE_LSB) and self.device.is_audio_only():
+            if self.device.needs_ptt_control:
+                self.device.pre_key()
+            self.ptt_mute.set_k(1.0)
+            self.tx_gain.set_k(1.0 + 0j)
+            self.ssb_audio_gain.set_k(config.SSB_SOUNDCARD_LEVEL)
+            self._keyed = True
+            return
+        if self.mode == self.MODE_FREEDV and self.device.is_audio_only():
+            if self.device.needs_ptt_control:
+                self.device.pre_key()
+            self.ptt_mute.set_k(1.0)
+            self.tx_gain.set_k(1.0 + 0j)
+            self.freedv_audio_gain.set_k(config.FREEDV_SOUNDCARD_LEVEL)
             self._keyed = True
             return
         if self.mode == self.MODE_DIGITEXT:
@@ -2729,6 +2796,22 @@ class PlutoTxFlowgraph(gr.top_block):
                 self.device.post_unkey()
             self._keyed = False
             return
+        if self.mode in (self.MODE_SSB, self.MODE_LSB) and self.device.is_audio_only():
+            self.ptt_mute.set_k(0.0)
+            self.tx_gain.set_k(0.0 + 0j)
+            self.ssb_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
+        if self.mode == self.MODE_FREEDV and self.device.is_audio_only():
+            self.ptt_mute.set_k(0.0)
+            self.tx_gain.set_k(0.0 + 0j)
+            self.freedv_audio_gain.set_k(0.0)
+            if self.device.needs_ptt_control:
+                self.device.post_unkey()
+            self._keyed = False
+            return
         if self.mode == self.MODE_RADE and self.device.is_audio_only():
             self.ptt_mute.set_k(0.0)
             self.tx_gain.set_k(0.0 + 0j)
@@ -2905,3 +2988,4 @@ class PlutoTxFlowgraph(gr.top_block):
         except Exception as e:
             print(f"WARNING: flowgraph stop() failed: {e}", file=sys.stderr)
         self.device.force_safe_state()
+        self.device.close()

@@ -33,6 +33,15 @@ except ImportError:
     ESPDR_AVAILABLE = False
 
 
+# Needs pyserial as well, and Hamlib's rigctld at connect time only.
+try:
+    from .x6200 import X6200Device
+    DEVICE_REGISTRY["x6200"] = X6200Device
+    X6200_AVAILABLE = True
+except ImportError:
+    X6200_AVAILABLE = False
+
+
 def primary_power_stage(device_type):
     """The PowerStage with is_primary=True for a device type, without
     needing an actual device instance -- power_stages is a class attribute."""

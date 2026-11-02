@@ -127,7 +127,7 @@ def _run(args, mode, emitter, post_construct=None, **mode_kwargs):
     mode_name = PlutoTxFlowgraph.MODE_NAMES.get(mode, "")
     if not device_cls.supports_mode(mode_name):
         emitter.error(f"the {device_cls.display_name} device cannot send {mode_name}: it carries only {', '.join(sorted(device_cls.supported_modes))} "
-                      f"(it sends the frequency of a constant-envelope signal and nothing else)")
+                      f"({device_cls.supported_modes_reason})")
         return 1
     connection = runtime.resolve_connection(device_cls, args.uri)
     runtime.probe_or_exit(device_cls, connection, emitter)

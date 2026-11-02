@@ -78,6 +78,9 @@ class TxDevice(abc.ABC):
     # digimodes (POCSAG, RTTY, PSK31, Waterfall Writer) append this much silence/carrier so the real
     # signal is transmitted completely.
     tx_end_loss_s: float = 0.0
+    # Seconds a device needs from the start of a one-shot source until it transmits, where keying is slow (CAT). Only for
+    # silence that is really silent on the air, as on a transceiver in a data mode: an SDR would send a bare carrier.
+    tx_start_loss_s: float = 0.0
     supports_frequency_correction: bool = True
     # True only for an audio-only device that still has REAL PTT hardware to key
     # (AIOC: serial DTR/RTS to the connected radio) -- False (default, e.g.
@@ -92,6 +95,7 @@ class TxDevice(abc.ABC):
     # (the ESP32-S3 sends the FREQUENCY of a constant-envelope signal and nothing else) lists them here; flowgraph.py falls back to FM for
     # any other, pluto_cli refuses them with a message and the GUI greys them out.
     supported_modes: Optional[frozenset] = None
+    supported_modes_reason: str = "it sends the frequency of a constant-envelope signal and nothing else"
 
     @classmethod
     def supports_mode(cls, mode_name: str) -> bool:
@@ -133,6 +137,18 @@ class TxDevice(abc.ABC):
         separate capability flag, to avoid two sources of truth drifting
         apart."""
         return cls.frequency_range_hz == (0.0, 0.0)
+
+    @classmethod
+    def has_frequency_control(cls) -> bool:
+        """True if the device has a tunable frequency. Differs from not is_audio_only() for a transceiver keyed over
+        CAT (X6200): its signal is audio, but it has a frequency, a band check and a power of its own."""
+        return cls.frequency_range_hz != (0.0, 0.0)
+
+    def select_mode(self, mode_name: str):
+        """The flowgraph's mode (a MODE_NAMES value), told before each keying. For a device that has modes of its own."""
+
+    def close(self):
+        """Releases what prepare_for_start() acquired, at the end of a session. Default: nothing."""
 
     def set_rf_bandwidth(self, hz: float):
         """Change the analog TX bandwidth at runtime (wideband modes like
@@ -183,6 +199,14 @@ class TxDevice(abc.ABC):
         stage and muted audio -- the backend-specific EXTRA step beyond that
         (e.g. Pluto: power the LO down; see each backend for what, if
         anything, it can actually do here)."""
+
+    def released_ptt(self):
+        """True if a transceiver dropped out of a keyed transmission on its own, as with its SWR protection."""
+        return False
+
+    def tuned_away_hz(self):
+        """The frequency a transceiver was tuned to on its own front panel, if that differs from the one set here; else None."""
+        return None
 
     @abc.abstractmethod
     def force_safe_state(self):

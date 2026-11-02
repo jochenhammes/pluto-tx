@@ -80,6 +80,7 @@ except ImportError:
 logger = logging.getLogger("web_trx.radio_backend")
 
 SPECTRUM_POLL_HZ = 25.0
+RIG_FOLLOW_PERIOD_S = 0.5
 PROBE_TIMEOUT_S = 5.0
 SCAN_TIMEOUT_S = 5.0
 
@@ -221,10 +222,16 @@ DEFAULT_FFT_SIZE = 2048
 MIC_SILENCE_UNKEY_S = 1.5
 DEFAULT_TX_TIMEOUT_S = 180.0
 MIC_BLOCK_S = 0.01  # granularity of the paced mic source
+# Towards a sound card (X6200, AIOC): every block costs each Python block behind it a turn on the GIL, and at 10 ms a waiting
+# transmitter ran 2500 of them a second, which made a HackRF receiver in this process overflow 15 times a second and cost RADE
+# its sync (measured). The lead keeps the card from running dry on the larger blocks: a source paced by the wall clock has no
+# margin of its own, and without it the card ran dry 12 times in 30 s.
+MIC_SOUND_CARD_BLOCK_S = 0.04
+MIC_SOUND_CARD_LEAD_S = 0.2
 
-DEVICE_LABELS = {"pluto": "PlutoSDR", "hackrf": "HackRF One", "rtlsdr": "RTL-SDR"}
-RX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "rtlsdr") if t in rx_devices.DEVICE_REGISTRY)
-TX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf") if t in tx_devices.DEVICE_REGISTRY)
+DEVICE_LABELS = {"pluto": "PlutoSDR", "hackrf": "HackRF One", "rtlsdr": "RTL-SDR", "x6200": "Xiegu X6200"}
+RX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "rtlsdr", "x6200") if t in rx_devices.DEVICE_REGISTRY)
+TX_DEVICE_TYPES = tuple(t for t in ("pluto", "hackrf", "x6200") if t in tx_devices.DEVICE_REGISTRY)
 
 
 class _AudioTap(gr.sync_block):
@@ -258,12 +265,13 @@ class _BrowserMicSource(gr.sync_block):
     buffer with silence, and live audio would then queue behind it
     (seconds of latency). Silence whenever no browser audio is due."""
 
-    def __init__(self, buffer: JitterBuffer):
+    def __init__(self, buffer: JitterBuffer, block_s: float = MIC_BLOCK_S, lead_s: float = 0.0):
         gr.sync_block.__init__(self, name="web_trx_browser_mic", in_sig=None, out_sig=[np.float32])
         self._buffer = buffer
         self._rate = buffer.rate_hz
         self._t0: float | None = None
-        self._produced = 0
+        self._produced = -int(lead_s * buffer.rate_hz)
+        self._block = int(block_s * buffer.rate_hz)
 
     def work(self, input_items, output_items):
         out = output_items[0]
@@ -275,9 +283,9 @@ class _BrowserMicSource(gr.sync_block):
             # Stalled (downstream backpressure, scheduler hiccup) -- don't
             # burst to catch up, restart the clock instead.
             self._t0, self._produced, due = now, 0, 0
-        if due <= 0:
-            time.sleep(MIC_BLOCK_S)
-            due = int(MIC_BLOCK_S * self._rate)
+        if due < self._block:
+            time.sleep((self._block - due) / self._rate)
+            due = self._block
         n = min(len(out), due)
         out[:n] = self._buffer.pull(n)
         self._produced += n
@@ -375,7 +383,9 @@ class GnuRadioBackend(SessionBackend):
                         "submodes": list(tx_js8.SPEEDS), "jsc": tx_js8_message.jsc_available(),
                         "clock_synced": clock.ntp_synchronized()},
                 "jtty": {"available": jtty_codec.available()},
-                "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)]}
+                "tx_modes": [m for m in TX_MODES if _tx_mode_available(m)],
+                "rx_device_modes": {t: [m for m in RX_DEMOD_MODES if _rx_mode_available(m) and _device_receives(t, m)] for t in RX_DEVICE_TYPES},
+                "tx_device_modes": {t: [m for m in TX_MODES if _tx_mode_available(m) and _device_sends(t, m)] for t in TX_DEVICE_TYPES}}
 
     def device_types(self) -> dict[str, list[list[str]]]:
         return {
@@ -712,6 +722,7 @@ class GnuRadioBackend(SessionBackend):
             self._spectrum_task.cancel()
             self._aux_task.cancel()
             self._squelch_task.cancel()
+            self._rig_follow_task.cancel()
             self._spectrum_task = None
         if self._js8_auto is not None:
             auto, self._js8_auto = self._js8_auto, None
@@ -741,6 +752,7 @@ class GnuRadioBackend(SessionBackend):
             self._spectrum_task = asyncio.create_task(self._spectrum_loop())
             self._aux_task = asyncio.create_task(self._rx_aux_loop())
             self._squelch_task = asyncio.create_task(self._squelch_loop())
+            self._rig_follow_task = asyncio.create_task(self._rig_follow_loop())
         if self._restore:
             self._restore_task = asyncio.create_task(self._restore_connections())
 
@@ -778,6 +790,8 @@ class GnuRadioBackend(SessionBackend):
     # -- RX --
 
     async def _select_rx_mode(self, mode: str, params: dict) -> None:
+        if self.rx.device_type and not _device_receives(self.rx.device_type, mode):
+            raise SessionError(f"{rx_devices.DEVICE_REGISTRY[self.rx.device_type].display_name} cannot receive {mode.upper()}")
         if mode not in RX_DEMOD_MODES:
             raise SessionError(f"unsupported rx mode '{mode}'")
         if not _rx_mode_available(mode):
@@ -909,6 +923,30 @@ class GnuRadioBackend(SessionBackend):
         tb, self.rx.tb = self.rx.tb, None
         if tb is not None:
             await asyncio.to_thread(tb.shutdown)
+
+    async def _rig_follow_loop(self) -> None:
+        """A transceiver can be retuned on its front panel: the frequency shown here follows, in both directions, as it is one radio."""
+        while True:
+            await asyncio.sleep(RIG_FOLLOW_PERIOD_S)
+            await self._follow_rig_frequency()
+            await self._check_rig_ptt()
+
+    async def _check_rig_ptt(self) -> None:
+        tb = self.tx.tb
+        if self.keyed and tb is not None and self.tx.device_type == "x6200" and await asyncio.to_thread(tb.device.released_ptt):
+            await self._emit_event("error", {"message": "tx: das Funkgerät hat die Sendung selbst abgebrochen (SWR-Schutz?)"})
+            await self._unkey()
+
+    async def _follow_rig_frequency(self) -> None:
+        for direction, st in (("tx", self.tx), ("rx", self.rx)):
+            tb = st.tb
+            if tb is None or st.device_type != "x6200":
+                continue
+            followed = await asyncio.to_thread(tb.follow_device_frequency)
+            if followed is not None and st.tb is tb:
+                st.freq_hz = followed
+                self._save_settings()
+                await self._emit_event("tuned", {"direction": direction, "freq_hz": followed})
 
     async def _spectrum_loop(self) -> None:
         period_s = 1.0 / SPECTRUM_POLL_HZ
@@ -1332,6 +1370,9 @@ class GnuRadioBackend(SessionBackend):
     async def _select_tx_mode(self, mode: str, params: dict) -> None:
         if mode not in TX_MODES:
             raise SessionError(f"unsupported tx mode '{mode}'")
+        if self.tx.device_type and not _device_sends(self.tx.device_type, mode):
+            cls = tx_devices.DEVICE_REGISTRY[self.tx.device_type]
+            raise SessionError(f"{cls.display_name} cannot send {mode.upper()}: {cls.supported_modes_reason}")
         if not _tx_mode_available(mode):
             raise SessionError(f"{mode.upper()} is not available on this server (see pluto-tx install-{mode}.sh)")
         if self.keyed:
@@ -1378,6 +1419,11 @@ class GnuRadioBackend(SessionBackend):
             await self._emit_event("tuned", {"direction": "tx", "freq_hz": st.freq_hz})
         await self._emit_event("tx_power", _power_info(st.tb))
 
+    def _browser_mic(self, tb) -> _BrowserMicSource:
+        if tb.device.is_audio_only():
+            return _BrowserMicSource(self._mic_buffer, MIC_SOUND_CARD_BLOCK_S, MIC_SOUND_CARD_LEAD_S)
+        return _BrowserMicSource(self._mic_buffer)
+
     def _build_tx(self, mode: str, params: dict | None = None):
         st = self.tx
         tb = PlutoTxFlowgraph(
@@ -1393,7 +1439,7 @@ class GnuRadioBackend(SessionBackend):
             # every voice modulator behind it. That cost a receiver in this process 5-15 % of its samples (measured with
             # a Pluto as RX and TX: no MeshCore packet decoded), so there it gets a source that ends at once. Going back
             # to a voice mode rebuilds, see _select_tx_mode().
-            mic = _BrowserMicSource(self._mic_buffer) if mode not in ONE_SHOT_TX_MODES else blocks.vector_source_f([0.0], repeat=False)
+            mic = self._browser_mic(tb) if mode not in ONE_SHOT_TX_MODES else blocks.vector_source_f([0.0], repeat=False)
             tb.disconnect(tb.mic_source, (tb.source_selector, PlutoTxFlowgraph.SRC_MIC))
             tb.connect(mic, (tb.source_selector, PlutoTxFlowgraph.SRC_MIC))
             tb.web_trx_mic_source = mic  # see _build_rx: connect() keeps no Python reference
@@ -1826,6 +1872,15 @@ def _rx_mode_available(mode: str) -> bool:
     if mode == "jtty":
         return jtty_codec.available()
     return {"m17": RX_M17_AVAILABLE, "rade": RX_RADE_AVAILABLE}.get(mode, True)
+
+
+def _device_receives(device_type: str, mode: str) -> bool:
+    supported = rx_devices.DEVICE_REGISTRY[device_type].supported_rx_modes
+    return supported is None or mode in supported
+
+
+def _device_sends(device_type: str, mode: str) -> bool:
+    return tx_devices.DEVICE_REGISTRY[device_type].supports_mode(PlutoTxFlowgraph.MODE_NAMES[TX_MODES[mode]])
 
 
 def _tx_mode_available(mode: str) -> bool:

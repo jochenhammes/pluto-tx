@@ -1294,3 +1294,118 @@ def test_jtty_without_the_codec_is_not_offered(monkeypatch):
     monkeypatch.setattr(radio_backend.jtty_codec, "available", lambda: False)
     assert not radio_backend._rx_mode_available("jtty")
     assert not radio_backend._tx_mode_available("jtty")
+
+
+async def _x6200_backend(tmp_path, monkeypatch):
+
+    from gnuradio import blocks, gr
+    fake = _repo_module("fake_rigctld")
+    rig = fake.FakeRigctld(ptt_delay_s=0.05)
+    monkeypatch.setenv("WEB_TRX_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr("pluto_tx.devices.x6200._set_pipewire_volume", lambda *a: None)
+    monkeypatch.setattr("pluto_tx.audio_devices.open_output_device", lambda *a: blocks.null_sink(gr.sizeof_float))
+    b, events, *_ = make_backend()
+    b._loop = asyncio.get_running_loop()
+    return b, events, rig, f"rigctld://127.0.0.1:{rig.port}|monitor:n"
+
+
+def test_x6200_lists_only_what_it_can_send():
+    modes_by_device = make_backend()[0].features()["tx_device_modes"]
+    assert "jtty" in modes_by_device["x6200"] or not radio_backend.jtty_codec.available()
+    assert {"ssb", "lsb", "rtty"} <= set(modes_by_device["x6200"])
+    assert not {"fm", "pocsag", "aprs", "m17", "meshcore"} & set(modes_by_device["x6200"])
+    assert "fm" in modes_by_device["pluto"]
+
+
+async def test_x6200_refuses_a_mode_it_cannot_send(tmp_path, monkeypatch):
+    b, _events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        with pytest.raises(SessionError, match="cannot send FM"):
+            await b.select_mode("tx", "fm", modes.normalize_params("tx", "fm", {}))
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
+@needs_jtty
+def _mic_blocks(source, count):
+    import numpy as np
+    out = np.zeros(48_000, np.float32)
+    return [source.work([], [out]) for _ in range(count)]
+
+
+def test_browser_mic_towards_a_sound_card_runs_ahead_in_large_blocks():
+    from web_trx.tx_audio import JitterBuffer
+    source = radio_backend._BrowserMicSource(JitterBuffer(48_000), radio_backend.MIC_SOUND_CARD_BLOCK_S, radio_backend.MIC_SOUND_CARD_LEAD_S)
+    first, *rest = _mic_blocks(source, 6)
+    assert first >= 48_000 * radio_backend.MIC_SOUND_CARD_LEAD_S        # the margin, at once
+    assert all(n >= 48_000 * radio_backend.MIC_SOUND_CARD_BLOCK_S for n in rest)
+
+
+def test_browser_mic_towards_a_transmitter_keeps_its_small_blocks():
+    from web_trx.tx_audio import JitterBuffer
+    source = radio_backend._BrowserMicSource(JitterBuffer(48_000))
+    first, *rest = _mic_blocks(source, 6)
+    assert first < 48_000 * 0.05                                         # no lead: no added delay
+    assert all(n < 48_000 * 0.04 for n in rest)
+
+
+async def test_browser_mic_follows_the_device_kind(tmp_path, monkeypatch):
+    b, _events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        await b.select_mode("tx", "ssb", modes.normalize_params("tx", "ssb", {}))
+        assert b.tx.tb.web_trx_mic_source._block == int(48_000 * radio_backend.MIC_SOUND_CARD_BLOCK_S)
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
+async def test_x6200_frequency_follows_the_front_panel(tmp_path, monkeypatch):
+    b, events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        await b.tune("tx", 14_092_000.0)
+        await b.select_mode("tx", "ssb", modes.normalize_params("tx", "ssb", {}))
+        await asyncio.sleep(0.4)                  # the power write after building the flowgraph
+        b.tx.tb.device._cat_busy_until = 0.0      # its measured 1.6 s of silence on CAT, which the fake doesn't have
+        await b._follow_rig_frequency()
+        assert not [f for n, f in events if n == "tuned"]
+        rig.log.clear()
+        rig.frequency = 14_100_250.0
+        await b._follow_rig_frequency()
+        assert b.tx.freq_hz == 14_100_250.0
+        assert [f for n, f in events if n == "tuned"] == [{"direction": "tx", "freq_hz": 14_100_250.0}]
+        assert rig.commands("F") == []   # taken over, not written back
+        await b._follow_rig_frequency()
+        assert len([f for n, f in events if n == "tuned"]) == 1
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
+async def test_x6200_sends_jtty_through_web_trx(tmp_path, monkeypatch):
+    b, events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        await b.tune("tx", 14_092_000.0)
+        await b.select_mode("tx", "jtty", modes.normalize_params("tx", "jtty", {"text": "CQ DA2JH CQ"}))
+        await b.ptt(True)
+        assert b.keyed
+        assert rig.ptt
+        assert (rig.frequency, rig.mode) == (14_092_000.0, "PKTUSB")
+        assert next(f for n, f in events if n == "jtty_sent")["text"] == "CQ DA2JH CQ"
+        await asyncio.sleep(b.tx.tb.jtty_hold_s + 0.5)
+        assert not b.keyed
+        assert not rig.ptt
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
+def test_x6200_lists_only_what_its_audio_can_carry():
+    modes_by_device = make_backend()[0].features()["rx_device_modes"]
+    assert "ssb" in modes_by_device["x6200"]
+    assert not {"fm", "adsb", "adsl", "m17", "meshcore", "aprs", "pocsag"} & set(modes_by_device["x6200"])
+    assert "adsb" in modes_by_device["pluto"]

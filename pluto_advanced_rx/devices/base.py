@@ -54,6 +54,8 @@ class RxDevice(abc.ABC):
     # keep meaning "no RF" for its existing consumers (File Broadcast
     # gating, etc.) regardless of this.
     audio_tuning_range_hz: Optional[tuple] = None
+    # What can be received, as demodulator or digimode names, or None for everything: a transceiver's audio can't carry ADS-B.
+    supported_rx_modes: Optional[frozenset] = None
     # Upper bound for the waterfall's zoom slider -- FftProbe.MAX_ZOOM by
     # default. A backend with a much lower sample rate than RF's needs a
     # tighter cap: zoom is a real zoom-FFT (fft_probe.py), needing
@@ -96,6 +98,12 @@ class RxDevice(abc.ABC):
         # only PlutoDevice.build_source() actually reads this.
         self.buffer_size = buffer_size
         self._frequency_correction_ppm = 0.0
+
+    @classmethod
+    def has_frequency_control(cls) -> bool:
+        """True if the device has a tunable frequency: differs from not is_audio_only() for a transceiver on CAT (X6200),
+        which delivers audio and tunes itself."""
+        return cls.frequency_range_hz != (0.0, 0.0)
 
     @classmethod
     def is_audio_only(cls) -> bool:
@@ -164,6 +172,13 @@ class RxDevice(abc.ABC):
         callers don't need an extra hasattr()/isinstance() check for
         backends with no AGC (e.g. HackRF's RX side)."""
         pass
+
+    def select_demod(self, mode_name):
+        """For a transceiver, whose sideband is the radio's: the demodulator in use. Nothing to do on an SDR."""
+
+    def tuned_away_hz(self):
+        """The frequency a transceiver was tuned to on its own front panel, if that differs from the one set here; else None."""
+        return None
 
     @abc.abstractmethod
     def read_hw_state(self) -> dict:
