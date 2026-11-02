@@ -80,6 +80,29 @@ class ClientTests(Base):
             RigctlClient(port=port, timeout=0.3).connect()
 
 
+class ManagerTests(Base):
+    def test_uses_a_running_rigctld(self):
+        manager = rigctl.RigctldManager("/dev/null", 3091, self.rig.port, program="/nonexistent")
+        manager.ensure_running()
+        self.assertIsNone(manager.process)
+
+    def test_says_when_the_radio_is_silent(self):
+        """Seen when the battery ran out: rigctld still listens, the radio no longer answers."""
+        self.rig.silent = True
+        manager = rigctl.RigctldManager("/dev/null", 3091, self.rig.port, program="/nonexistent")
+        with self.assertRaisesRegex(RigError, "is it switched on"):
+            manager.ensure_running()
+
+    def test_says_when_rigctld_is_missing(self):
+        port = self.rig.port
+        self.rig.close()
+        self.rig = FakeRigctld()
+        manager = rigctl.RigctldManager("/dev/null", 3091, port, program=None)
+        with mock.patch.object(rigctl, "_find_rigctld", return_value=None):
+            with self.assertRaisesRegex(RigError, "libhamlib-utils"):
+                manager.ensure_running()
+
+
 class GuardTests(Base):
     def guard(self):
         g = subprocess.Popen([sys.executable, GUARD, str(self.rig.port)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

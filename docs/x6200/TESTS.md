@@ -77,7 +77,16 @@ HackRF sendet über die Whip-Antenne bei VGA 0 bis 20 dB ohne Verstärker auf 14
 
 Beide am selben X6200, gemeinsamer `rigctld`. Der Empfänger wurde 1,5 s nach dem Aussenden getrennt: keine Fehler, PTT danach aus.
 
+## Dauerlauf und Ende des Akkus
+
+- **Empfangsblock simuliert:** 45 Minuten Audio im Schnelldurchlauf, 13 von 13 Nachrichten, auch um Minute 26 bis 30.
+- **X6200 empfängt 29 Minuten** (00:00–00:29 UTC, HackRF VGA 20 dB): Nach 5 Minuten 1 von 2 Nachrichten, nach 25 und 28 Minuten keine, Exit 0 ohne Absturz. Die Einkopplung liegt mit rund −14 dB nah an der Grenze.
+- **Das Gerät antwortete um 00:32 UTC nicht mehr auf CI-V**, der USB-Teil blieb sichtbar. Vermutlich Akku leer oder automatisches Abschalten, Start bei 62 % um 22:14 UTC. Wann genau, ist unbekannt. Die Ausfälle um Minute 25 und 28 können daran liegen; der Langlauf-Befund aus `docs/jtty/TESTS.md` ist damit weder bestätigt noch widerlegt.
+- Die Sendeversuche danach wurden sauber abgewiesen, vor jedem Tasten. Es lief keine Sendung, als das Gerät ausfiel. Der Lauf mit starkem Signal (X6200 sendet, HackRF empfängt 30 Minuten) brachte deshalb kein Ergebnis.
+
 ## Offene Punkte
+
+- **Dauerlauf mit starkem Signal** steht noch aus, ebenso das Verhalten bei Akku-Ende während einer Sendung.
 
 - **RTTY in Echtzeit am HackRF** ist nur teilweise lesbar, aus der Aufnahme derselben Sendung aber fehlerfrei; das Signal hat keine Aussetzer (Hüllkurve im 1-ms-Raster, 22 ms je Bit, 170 Hz Shift). Der X6200 sendet also sauber, die Fehler entstehen im Echtzeit-Empfang am HackRF. Dazu passen die dort gemessenen Sample-Verluste bei JTTY.
 - **PSK31:** in Echtzeit am HackRF teilweise lesbar. Ursache offen; der Decoder braucht die Nachführung, die Prüfung aus der Aufnahme war deshalb nicht aussagekräftig.

@@ -137,12 +137,18 @@ class RigctldManager:
         self.process = None
 
     def _responds(self):
-        client = RigctlClient(port=self.tcp_port, timeout=1.0)
+        """True if rigctld and the radio answer, False if nothing listens. A rigctld without an answer from the radio raises:
+        starting a second one on its port could only fail, and the radio is what needs looking at."""
+        client = RigctlClient(port=self.tcp_port, timeout=2.0)
+        try:
+            client.connect()
+        except RigError:
+            return False
         try:
             client.get_frequency()
             return True
-        except RigError:
-            return False
+        except RigError as e:
+            raise RigError(f"rigctld on port {self.tcp_port} gets no answer from the radio: is it switched on, is its battery charged?") from e
         finally:
             client.close()
 
@@ -160,8 +166,11 @@ class RigctldManager:
         while time.monotonic() < end:
             if self.process.poll() is not None:
                 raise RigError(f"rigctld ended at once (exit {self.process.returncode}); is {self.serial_port} in use?")
-            if self._responds():
-                return
+            try:
+                if self._responds():
+                    return
+            except RigError:  # it is up but has not reached the radio yet
+                pass
             time.sleep(0.1)
         self.process.terminate()
         raise RigError(f"no answer from the radio on {self.serial_port} through rigctld")

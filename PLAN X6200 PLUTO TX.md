@@ -12,7 +12,7 @@ Stand: 2026-11-02 · Status: **Phasen 0–5 weitgehend umgesetzt, Stand und Abwe
 >   - Messgegenstelle ist der HackRF mit Whip-Antenne, kein Abgriff am Dummy-Load.
 > - **Umgesetzt:** Phasen 1–3, Phase 4 für SSB und LSB (FreeDV nicht), Phase 5 für GUI, CLI, Web-TRX, Installation, Phase 6 für CLI und Web-TRX-Backend.
 > - **Entscheidungen:** TCI nur als Rückfallebene, nicht gebaut. 10 % Standardgrenze, 120 s Sendelimit im Wächter. Gerätename `x6200`.
-> - **Offen:** siehe „Offene Punkte" in `docs/x6200/TESTS.md`, dazu Betrieb an der Antenne (Phase 8) und das Ziehen des USB-Kabels während einer Sendung.
+> - **Offen:** siehe „Offene Punkte" in `docs/x6200/TESTS.md`, dazu FreeDV, das Umschalten des Seitenbands beim Empfang, die Desktop-Apps am echten Gerät, Betrieb an der Antenne (Phase 8) und das Ziehen des USB-Kabels während einer Sendung.
 Geprüft gegen: `jochenhammes/pluto-tx` @ `a66593e` und `Guru-RF/OpenX6X00` @ `e475fbb` (Doku nennt v0.3.8), Hamlib `master`.
 Ziel-Branch (später): `feature/x6200-device` in pluto-tx.
 
