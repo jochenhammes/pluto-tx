@@ -13,7 +13,7 @@ gepinnten JS8Call-Quelltext portiert und bitgenau gegen ihn geprüft (pluto-tx
 - **Einstellungen:** Modus „JS8 (JS8Call)“, Speed (Normal 15 s, Fast 10 s,
   Turbo 6 s, Slow 30 s oder alle vier) und Decoder:
   - `js8` ist JS8Calls eigener Decoder (`tools/js8ref`, gebaut von
-    `install-js8.sh`); er ist die Voreinstellung, wenn vorhanden.
+    `./install.sh js8`); er ist die Voreinstellung, wenn vorhanden.
   - `eigener` ist der numpy-Decoder von pluto-tx.
 - **Auswertung:** Jede Periode wird nach ihrem Ende dekodiert, jede
   Geschwindigkeit an ihren eigenen UTC-Grenzen. Der Empfänger arbeitet in USB
@@ -85,7 +85,7 @@ gepinnten JS8Call-Quelltext portiert und bitgenau gegen ihn geprüft (pluto-tx
       Schalter bleiben aus.
     - Höchstens 20 automatische Aussendungen pro Stunde.
 - **Freitext in Fast, Turbo und Slow** braucht das JSC-Wörterbuch aus
-  `install-js8.sh`. Ohne das Wörterbuch nur Normal verwenden.
+  `./install.sh js8`. Ohne das Wörterbuch nur Normal verwenden.
 - **TX-Log:** Jeder Rahmen erscheint mit dem Nachrichtentext und seiner
   Nummer.
 

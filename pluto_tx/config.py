@@ -149,7 +149,7 @@ LIMITER_KNEE_DB = 1.0
 LIMITER_ATTACK_MS = 1.0
 LIMITER_RELEASE_MS = 60.0
 
-# --- M17 digital voice (optional -- needs gr-m17, see install-m17.sh) ------
+# --- M17 digital voice (optional -- needs gr-m17, see ./install.sh m17) ------
 # Parameters below are taken from gr-m17's own real reference flowgraphs
 # (examples/transmitterPLUTOSDR.grc), not re-derived from the M17 spec, and
 # verified this session by an actual offline m17_coder->m17_decoder
@@ -485,7 +485,7 @@ POCSAG_SOUNDCARD_LEVEL = 0.7  # output level to a sound card (radio data/mic inp
 
 # --- LoRa Mesh (Meshtastic/MeshCore interop, PHY not yet built -- Phase 0
 # of /home/hammesj/.claude/plans/swirling-waddling-noodle.md) -- via
-# gr-lora_sdr (install-lora.sh, optional GPL-3.0 dependency, gated like
+# gr-lora_sdr (./install.sh lora, optional GPL-3.0 dependency, gated like
 # gr-m17/M17_AVAILABLE once the actual mode exists). SF/BW/CR and region
 # frequency ranges below are NOT guessed: EU_433/EU_868 range, duty-cycle,
 # and power-limit values were fetched directly from Meshtastic firmware's

@@ -72,7 +72,7 @@ def render(text, tone_hz=config.JTTY_DEFAULT_TONE_HZ, rate=config.AUDIO_RATE, ti
     """The audio of one message. Raises ValueError with a reason meant for the operator, before any RF action."""
     program = codec_program()
     if not program:
-        raise ValueError("JTTY is not available: wsjt-codec is not installed, see install-jtty.sh")
+        raise ValueError("JTTY is not available: wsjt-codec is not installed, see ./install.sh jtty")
     if len(text) > config.JTTY_MAX_TEXT_LEN:
         raise ValueError(f"message is longer than {config.JTTY_MAX_TEXT_LEN} characters")
     lo, hi = config.JTTY_TONE_RANGE_HZ
@@ -115,7 +115,7 @@ class JttyStream:
     def __init__(self, on_event, on_exit=None, data_dir=None, program=None):
         program = program or codec_program()
         if not program:
-            raise RuntimeError("wsjt-codec is not installed, see install-jtty.sh")
+            raise RuntimeError("wsjt-codec is not installed, see ./install.sh jtty")
         # FFT plans are kept here across runs; measuring them again stalls the first reception.
         self.data_dir = str(data_dir or paths.user_dir("cache", create=True) / "jtty")
         os.makedirs(self.data_dir, exist_ok=True)

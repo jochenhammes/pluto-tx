@@ -3,7 +3,7 @@
 GNU-Radio-independent (numpy), like ft8_decoder.py. Two backends:
 
 - "js8": JS8Call's own decoder -- tools/js8ref (built from the unmodified JS8Call v2.5.2 sources by
-  install-js8.sh) run as a subprocess on a WAV of the slot. Preferred whenever it is built.
+  ./install.sh js8) run as a subprocess on a WAV of the slot. Preferred whenever it is built.
 - "own": a numpy port of ft8_lib's method (kgoba/ft8_lib ft8/decode.c + ft8/ldpc.c) with the JS8
   parameters from docs/js8/SPEC.md: a waterfall with 2x time and 2x frequency oversampling in 0.5 dB
   steps, candidate search on the three Costas arrays (same neighbour score as ft8_sync_score), max-log
@@ -332,7 +332,7 @@ class Js8SlotDecoder:
         if backend == "auto":
             backend = available_backends()[0]
         if backend == "js8" and not os.access(JS8REF, os.X_OK):
-            raise RuntimeError("js8ref not built (install-js8.sh)")
+            raise RuntimeError("js8ref not built (./install.sh js8)")
         if backend not in ("js8", "own"):
             raise ValueError(f"unknown JS8 decoder backend {backend!r}")
         self.backend = backend

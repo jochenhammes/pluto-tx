@@ -8,7 +8,7 @@ from pluto_tx.flowgraph import PlutoTxFlowgraph
 JTTY = PlutoTxFlowgraph.MODE_JTTY
 
 
-@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 class JttyGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

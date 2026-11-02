@@ -2073,7 +2073,7 @@
         {/if}
       </div>
       {#if !features.js8?.jsc && js8Tx.submode !== "normal" && ["allcall", "directed", "free"].includes(js8Tx.kind)}
-        <div class="dim">Freitext in Fast/Turbo/Slow braucht das JSC-Wörterbuch (install-js8.sh) — sonst Normal wählen.</div>
+        <div class="dim">Freitext in Fast/Turbo/Slow braucht das JSC-Wörterbuch (./install.sh js8) — sonst Normal wählen.</div>
       {/if}
       {#if !clockSynced}<div class="mic-error">Server-Uhr nicht per NTP synchronisiert — JS8-Zeitlage unsicher.</div>{/if}
     {/if}

@@ -496,7 +496,7 @@ JS8_BAND_TRANS_HZ = FT8_BAND_TRANS_HZ
 # A period [t, t + period) is decoded at t + period + this (all of it is in the ring buffer by then).
 JS8_DECODE_LAG_S = 0.3
 JS8_RX_LATENCY_S = FT8_RX_LATENCY_S
-# "auto" = tools/js8ref (JS8Call's own decoder, install-js8.sh) if built, else the numpy decoder; or
+# "auto" = tools/js8ref (JS8Call's own decoder, ./install.sh js8) if built, else the numpy decoder; or
 # force "js8" / "own".
 JS8_DECODER_BACKEND = "auto"
 # Speeds decoded by default (Varicode submode ids: 0 Normal, 1 Fast, 2 Turbo, 4 Slow)

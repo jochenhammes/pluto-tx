@@ -1,4 +1,4 @@
-"""LoRa CSS PHY TX encoder, wrapping gr-lora_sdr (install-lora.sh, optional
+"""LoRa CSS PHY TX encoder, wrapping gr-lora_sdr (./install.sh lora, optional
 GPL-3.0 dependency -- see /home/hammesj/.claude/plans/swirling-waddling-noodle.md
 for the full LoRa Mesh plan this is Phase 1 of). Gated by LORA_AVAILABLE,
 duplicated per-file the same way M17_AVAILABLE/RADE_AVAILABLE already are
@@ -292,7 +292,7 @@ class LoraTxEncoder(gr.hier_block2):
     def __init__(self, sf, bw, cr, has_crc=True, impl_head=False, ldro=2,
                  preamb_len=config.MESHTASTIC_PREAMBLE_LEN,
                  sync_word=None, samp_rate_mult=4):
-        assert LORA_AVAILABLE, "gr-lora_sdr not installed -- see install-lora.sh"
+        assert LORA_AVAILABLE, "gr-lora_sdr not installed -- see ./install.sh lora"
         gr.hier_block2.__init__(
             self, "lora_tx_encoder",
             gr.io_signature(0, 0, 0),

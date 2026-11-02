@@ -18,7 +18,7 @@ REFERENCE = {  # text -> (frames, sha256 of the int16 audio at 12 kHz, lowest to
 SAMPLE = os.path.join(os.path.dirname(__file__), "data", "jtty", "260807_134110.wav")
 
 
-@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+@unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 class CodecTests(unittest.TestCase):
     def test_audio_matches_the_pinned_codec(self):
         for text, (frames, digest) in REFERENCE.items():
@@ -79,9 +79,9 @@ class CodecTests(unittest.TestCase):
 class MissingCodecTests(unittest.TestCase):
     def test_says_how_to_get_it(self):
         with mock.patch.object(jtty_codec, "codec_program", return_value=None):
-            with self.assertRaisesRegex(ValueError, "install-jtty.sh"):
+            with self.assertRaisesRegex(ValueError, "./install.sh jtty"):
                 jtty_codec.render("TEST")
-            with self.assertRaisesRegex(RuntimeError, "install-jtty.sh"):
+            with self.assertRaisesRegex(RuntimeError, "./install.sh jtty"):
                 jtty_codec.JttyStream(lambda e: None)
 
 

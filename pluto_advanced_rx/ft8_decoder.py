@@ -7,7 +7,7 @@ the CLI and offline tools alike. Two backends:
   apt package). Measured on ft8_lib's 66 reference recordings and on live 20 m audio from a KiwiSDR,
   it finds ~1.5x as many messages as ft8_lib (coherent multi-symbol demodulation, OSD, a-priori
   decoding, signal subtraction), in ~1-2 s per busy slot. Used whenever it is installed.
-- "ft8lib": kgoba/ft8_lib through ft8_ctypes (built by install-ft8.sh). Always available once that
+- "ft8lib": kgoba/ft8_lib through ft8_ctypes (built by ./install.sh ft8). Always available once that
   is installed; decodes ~64 % of what jt9 finds at SNR >= -15 dB. ft8_lib's own demo leaves out a
   persistent callsign hash table, duplicate suppression and an SNR estimate, which this adds.
 """
@@ -150,12 +150,12 @@ class Ft8SlotDecoder:
         if backend == "auto":
             backends = available_backends()
             if not backends:
-                raise RuntimeError("no FT8 decoder: install WSJT-X (jt9) or run install-ft8.sh")
+                raise RuntimeError("no FT8 decoder: install WSJT-X (jt9) or run ./install.sh ft8")
             backend = backends[0]
         if backend == "jt9" and not JT9:
             raise RuntimeError("jt9 (WSJT-X) not found")
         if backend == "ft8lib" and not fc.FT8_AVAILABLE:
-            raise RuntimeError("ft8_lib not available (see install-ft8.sh)")
+            raise RuntimeError("ft8_lib not available (see ./install.sh ft8)")
         self.backend = backend
         self.f_min, self.f_max = f_min, f_max
         self.depth = depth

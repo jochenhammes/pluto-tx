@@ -121,7 +121,7 @@ RADE_SRC="$(checkout rade_c "$RADE_C_REPO" "$RADE_C_COMMIT" | tail -1)"
 # the ~100 MB neural model. Both are kept in the cache: the Opus zip is
 # handed to cmake as a file:// URL, and a wget wrapper serves the model from
 # the cache (and fills it on first use). Opus's own download script checks
-# the model's SHA-256. Timeouts as in install-rade.sh -- no hanging build.
+# the model's SHA-256. Timeouts as in ./install.sh rade -- no hanging build.
 OPUS_URL_ORIG="$(sed -n 's/^set(OPUS_URL \(.*\))$/\1/p' "$RADE_SRC/cmake/BuildOpus.cmake" | head -1)"
 DL="$CACHE/downloads"
 mkdir -p "$DL"
@@ -171,7 +171,7 @@ log "ft8_lib $FT8_LIB_COMMIT"
 FT8_SRC="$(checkout ft8_lib "$FT8_LIB_REPO" "$FT8_LIB_COMMIT" | tail -1)"
 (
     cd "$FT8_SRC"
-    # as install-ft8.sh: quieter monitor log, kiss_fft objects linked in
+    # as ./install.sh ft8: quieter monitor log, kiss_fft objects linked in
     sed -i 's/^#define LOG_LEVEL LOG_INFO$/#define LOG_LEVEL LOG_WARN/' common/monitor.c
     make CFLAGS="-O3 -fPIC -DHAVE_STPCPY -I." libft8.a
     mkdir -p .build/fft
@@ -190,7 +190,7 @@ JS8_SRC="$(checkout js8call "$JS8_REPO" "$JS8_COMMIT" | tail -1)"
 TABLES="$WORK/js8_tables.py"
 python3 "$REPO/tools/js8_extract_tables.py" --src "$JS8_SRC" --out "$TABLES" --jsc-out "$SHARE/js8/jsc.json"
 if ! cmp -s "$TABLES" "$REPO/pluto_tx/js8_tables.py"; then
-    echo "pluto_tx/js8_tables.py does not match JS8Call $JS8_TAG -- regenerate it (see install-js8.sh)" >&2
+    echo "pluto_tx/js8_tables.py does not match JS8Call $JS8_TAG -- regenerate it (see ./install.sh js8)" >&2
     exit 1
 fi
 rm -rf "$WORK/js8ref-build"

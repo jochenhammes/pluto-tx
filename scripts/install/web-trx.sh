@@ -1,53 +1,28 @@
 #!/usr/bin/env bash
-# Optional, separate installer for Web-TRX (web-trx/), the browser UI for
-# pluto-tx/pluto-advanced-rx. Kept apart from install.sh on purpose, like
-# install-m17.sh & co: install.sh stays pure apt, and nothing here touches
-# what install.sh set up (packages, udev, the pluto-* launchers).
+# Web-TRX, the browser interface. Run through ./install.sh. Does not touch the packages, udev or the pluto-* launchers.
 #
-# What it does:
-#   - checks the prerequisites (GNU Radio + libiio from install.sh, Python
-#     >= 3.11, python3-venv, openssl, Node.js >= 18 for the frontend build)
-#   - creates web-trx/backend/.venv WITH --system-site-packages (GNU Radio
-#     and libiio come from the system packages, pip cannot install them) and
-#     installs the backend into it
+#   - checks the prerequisites: GNU Radio and libiio from the base, Python >= 3.11, python3-venv, openssl, Node.js >= 18
+#   - creates web-trx/backend/.venv WITH --system-site-packages (GNU Radio and libiio come from the system packages, pip
+#     cannot install them) and installs the backend into it
 #   - builds the frontend (web-trx/frontend/dist)
-#   - self-test: GNU Radio, numpy, libiio and the backend import together
-#     in that venv, and numpy is the system's one (a second numpy in the
-#     venv would not match GNU Radio's compiled modules)
+#   - self-test: GNU Radio, numpy, libiio and the backend import together in that venv, and numpy is the system's (a second
+#     numpy in the venv would not match GNU Radio's compiled modules)
 #   - writes the launcher ~/.local/bin/web-trx
 #
-# It never creates web-trx/web-trx.env (start.sh generates a password on the
-# first start) and never copies or moves an existing venv.
+# It never creates web-trx/web-trx.env (start.sh generates a password on the first start) and never copies or moves an
+# existing venv. A running Web-TRX keeps running with what it has loaded: `web-trx restart` afterwards.
 #
-# Usage:
-#   ./install.sh                  # first, if you haven't already
-#   ./install-web-trx.sh [--constraints FILE] [--reuse-dist DIR]
-#
-#   --constraints FILE   pip constraints, e.g. a `pip freeze` of an older
-#                        Web-TRX venv, to get exactly the versions that ran
-#                        before (lines for web-trx itself and editable or
-#                        direct-URL installs are dropped automatically)
-#   --reuse-dist DIR     take DIR/frontend/dist from an older Web-TRX checkout
-#                        instead of building (no Node.js needed) -- only if
-#                        that checkout's frontend sources are identical
-#   --sim-only           machine without GNU Radio (development): skip the
-#                        GNU Radio/libiio checks; only WEB_TRX_BACKEND=sim works
-#
-# Safe to re-run.
+# Options after --:
+#   --constraints FILE   pip constraints, e.g. a `pip freeze` of an older Web-TRX venv, to get exactly the versions that ran
+#                        before (lines for web-trx itself and editable or direct-URL installs are dropped automatically)
+#   --reuse-dist DIR     take DIR/frontend/dist from an older Web-TRX checkout instead of building (no Node.js needed), only
+#                        if that checkout's frontend sources are identical
+#   --sim-only           machine without GNU Radio (development): skip the GNU Radio/libiio checks; only WEB_TRX_BACKEND=sim
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+refuse_root
 
-if [ "$(id -u)" = "0" ]; then
-    echo "FEHLER: Dieses Skript nicht mit sudo oder als root ausfuehren." >&2
-    echo "Richtig: ./install-web-trx.sh   (das Skript ruft sudo intern fuer apt-get auf)" >&2
-    exit 1
-fi
-if [ -n "${SUDO_USER:-}" ]; then
-    HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-    export HOME
-    echo "HINWEIS: HOME auf $HOME korrigiert (SUDO_USER=$SUDO_USER)." >&2
-fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$REPO_DIR"
 WEB_TRX_DIR="$SCRIPT_DIR/web-trx"
 VENV="$WEB_TRX_DIR/backend/.venv"
 CONSTRAINTS=""
@@ -59,14 +34,9 @@ while [ $# -gt 0 ]; do
         --constraints) CONSTRAINTS="${2:?--constraints needs a file}"; shift 2 ;;
         --reuse-dist) REUSE_DIST="${2:?--reuse-dist needs a directory}"; shift 2 ;;
         --sim-only) SIM_ONLY=1; shift ;;
-        -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
         *) echo "Unbekannte Option: $1 (siehe --help)" >&2; exit 64 ;;
     esac
 done
-
-echo "== Web-TRX installer =="
-echo "Repo directory: $SCRIPT_DIR"
-echo
 
 if [ ! -f "$WEB_TRX_DIR/backend/pyproject.toml" ] || [ ! -f "$WEB_TRX_DIR/frontend/package-lock.json" ]; then
     echo "FEHLER: $WEB_TRX_DIR ist unvollstaendig (backend/pyproject.toml oder frontend/package-lock.json fehlt)." >&2
@@ -85,20 +55,9 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)';
     exit 1
 fi
 
-APT_MISSING=()
-python3 -c 'import ensurepip' 2>/dev/null || APT_MISSING+=(python3-venv)
-command -v openssl >/dev/null 2>&1 || APT_MISSING+=(openssl)
-command -v flock >/dev/null 2>&1 || APT_MISSING+=(util-linux)
-if [ ${#APT_MISSING[@]} -gt 0 ]; then
-    if ! command -v apt-get >/dev/null 2>&1; then
-        echo "FEHLER: bitte installieren: ${APT_MISSING[*]}" >&2
-        exit 1
-    fi
-    echo "Installing: ${APT_MISSING[*]} (you may be asked for your sudo password)"
-    export NEEDRESTART_MODE=a
-    sudo apt-get update
-    sudo apt-get install -y "${APT_MISSING[@]}"
-fi
+python3 -c 'import ensurepip' 2>/dev/null || apt_need python3-venv
+command -v openssl >/dev/null 2>&1 || apt_need openssl
+command -v flock >/dev/null 2>&1 || apt_need util-linux
 
 FRONTEND_SRC=(src index.html package.json package-lock.json svelte.config.js tsconfig.json vite.config.ts)
 if [ -n "$REUSE_DIST" ]; then
@@ -121,15 +80,10 @@ else
         NODE_PROBLEM=""
     fi
     if [ -n "$NODE_PROBLEM" ]; then
-        cat >&2 <<EOF
-FEHLER: $NODE_PROBLEM -- der Frontend-Build braucht Node.js >= 18.
-Dieses Skript installiert Node.js bewusst nicht (das apt-Paket 'nodejs' ist
-auf vielen Distributionen zu alt). Eine aktuelle LTS-Version z. B. mit nvm
-installieren (https://github.com/nvm-sh/nvm), dann erneut ausfuehren:
-    nvm install --lts
-Oder ein bereits gebautes Frontend uebernehmen: --reuse-dist <alter Web-TRX-Checkout>
-EOF
-        exit 1
+        # The apt package nodejs is too old on many distributions, so it is not installed from here.
+        echo "$NODE_PROBLEM: Web-TRX wird uebersprungen."
+        notice "Web-TRX uebersprungen: $NODE_PROBLEM. Der Frontend-Build braucht Node.js 18 oder neuer, z. B. mit nvm (https://github.com/nvm-sh/nvm): nvm install --lts, danach ./install.sh web-trx. Oder ein gebautes Frontend uebernehmen: ./install.sh web-trx -- --reuse-dist <alter Web-TRX-Checkout>"
+        exit "$EXIT_SKIPPED"
     fi
 fi
 
@@ -141,7 +95,7 @@ FEHLER: $VENV existiert, sieht aber die Systempakete (GNU Radio, libiio) nicht
 (kein --system-site-packages). Dieses Skript veraendert ein vorhandenes venv
 nicht. Beiseitelegen und neu ausfuehren:
     mv "$VENV" "\$HOME/web-trx-venv.alt"
-    ./install-web-trx.sh
+    ./install.sh web-trx
 EOF
         exit 1
     fi
@@ -222,7 +176,7 @@ EOF
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/web-trx" <<EOF
 #!/usr/bin/env bash
-# Written by install-web-trx.sh -- Web-TRX in $SCRIPT_DIR/web-trx
+# Written by ./install.sh web-trx -- Web-TRX in $SCRIPT_DIR/web-trx
 DIR="$WEB_TRX_DIR"
 cmd="\${1:-status}"
 [ \$# -gt 0 ] && shift
@@ -246,17 +200,3 @@ esac
 EOF
 chmod +x "$HOME/.local/bin/web-trx"
 echo "Created $HOME/.local/bin/web-trx"
-
-case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *)
-        echo
-        echo "NOTE: $HOME/.local/bin is not on your PATH yet (see install.sh)."
-        ;;
-esac
-
-echo
-echo "== Done =="
-echo "Start:   web-trx start      (or the Web-TRX row in pluto-tx / pluto-advanced-rx)"
-echo "Status:  web-trx status"
-echo "Config:  $WEB_TRX_DIR/web-trx.env (optional, see web-trx/README.md)"

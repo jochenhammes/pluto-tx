@@ -3,7 +3,7 @@ PlutoTxFlowgraph (fake device) -> captured IQ -> the real AdvancedRxFlowgraph
 (fake device replaying it). Needs gr-lora_sdr and the meshtastic package;
 skipped otherwise. Run: python3 -m unittest discover tests  (with
 LD_LIBRARY_PATH including ~/.local/lib/x86_64-linux-gnu if that is where
-install-lora.sh put the module -- the pluto-tx launchers set it)."""
+./install.sh lora put the module -- the pluto-tx launchers set it)."""
 import time
 import unittest
 

@@ -17,7 +17,7 @@ The build takes the working tree (uncommitted changes mark the version with
 
 | File | Role |
 |---|---|
-| `components.lock` | pinned third-party versions, also read by the `install-*.sh` scripts |
+| `components.lock` | pinned third-party versions, also read by `scripts/install/` |
 | `build-components.sh` | builds gr-m17, gr-lora_sdr, rade_c, ft8_lib, js8ref + jsc.json into a staging tree (RPATH `/usr/lib/pluto-tx/lib`) |
 | `build-deb.sh` | frontend once, then per target `dpkg-buildpackage -b` + lintian in `container/Containerfile.build` |
 | `test-install.sh` | install test in a fresh container: apt resolves the dependencies from the distribution alone, smoke tests, Web-TRX, the full unittest suite against the installed code, remove/purge |

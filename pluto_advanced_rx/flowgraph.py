@@ -50,7 +50,7 @@ from . import adsl_demod
 from pluto_tx.lora_airtime import cr_index as _lora_cr_index
 
 # LoRa/Meshtastic is optional, same reasoning as M17/RADE above: gr-lora_sdr
-# is a from-source build (install-lora.sh), and the packet layer needs the
+# is a from-source build (./install.sh lora), and the packet layer needs the
 # `meshtastic` + `cryptography` pip packages.
 try:
     from .lora_rx import LoraRxDecoder, LORA_AVAILABLE as _LORA_CORE_AVAILABLE
@@ -70,17 +70,17 @@ except ImportError:
 MESHCORE_AVAILABLE = _LORA_CORE_AVAILABLE and _meshcore_codec is not None  # needs `cryptography`, not `meshtastic`
 
 # RADE V1 is optional, same reasoning as pluto_tx: from-source build (see
-# install-rade.sh), not something every user has.
+# ./install.sh rade), not something every user has.
 from . import rade_ctypes as _rade_ctypes
 from .rade import RadeDecoder
 RADE_AVAILABLE = _rade_ctypes.RADE_AVAILABLE
 
 # gr-m17 is optional, same reasoning as RADE above and matching
 # pluto_tx/flowgraph.py's own M17_AVAILABLE gate exactly (this app links
-# the same vendored OOT module, see install-m17.sh) -- unlike RADE, no
+# the same vendored OOT module, see ./install.sh m17) -- unlike RADE, no
 # ctypes involved: m17.m17_decoder/m17.codec2_decoder are native
 # gr::block/pybind11 blocks, confirmed already built and importable in
-# this exact toolchain (install-m17.sh's own self-test).
+# this exact toolchain (./install.sh m17's own self-test).
 from .m17_deframer import M17FieldsDeframer
 try:
     from gnuradio import m17 as _m17
@@ -739,7 +739,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.meshtastic_deframer = MeshtasticDeframer(on_meshtastic_frame or (lambda raw: None))
         if active_digimode == "meshtastic":
             if not LORA_AVAILABLE:
-                raise ValueError("Meshtastic needs gr-lora_sdr and the meshtastic package -- see install-lora.sh")
+                raise ValueError("Meshtastic needs gr-lora_sdr and the meshtastic package -- see ./install.sh lora")
             if self.device.is_audio_only():
                 raise ValueError("Meshtastic (LoRa) needs an RF device, not a soundcard")
             self.meshtastic_rx_resampler, self.meshtastic_decoder = self._wire_lora_rx(
@@ -751,7 +751,7 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.meshcore_deframer = MeshtasticDeframer(on_meshcore_packet or (lambda raw: None))
         if active_digimode == "meshcore":
             if not MESHCORE_AVAILABLE:
-                raise ValueError("MeshCore needs gr-lora_sdr and the cryptography package -- see install-lora.sh")
+                raise ValueError("MeshCore needs gr-lora_sdr and the cryptography package -- see ./install.sh lora")
             if self.device.is_audio_only():
                 raise ValueError("MeshCore (LoRa) needs an RF device, not a soundcard")
             self.meshcore_rx_resampler, self.meshcore_decoder = self._wire_lora_rx(

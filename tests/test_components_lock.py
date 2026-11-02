@@ -1,6 +1,5 @@
-"""packaging/components.lock and the install-*.sh scripts pin the same
-versions: the installers read the lock file, and their own values (the
-fallback without it) must not drift apart."""
+"""packaging/components.lock is the one place for the pinned versions: scripts/install/ and the .deb build read it, and no
+script keeps a copy that could drift apart."""
 import re
 import subprocess
 import unittest
@@ -8,13 +7,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / "packaging" / "components.lock"
-INSTALLERS = {
-    "install-m17.sh": ["GR_M17_COMMIT"],
-    "install-lora.sh": ["GR_LORA_SDR_COMMIT"],
-    "install-rade.sh": ["RADE_C_COMMIT"],
-    "install-ft8.sh": ["FT8_LIB_COMMIT"],
-    "install-js8.sh": ["JS8_REPO", "JS8_TAG", "JS8_COMMIT"],
-    "install-jtty.sh": ["WSJT_CODEC_TAG", "WSJT_CODEC_COMMIT", "WSJT_CODEC_SHA256_X86_64", "WSJT_CODEC_SHA256_AARCH64"],
+INSTALL = ROOT / "scripts" / "install"
+READS = {
+    "m17.sh": ["GR_M17_REPO", "GR_M17_COMMIT"],
+    "lora.sh": ["GR_LORA_SDR_REPO", "GR_LORA_SDR_COMMIT"],
+    "rade.sh": ["RADE_C_REPO", "RADE_C_COMMIT"],
+    "ft8.sh": ["FT8_LIB_REPO", "FT8_LIB_COMMIT"],
+    "js8.sh": ["JS8_REPO", "JS8_TAG", "JS8_COMMIT"],
+    "jtty.sh": ["WSJT_CODEC_TAG", "WSJT_CODEC_SHA256_X86_64", "WSJT_CODEC_SHA256_AARCH64"],
 }
 
 
@@ -27,23 +27,22 @@ def lock_values():
     return out
 
 
-@unittest.skipUnless(LOCK.exists() and (ROOT / "install-m17.sh").exists(), "not a full checkout")
+@unittest.skipUnless(LOCK.exists() and INSTALL.exists(), "not a full checkout")
 class ComponentsLockTests(unittest.TestCase):
-    def test_installer_fallbacks_match_the_lock(self):
+    def test_install_scripts_read_the_lock(self):
         lock = lock_values()
-        for name, keys in INSTALLERS.items():
-            text = (ROOT / name).read_text()
+        for name, keys in READS.items():
+            text = (INSTALL / name).read_text()
             for key in keys:
-                m = re.search(rf'^{key}="([^"]+)"$', text, re.M)
-                self.assertIsNotNone(m, f"{name}: no {key}=")
-                self.assertEqual(m.group(1), lock[key], f"{name}: {key} differs from components.lock")
+                self.assertIn(key, lock)
+                self.assertIn(f"lock_get {key}", text, f"{name} does not read {key} from the lock")
 
-    def test_installers_read_the_lock(self):
-        for name, keys in INSTALLERS.items():
-            text = (ROOT / name).read_text()
-            self.assertIn("packaging/components.lock", text, name)
-            for key in keys:
-                self.assertIn(f"s/^{key}=//p", text, f"{name} does not read {key} from the lock")
+    def test_no_script_keeps_a_copy_of_a_pinned_value(self):
+        pinned = [v for k, v in lock_values().items() if k.endswith(("_COMMIT", "_SHA256_X86_64", "_SHA256_AARCH64"))]
+        for path in [ROOT / "install.sh", *INSTALL.iterdir()]:
+            text = path.read_text()
+            for value in pinned:
+                self.assertNotIn(value, text, path.name)
 
     def test_lock_is_valid_shell(self):
         out = subprocess.run(["bash", "-c", f'set -eu; . "{LOCK}"; echo "$GR_M17_COMMIT $JS8_TAG"'],

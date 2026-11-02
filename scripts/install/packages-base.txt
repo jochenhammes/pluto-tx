@@ -1,0 +1,33 @@
+# What ./install.sh installs for every feature that needs no build. One package per line.
+# A leading ? means: only if the distribution has it; a note otherwise, no failure.
+# tests/test_installer.py compares this with Depends in packaging/debian/control.
+
+# pulls in gr-iio (libgnuradio-iio) and python3-pyqt5
+gnuradio
+# raw libiio bindings ("import iio"): TX safety layer and scans; gnuradio does not pull them in
+python3-libiio
+# iio_info, iio_attr, for troubleshooting
+libiio-utils
+# resolves *.local names like plutoplus.local; libiio only brings the client side
+avahi-daemon
+# pluto-advanced-rx's waterfall; only a Recommends of gnuradio
+python3-pyqtgraph
+# HackRF and RTL-SDR: gr-soapy's drivers, tools, and the device scan's bindings
+soapysdr-module-hackrf
+hackrf
+soapysdr-module-rtlsdr
+rtl-sdr
+python3-soapysdr
+# Waterfall Writer: drawing the text, and its preferred font (DejaVu Sans Mono is a package of its own)
+python3-pil
+fonts-dejavu-mono
+# rigctld, CAT for the Xiegu X6200
+libhamlib-utils
+# pyserial: AIOC and the ESP32-S3
+python3-serial
+# MeshCore, and Meshtastic's packet layers
+python3-cryptography
+?python3-meshtastic
+# git for the source builds and updates, curl for the JTTY download
+git
+curl

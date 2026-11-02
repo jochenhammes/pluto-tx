@@ -1220,7 +1220,7 @@ async def test_a_data_mode_still_sends_after_its_audio_chain_ended(tmp_path, mon
     await b.disconnect("tx")
 
 
-needs_jtty = pytest.mark.skipif(not radio_backend.jtty_codec.available(), reason="wsjt-codec not installed (install-jtty.sh)")
+needs_jtty = pytest.mark.skipif(not radio_backend.jtty_codec.available(), reason="wsjt-codec not installed (./install.sh jtty)")
 
 
 async def _jtty_tx(tmp_path, monkeypatch, freq_hz=432_150_000.0, **settings):

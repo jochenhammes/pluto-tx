@@ -15,7 +15,7 @@ CHECKSUMS = {
 }
 
 
-@unittest.skipUnless(ft8_ctypes.FT8_AVAILABLE, "ft8_lib not built (install-ft8.sh)")
+@unittest.skipUnless(ft8_ctypes.FT8_AVAILABLE, "ft8_lib not built (./install.sh ft8)")
 class Ft8UnchangedTests(unittest.TestCase):
     def test_encode_iq_checksums(self):
         for msg, want in CHECKSUMS.items():

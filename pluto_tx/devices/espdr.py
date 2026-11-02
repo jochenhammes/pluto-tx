@@ -7,7 +7,7 @@ work as they are, and everything with amplitude modulation (SSB, PSK, FT8, ...) 
 
 The host side is the `espdr` package, shipped in this repository as ./espdr (a copy of github.com/jochenhammes/esp32-sdr-trx, Zero-Clause BSD
 licence, synchronised by tools/sync-espdr.sh; do not edit it here). Needs numpy and pyserial, and esptool 5 or newer to load the firmware into
-the board's RAM (`pipx install esptool`; see install-espdr.sh).
+the board's RAM (`pipx install esptool`; see ./install.sh espdr).
 
 The chip radiates a carrier whenever a session runs, and a session is what pre_key()/post_unkey() open and close: "off" is the END of the
 session, not a power setting. Setting up a session takes a moment (PLL tuning in the chip), so pre_key() blocks briefly like the Pluto's. The

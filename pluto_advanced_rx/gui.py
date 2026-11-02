@@ -321,13 +321,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not ft8_decoder.available_backends():
             ft8_item = self.digimode_combo.model().item(self.digimode_combo.findData("ft8"))
             ft8_item.setEnabled(False)
-            ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run install-ft8.sh")
+            ft8_item.setToolTip("No FT8 decoder: install WSJT-X (jt9, apt install wsjtx) or run ./install.sh ft8")
         self.digimode_combo.addItem("JS8 (JS8Call)", "js8")
         self.digimode_combo.addItem("JTTY (WSJT-X)", "jtty")
         if not jtty_codec.available():
             jtty_item = self.digimode_combo.model().item(self.digimode_combo.findData("jtty"))
             jtty_item.setEnabled(False)
-            jtty_item.setToolTip("wsjt-codec is not installed -- run install-jtty.sh")
+            jtty_item.setToolTip("wsjt-codec is not installed -- run ./install.sh jtty")
         self.digimode_combo.addItem("APRS (144.8 MHz)", "aprs")
         self.digimode_combo.addItem("ADS-L (Aircraft, 868 MHz)", "adsl")
         self.digimode_combo.addItem("ADS-B (Aircraft, 1090 MHz)", "adsb")
@@ -336,11 +336,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not MESHCORE_AVAILABLE:
             mc_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshcore"))
             mc_item.setEnabled(False)
-            mc_item.setToolTip("gr-lora_sdr / the cryptography package is not installed -- see install-lora.sh / README")
+            mc_item.setToolTip("gr-lora_sdr / the cryptography package is not installed -- see ./install.sh lora / README")
         if not LORA_AVAILABLE:
             lora_item = self.digimode_combo.model().item(self.digimode_combo.findData("meshtastic"))
             lora_item.setEnabled(False)
-            lora_item.setToolTip("gr-lora_sdr / the meshtastic package is not installed -- see install-lora.sh / README")
+            lora_item.setToolTip("gr-lora_sdr / the meshtastic package is not installed -- see ./install.sh lora / README")
         self.digimode_combo.currentIndexChanged.connect(self._on_digimode_changed)
         digimode_row.addWidget(self.digimode_combo)
         digimode_row.addStretch(1)
@@ -1034,24 +1034,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demod_combo.addItem("RADE", AdvancedRxFlowgraph.MODE_RADE)
         if not RADE_AVAILABLE:
             # rade_c is an optional, from-source dependency (see
-            # install-rade.sh) -- grey out rather than hide, same as
+            # ./install.sh rade) -- grey out rather than hide, same as
             # pluto_tx's M17/FreeDV/RADE mode entries.
             rade_item_idx = self.demod_combo.findData(AdvancedRxFlowgraph.MODE_RADE)
             item = self.demod_combo.model().item(rade_item_idx)
             item.setEnabled(False)
             self.demod_combo.setItemData(
-                rade_item_idx, "librade.so/lpcnet_demo not found -- see install-rade.sh / README",
+                rade_item_idx, "librade.so/lpcnet_demo not found -- see ./install.sh rade / README",
                 QtCore.Qt.ToolTipRole,
             )
         self.demod_combo.addItem("M17", AdvancedRxFlowgraph.MODE_M17)
         if not M17_AVAILABLE:
             # gr-m17 is an optional, from-source-built OOT module (see
-            # install-m17.sh) -- same grey-out-with-tooltip idiom as RADE.
+            # ./install.sh m17) -- same grey-out-with-tooltip idiom as RADE.
             m17_item_idx = self.demod_combo.findData(AdvancedRxFlowgraph.MODE_M17)
             item = self.demod_combo.model().item(m17_item_idx)
             item.setEnabled(False)
             self.demod_combo.setItemData(
-                m17_item_idx, "gnuradio.m17 not found -- see install-m17.sh / README",
+                m17_item_idx, "gnuradio.m17 not found -- see ./install.sh m17 / README",
                 QtCore.Qt.ToolTipRole,
             )
         self.demod_combo.addItem("Baseband", AdvancedRxFlowgraph.MODE_BASEBAND)

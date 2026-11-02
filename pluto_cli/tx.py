@@ -237,7 +237,7 @@ def run_lsb(args):
 
 def add_m17_subparser(subparsers):
     p = subparsers.add_parser(
-        "m17", help="M17 digital voice (requires gr-m17, see install-m17.sh)", description=__doc__,
+        "m17", help="M17 digital voice (requires gr-m17, see ./install.sh m17)", description=__doc__,
     )
     add_common_args(p)
     p.add_argument("--src-callsign", default="", help="Source callsign (max 9 chars)")
@@ -249,7 +249,7 @@ def add_m17_subparser(subparsers):
 def run_m17(args):
     emitter = runtime.Emitter(args.json)
     if not M17_AVAILABLE:
-        emitter.error("M17 is not available -- gr-m17 is not installed, see install-m17.sh")
+        emitter.error("M17 is not available -- gr-m17 is not installed, see ./install.sh m17")
         return 1
     return _run(
         args, PlutoTxFlowgraph.MODE_M17, emitter,
@@ -283,7 +283,7 @@ def run_freedv(args):
 
 def add_rade_subparser(subparsers):
     p = subparsers.add_parser(
-        "rade", help="RADE (radio autoencoder) digital voice (requires librade.so, see install-rade.sh)",
+        "rade", help="RADE (radio autoencoder) digital voice (requires librade.so, see ./install.sh rade)",
         description=__doc__,
     )
     add_common_args(p)
@@ -297,7 +297,7 @@ def add_rade_subparser(subparsers):
 def run_rade(args):
     emitter = runtime.Emitter(args.json)
     if not RADE_AVAILABLE:
-        emitter.error("RADE is not available -- librade.so/lpcnet_demo not found, see install-rade.sh")
+        emitter.error("RADE is not available -- librade.so/lpcnet_demo not found, see ./install.sh rade")
         return 1
 
     def post_construct(tb):
@@ -463,7 +463,7 @@ def run_aprs(args):
 
 def add_jtty_subparser(subparsers):
     p = subparsers.add_parser(
-        "jtty", help="One JTTY message (WSJT-X's keyboard mode, USB, 127 Hz wide, no time slots; needs wsjt-codec, see install-jtty.sh)",
+        "jtty", help="One JTTY message (WSJT-X's keyboard mode, USB, 127 Hz wide, no time slots; needs wsjt-codec, see ./install.sh jtty)",
         description=__doc__,
     )
     add_common_args(p)
@@ -499,7 +499,7 @@ def run_jtty(args):
 def add_ft8_subparser(subparsers):
     p = subparsers.add_parser(
         "ft8", help="FT8 message in the next 15 s UTC slot (USB; manual sequencing -- one message per call; "
-                    "needs ft8_lib, see install-ft8.sh)",
+                    "needs ft8_lib, see ./install.sh ft8)",
         description=__doc__,
     )
     add_common_args(p)
@@ -527,7 +527,7 @@ def add_ft8_subparser(subparsers):
 def run_ft8(args):
     emitter = runtime.Emitter(args.json)
     if not FT8_AVAILABLE:
-        emitter.error("FT8 not available: ft8_lib is not built (run install-ft8.sh)")
+        emitter.error("FT8 not available: ft8_lib is not built (run ./install.sh ft8)")
         return 1
     text = args.message.strip().upper() or tx_ft8.compose(args.kind, args.call, args.locator, args.dx, args.report)
     if not text:
@@ -616,7 +616,7 @@ def run_js8(args):
 def add_meshtastic_subparser(subparsers):
     p = subparsers.add_parser(
         "meshtastic",
-        help="Meshtastic (LoRa) text broadcast -- one frame (requires gr-lora_sdr, see install-lora.sh)",
+        help="Meshtastic (LoRa) text broadcast -- one frame (requires gr-lora_sdr, see ./install.sh lora)",
         description=__doc__,
     )
     add_common_args(p)
@@ -645,7 +645,7 @@ def add_meshtastic_subparser(subparsers):
 def add_meshcore_subparser(subparsers):
     p = subparsers.add_parser(
         "meshcore",
-        help="MeshCore (LoRa) advert or group text -- one frame (requires gr-lora_sdr + cryptography, see install-lora.sh)",
+        help="MeshCore (LoRa) advert or group text -- one frame (requires gr-lora_sdr + cryptography, see ./install.sh lora)",
         description=__doc__,
     )
     add_common_args(p)
@@ -677,7 +677,7 @@ def run_meshcore(args):
     emitter = runtime.Emitter(args.json)
     if not MESHCORE_AVAILABLE:
         emitter.error("MeshCore is not available -- gr-lora_sdr / the cryptography package is not installed, "
-                      "see install-lora.sh")
+                      "see ./install.sh lora")
         return 1
     if args.device == "soundcard":
         emitter.error("MeshCore needs an RF device (pluto or hackrf), not the soundcard")
@@ -710,7 +710,7 @@ def run_meshtastic(args):
     emitter = runtime.Emitter(args.json)
     if not LORA_AVAILABLE:
         emitter.error("Meshtastic is not available -- gr-lora_sdr / the meshtastic package is not installed, "
-                      "see install-lora.sh")
+                      "see ./install.sh lora")
         return 1
     try:
         node_id = int(args.node_id, 16) if args.node_id else None

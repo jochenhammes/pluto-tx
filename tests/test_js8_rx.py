@@ -108,7 +108,7 @@ class OwnDecoderTests(unittest.TestCase):
         self.assertTrue(np.array_equal(plain, cw))
 
 
-@unittest.skipUnless("js8" in D.available_backends(), "tools/js8ref not built (install-js8.sh)")
+@unittest.skipUnless("js8" in D.available_backends(), "tools/js8ref not built (./install.sh js8)")
 class Js8RefBackendTests(unittest.TestCase):
     def test_slot_decoder_js8(self):
         dec = D.Js8SlotDecoder("js8")

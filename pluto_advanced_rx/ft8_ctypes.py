@@ -3,7 +3,7 @@ open-source FT8/FT4 encoder+decoder -- reused rather than reimplementing
 FT8's LDPC(174,91) forward-error-correction decoder and intricate
 message-packing protocol from scratch, an enormous, bug-prone undertaking
 that took WSJT-X's own authors years). Built from source by
-install-ft8.sh. Mirrors rade_ctypes.py's overall shape (lazy dlopen, an
+./install.sh ft8. Mirrors rade_ctypes.py's overall shape (lazy dlopen, an
 FT8_AVAILABLE flag, `.restype`/`.argtypes` bound explicitly per function,
 a real runtime smoke test before declaring available -- not just symbol
 presence).
@@ -17,7 +17,7 @@ write their fields directly, rather than wrapping every access in a
 function call.
 
 Struct field layouts below are transcribed directly from the real, locally
-cloned ft8_lib headers at the exact commit install-ft8.sh pins (verified,
+cloned ft8_lib headers at the exact commit ./install.sh ft8 pins (verified,
 not guessed -- see ft8/message.h, ft8/decode.h, common/monitor.h,
 fft/kiss_fftr.h in that checkout). If ft8_lib's own struct layout ever
 changes upstream, this file's own field order must be updated to match --
@@ -87,7 +87,7 @@ def _noop_save_hash(callsign, n22):
 
 
 # --- Struct mirrors (ft8/decode.h) -- WF_ELEM_T is uint8_t in ft8_lib's
-# default build (WATERFALL_USE_PHASE is NOT defined -- install-ft8.sh
+# default build (WATERFALL_USE_PHASE is NOT defined -- ./install.sh ft8
 # builds with plain CFLAGS, no -DWATERFALL_USE_PHASE).
 class FtxWaterfall(ctypes.Structure):
     _fields_ = [
@@ -160,7 +160,7 @@ class Monitor(ctypes.Structure):
 def _load():
     global _lib, FT8_AVAILABLE
 
-    # LD_LIBRARY_PATH (launcher) first, then the in-repo build install-ft8.sh produces, so tests and
+    # LD_LIBRARY_PATH (launcher) first, then the in-repo build ./install.sh ft8 produces, so tests and
     # a plain `python3 -m pluto_tx` find it without a regenerated launcher, then the .deb package.
     lib = None
     for name in paths.library_candidates("libft8wrap.so"):
@@ -251,7 +251,7 @@ def encode_message(text: str):
     ftx_message_encode() itself does the message-type detection, no
     protocol logic reimplemented here at all)."""
     if not FT8_AVAILABLE:
-        raise RuntimeError("FT8 support not available (see install-ft8.sh)")
+        raise RuntimeError("FT8 support not available (see ./install.sh ft8)")
     hash_if = FtxCallsignHashInterface(_LOOKUP_HASH_FN(_noop_lookup_hash), _SAVE_HASH_FN(_noop_save_hash))
     msg = FtxMessage()
     rc = _lib.ftx_message_encode(ctypes.byref(msg), ctypes.byref(hash_if), text.encode("ascii", "replace"))
@@ -269,7 +269,7 @@ class Ft8Monitor:
 
     def __init__(self, sample_rate: int, f_min=200.0, f_max=3000.0, time_osr=2, freq_osr=2):
         if not FT8_AVAILABLE:
-            raise RuntimeError("FT8 support not available (see install-ft8.sh)")
+            raise RuntimeError("FT8 support not available (see ./install.sh ft8)")
         self._m = Monitor()
         cfg = MonitorConfig(f_min, f_max, sample_rate, time_osr, freq_osr, FTX_PROTOCOL_FT8)
         _lib.monitor_init(ctypes.byref(self._m), ctypes.byref(cfg))

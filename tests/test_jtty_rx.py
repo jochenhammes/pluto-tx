@@ -12,7 +12,7 @@ from pluto_tx import jtty_codec
 
 RATE = 2_500_000
 SAMPLE = os.path.join(os.path.dirname(__file__), "data", "jtty", "260807_134110.wav")
-skip_without_codec = unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (install-jtty.sh)")
+skip_without_codec = unittest.skipUnless(jtty_codec.available(), "wsjt-codec not installed (./install.sh jtty)")
 
 
 def feed(block, audio, chunk=4096):

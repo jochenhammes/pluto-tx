@@ -4,8 +4,9 @@
 
 Checks: which pluto-tx/pluto-advanced-rx/pluto-cli/web-trx wins on PATH (old
 launchers of a git installation in ~/.local/bin hide the package's /usr/bin
-ones), the optional components (M17, LoRa, RADE, FT8, JS8, Meshtastic), USB
-access to connected HackRF/RTL-SDR devices, the RTL-SDR DVB-T kernel driver,
+ones), the optional components (M17, LoRa, RADE, FT8, JTTY, JS8, Meshtastic, the
+X6200's tools), USB access to connected HackRF/RTL-SDR devices, the group dialout
+for a connected X6200 or AIOC, the RTL-SDR DVB-T kernel driver,
 the clock (FT8/JS8 need it within about a second) and the Web-TRX server.
 --scan also lists the SDRs SoapySDR and libiio find (takes a few seconds).
 --fix-launchers renames old launchers that hide the package's ones to
@@ -34,6 +35,8 @@ USB_SDRS = {
     ("1fc9", "000c"): "HackRF (DFU mode)", ("0bda", "2838"): "RTL-SDR", ("0bda", "2832"): "RTL-SDR",
     ("0456", "b673"): "PlutoSDR", ("0456", "b674"): "PlutoSDR (DFU mode)",
 }
+
+USB_SERIAL_RADIOS = {("1a86", "55d2"): "Xiegu X6200", ("1209", "7388"): "AIOC"}
 
 
 class Report:
@@ -101,13 +104,13 @@ def check_components(r: Report):
             __import__(f"gnuradio.{mod}")
             r.ok(label)
         except ImportError as e:
-            r.warn(f"{label} not available: {e}", _hint("install-m17.sh" if mod == "m17" else "install-lora.sh"))
+            r.warn(f"{label} not available: {e}", _hint("m17" if mod == "m17" else "lora"))
     from . import ft8_ctypes, rade_ctypes
     lib = next((c for c in paths.library_candidates("libft8wrap.so")[1:]), "via loader path")
     if ft8_ctypes.FT8_AVAILABLE:
         r.ok(f"FT8 (ft8_lib): {lib}")
     else:
-        r.warn("FT8 (ft8_lib) not available", _hint("install-ft8.sh"))
+        r.warn("FT8 (ft8_lib) not available", _hint("ft8"))
     jt9 = shutil.which("jt9")
     if jt9:
         r.ok(f"FT8 decoder jt9 (WSJT-X): {jt9}")
@@ -116,20 +119,17 @@ def check_components(r: Report):
     if rade_ctypes.RADE_AVAILABLE:
         r.ok(f"RADE (rade_c): lpcnet_demo {paths.program('lpcnet_demo')}")
     else:
-        r.warn("RADE (rade_c) not available", _hint("install-rade.sh"))
+        r.warn("RADE (rade_c) not available", _hint("rade"))
     if paths.program("wsjt-codec"):
         r.ok(f"JTTY: wsjt-codec {paths.program('wsjt-codec')}")
     else:
-        r.warn("JTTY not available (wsjt-codec)", _hint("install-jtty.sh"))
-    if paths.program("rigctld"):
-        r.ok(f"Xiegu X6200: rigctld {paths.program('rigctld')}")
-    else:
-        r.warn("Xiegu X6200 not available (rigctld)", "apt install libhamlib-utils")
+        r.warn("JTTY not available (wsjt-codec)", _hint("jtty"))
+    check_x6200_tools(r)
     js8ref, jsc = paths.program("js8ref"), paths.data_file("jsc.json")
     if js8ref and jsc:
         r.ok(f"JS8: js8ref {js8ref}, word lists {jsc}")
     else:
-        r.warn(f"JS8 incomplete (js8ref: {js8ref or 'missing'}, jsc.json: {jsc or 'missing'})", _hint("install-js8.sh"))
+        r.warn(f"JS8 incomplete (js8ref: {js8ref or 'missing'}, jsc.json: {jsc or 'missing'})", _hint("js8"))
     for mod, label in (("meshtastic", "Meshtastic packet layers"), ("cryptography", "cryptography (MeshCore)")):
         try:
             __import__(mod)
@@ -138,15 +138,49 @@ def check_components(r: Report):
             r.warn(f"{label}: Python package '{mod}' missing")
 
 
-def _hint(installer: str) -> str:
+def check_x6200_tools(r: Report):
+    rigctld = paths.program("rigctld")
+    if not rigctld:
+        r.warn("Xiegu X6200 not available (rigctld)", "apt install libhamlib-utils")
+        return
+    rc, models = _run(["rigctl", "-l"]) if shutil.which("rigctl") else (127, "")
+    if rc == 0 and not any(line.split()[:1] == ["3091"] for line in models.splitlines()):
+        r.warn(f"Xiegu X6200: this Hamlib does not know the radio (model 3091), {rigctld}", "it needs Hamlib 4.6 or newer")
+    else:
+        r.ok(f"Xiegu X6200: rigctld {rigctld}")
+    missing = [tool for tool in ("pw-dump", "wpctl") if not shutil.which(tool)]
+    if missing:
+        r.info(f"Xiegu X6200: {', '.join(missing)} not found", "without PipeWire, give its sound card as plughw:... in the connection")
+
+
+def _hint(feature: str) -> str:
     if paths.is_package():
         return "part of the pluto-tx package -- reinstall it: sudo apt install --reinstall pluto-tx"
-    return f"git installation: run ./{installer}"
+    return f"git installation: run ./install.sh {feature}"
+
+
+def _my_groups() -> set[str]:
+    rc, out = _run(["id", "-nG"])
+    return set(out.split()) if rc == 0 else set()
+
+
+def _serial_device_attached(base: Path) -> str | None:
+    for dev in sorted(base.glob("*")) if base.is_dir() else []:
+        try:
+            name = USB_SERIAL_RADIOS.get(((dev / "idVendor").read_text().strip(), (dev / "idProduct").read_text().strip()))
+        except OSError:
+            continue
+        if name:
+            return name
+    return None
 
 
 def check_usb(r: Report):
     base = Path("/sys/bus/usb/devices")
     found = 0
+    serial = _serial_device_attached(base)
+    if serial and not os.access("/dev/ttyACM0", os.R_OK | os.W_OK) and "dialout" not in _my_groups():
+        r.warn(f"{serial} connected, but you are not in the group dialout", "sudo usermod -aG dialout $USER, then log in again")
     for dev in sorted(base.glob("*")) if base.is_dir() else []:
         try:
             vid = (dev / "idVendor").read_text().strip()
