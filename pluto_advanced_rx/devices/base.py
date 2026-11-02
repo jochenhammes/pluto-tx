@@ -173,6 +173,10 @@ class RxDevice(abc.ABC):
         backends with no AGC (e.g. HackRF's RX side)."""
         pass
 
+    def tuned_away_hz(self):
+        """The frequency a transceiver was tuned to on its own front panel, if that differs from the one set here; else None."""
+        return None
+
     @abc.abstractmethod
     def read_hw_state(self) -> dict:
         """Live hardware state for future GUI status readback. Keys are

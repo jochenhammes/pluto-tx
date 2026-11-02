@@ -25,6 +25,7 @@ constructor's signature and behavior are unchanged for existing callers.
 """
 import math
 import sys
+import threading
 
 from gnuradio import gr, blocks, filter, analog, digital
 
@@ -165,6 +166,7 @@ class AdvancedRxFlowgraph(gr.top_block):
 
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
+        self._freq_lock = threading.RLock()  # a poll of the radio must not undo a retune in progress on another thread
 
         self.device = devices.build_device(
             device_type, connection=uri, frequency_hz=self.nominal_freq_hz,
@@ -1018,9 +1020,21 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.jtty_receiver.set_search(rxfreq_hz, self._jtty_effective_tolerance())
 
     def set_frequency(self, freq_hz: float):
-        self.nominal_freq_hz = freq_hz
-        self._retune()
-        self.set_jtty_search()
+        with self._freq_lock:
+            self.nominal_freq_hz = freq_hz
+            self._retune()
+            self.set_jtty_search()
+
+    def follow_device_frequency(self):
+        """-> the new nominal frequency if a transceiver was retuned on its front panel, else None."""
+        with self._freq_lock:
+            tuned = self.device.tuned_away_hz()
+            if tuned is None:
+                return None
+            self.device.frequency_hz = tuned
+            self.nominal_freq_hz = tuned - self.fine_offset_hz
+            self.set_jtty_search()
+            return self.nominal_freq_hz
 
     def set_frequency_correction_ppm(self, ppm: float):
         """Live change of the oscillator correction; retunes the hardware, the
@@ -1032,8 +1046,9 @@ class AdvancedRxFlowgraph(gr.top_block):
         self.device.set_direct_sampling(mode)
 
     def set_fine_offset(self, offset_hz: float):
-        self.fine_offset_hz = offset_hz
-        self._retune()
+        with self._freq_lock:
+            self.fine_offset_hz = offset_hz
+            self._retune()
 
     def set_gain_mode(self, mode: str):
         self.device.set_gain_mode(mode)

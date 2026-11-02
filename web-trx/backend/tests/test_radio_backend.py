@@ -1329,6 +1329,29 @@ async def test_x6200_refuses_a_mode_it_cannot_send(tmp_path, monkeypatch):
 
 
 @needs_jtty
+async def test_x6200_frequency_follows_the_front_panel(tmp_path, monkeypatch):
+    b, events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
+    try:
+        await b.connect("tx", "x6200", connection)
+        await b.tune("tx", 14_092_000.0)
+        await b.select_mode("tx", "ssb", modes.normalize_params("tx", "ssb", {}))
+        await asyncio.sleep(0.4)                  # the power write after building the flowgraph
+        b.tx.tb.device._cat_busy_until = 0.0      # its measured 1.6 s of silence on CAT, which the fake doesn't have
+        await b._follow_rig_frequency()
+        assert not [f for n, f in events if n == "tuned"]
+        rig.log.clear()
+        rig.frequency = 14_100_250.0
+        await b._follow_rig_frequency()
+        assert b.tx.freq_hz == 14_100_250.0
+        assert [f for n, f in events if n == "tuned"] == [{"direction": "tx", "freq_hz": 14_100_250.0}]
+        assert rig.commands("F") == []   # taken over, not written back
+        await b._follow_rig_frequency()
+        assert len([f for n, f in events if n == "tuned"]) == 1
+    finally:
+        await b.disconnect("tx")
+        rig.close()
+
+
 async def test_x6200_sends_jtty_through_web_trx(tmp_path, monkeypatch):
     b, events, rig, connection = await _x6200_backend(tmp_path, monkeypatch)
     try:

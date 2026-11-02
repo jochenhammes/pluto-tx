@@ -17,6 +17,7 @@ audio rate -> complex resampler up to TX rate, not real-resample-then-Hilbert.
 import math
 import os
 import sys
+import threading
 import time
 import wave
 
@@ -202,6 +203,8 @@ class PlutoTxFlowgraph(gr.top_block):
 
         self.nominal_freq_hz = float(frequency)
         self.fine_offset_hz = 0.0
+        self._freq_lock = threading.RLock()  # a poll of the radio must not undo a retune in progress on another thread
+        self._followed_hz = None
         self.power_ceiling = power_ceiling
         self.target_power = power_ceiling
         self._keyed = False
@@ -2388,17 +2391,30 @@ class PlutoTxFlowgraph(gr.top_block):
         self.limiter_smooth.set_enabled(enabled)
 
     def set_fine_offset(self, offset_hz: float):
-        self.fine_offset_hz = offset_hz
-        self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
+        with self._freq_lock:
+            self.fine_offset_hz = offset_hz
+            self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
 
     def set_frequency(self, freq_hz: float):
-        self.nominal_freq_hz = freq_hz
-        self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
+        with self._freq_lock:
+            self.nominal_freq_hz = freq_hz
+            self.device.set_frequency(self.nominal_freq_hz + self.fine_offset_hz)
+
+    def follow_device_frequency(self):
+        """-> the new nominal frequency if a transceiver was retuned on its front panel since the last call, else None."""
+        with self._freq_lock:
+            followed, self._followed_hz = self._followed_hz, None
+            tuned = None if self._keyed else self.device.tuned_away_hz()
+            if tuned is not None:
+                self.device.frequency_hz = tuned
+                self.nominal_freq_hz = followed = tuned - self.fine_offset_hz
+            return followed
 
     def set_target_power(self, value: float):
         stage = self.device.primary_stage
         self.target_power = max(stage.min_value, min(self.power_ceiling, value))
-        if self._keyed:
+        # A transceiver's power is a setting of its own that the operator can see on it, so it follows at once.
+        if self._keyed or (self.device.is_audio_only() and self.device.has_frequency_control()):
             self.device.set_power(stage.name, self.target_power)
 
     def set_secondary_power(self, stage_name: str, value):
@@ -2474,6 +2490,7 @@ class PlutoTxFlowgraph(gr.top_block):
         way."""
         if self.device.is_audio_only() and self.device.has_frequency_control():
             # A transceiver on CAT: its power and mode are the radio's own, and the audio branches below never touch RF power.
+            self._followed_hz = self.follow_device_frequency()  # pre_key() tunes the radio: not back to where it was
             self.device.set_power(self.device.primary_stage.name, self.target_power)
             self.device.select_mode(self.MODE_NAMES.get(self.mode, ""))
         self._m17_ending = False

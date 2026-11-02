@@ -16,6 +16,9 @@ class FakeRigctld:
         self.stuck_power = False
         self.drop_next = False
         self.silent = False
+        self.stale_reads_after_write = 0   # reads that still give the old value after a write, as seen on the real radio
+        self.stale_power_reads = 0
+        self.old_power = None
         self.log = []                 # (monotonic time, command) of every request
         self.lock = threading.Lock()
         owner = self
@@ -82,10 +85,15 @@ class FakeRigctld:
             return f"set_ptt: {word[1]}\nRPRT 0\n"
         if cmd == "l":
             value = {"RFPOWER": self.rf_power, "SWR": 1.2, "ALC": 0.0, "STRENGTH": -29}[word[1]]
+            if word[1] == "RFPOWER" and self.stale_power_reads > 0:
+                self.stale_power_reads -= 1
+                value = self.old_power
             return f"get_level: {word[1]}\n{value}\nRPRT 0\n"
         if cmd == "L" and word[1] == "RFPOWER":
+            self.old_power = self.rf_power
+            self.stale_power_reads = self.stale_reads_after_write
             if not self.stuck_power:
-                self.rf_power = round(float(word[2]) * 255) / 255
+                self.rf_power = max(3, round(float(word[2]) * 255)) / 255  # the real radio goes no lower than 3/255
             return f"set_level: RFPOWER {word[2]}\nRPRT -5\n"
         return "RPRT -11\n"
 

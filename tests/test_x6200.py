@@ -261,11 +261,80 @@ class DeviceTests(Base):
             dev.pre_key()
         self.assertEqual(self.rig.commands("T"), [])
 
-    def test_power_is_written_only_when_it_differs(self):
+    def wait_for_power(self, value):
+        end = time.monotonic() + 3.0
+        while abs(self.rig.rf_power - value) > 0.005 and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertAlmostEqual(self.rig.rf_power, value, delta=0.005)
+
+    def test_power_follows_without_blocking_and_once_per_drag(self):
         dev = self.make()
+        self.wait_for_power(0.05)
+        self.rig.log.clear()
+        for pct in (6.0, 7.0, 8.0, 9.0):
+            dev.set_power("rfpower", pct)
+        self.assertEqual(self.rig.commands("L"), [])   # nothing on the caller's thread
+        self.wait_for_power(0.09)
+        self.assertEqual(len(self.rig.commands("L")), 1)
+        self.assertEqual(self.rig.commands("T"), [])
+
+    def test_same_power_is_not_written_again(self):
+        dev = self.make()
+        self.wait_for_power(0.05)
         self.rig.log.clear()
         dev.set_power("rfpower", 5.0)
+        time.sleep(0.4)
         self.assertEqual(self.rig.commands("L"), [])
+
+    def test_keying_right_after_a_change_has_the_new_power(self):
+        dev = self.make()
+        dev.set_power("rfpower", 8.0)
+        dev.pre_key()
+        self.assertAlmostEqual(self.rig.rf_power, 0.08, delta=0.005)
+        dev.post_unkey()
+        time.sleep(0.4)
+        self.assertEqual(len(self.rig.commands("L")), 1)
+
+    def test_a_stale_first_read_is_not_a_refusal(self):
+        dev = self.make()
+        self.rig.stale_reads_after_write = 1
+        dev.set_power("rfpower", 8.0)
+        dev.pre_key()
+        self.assertAlmostEqual(self.rig.rf_power, 0.08, delta=0.005)
+        dev.post_unkey()
+
+    def test_status_does_not_wait_out_a_power_write(self):
+        dev = self.make()
+        first = dev.read_hw_state()
+        dev._send_power(5.0)
+        self.rig.log.clear()
+        self.assertEqual(dev.read_hw_state(), first)
+        self.assertEqual(self.rig.log, [])
+
+    def test_no_keying_without_the_guard(self):
+        dev = self.make()
+        dev.close()
+        self.rig.log.clear()
+        with self.assertRaisesRegex(RigError, "guard"):
+            dev.pre_key()
+        self.assertEqual(self.rig.commands("T"), [])
+
+    def test_off_value_leaves_the_radio_alone(self):
+        """The radio goes no lower than 3/255, so asking for 0 % could only fail. Its PTT is what keeps it dark."""
+        dev = self.make()
+        self.wait_for_power(0.05)
+        self.rig.log.clear()
+        dev.set_power("rfpower", dev.primary_stage.off_value)
+        time.sleep(0.4)
+        self.assertEqual(self.rig.commands("L"), [])
+        self.assertAlmostEqual(self.rig.rf_power, 0.05, delta=0.005)
+
+    def test_slider_minimum_is_what_the_radio_reaches(self):
+        dev = self.make()
+        dev.set_power("rfpower", dev.primary_stage.min_value)
+        dev.pre_key()
+        self.assertAlmostEqual(self.rig.rf_power, 3 / 255, delta=0.001)
+        dev.post_unkey()
 
     def test_radio_that_refuses_to_transmit(self):
         dev = self.make()
@@ -297,6 +366,7 @@ class DeviceTests(Base):
         rx = dev.read_hw_state()
         self.assertEqual((rx["frequency_hz"], rx["ptt"], rx["s_meter_db"]), (14_090_000.0, False, -29.0))
         dev.pre_key()
+        dev._cat_busy_until = 0.0
         tx = dev.read_hw_state()
         self.assertEqual((tx["ptt"], tx["swr"]), (True, 1.2))
         dev.post_unkey()
@@ -342,6 +412,47 @@ class FlowgraphTests(Base):
         fg.unkey_ptt()
         self.assertFalse(fg.keyed)
         self.assertFalse(self.rig.ptt)
+
+    def test_follows_the_front_panel_without_writing_back(self):
+        from pluto_tx import flowgraph as txf
+        fg = self.make(txf.PlutoTxFlowgraph.MODE_SSB)
+        self.assertIsNone(fg.follow_device_frequency())
+        self.rig.log.clear()
+        self.rig.frequency = 14_100_250.0
+        self.assertEqual(fg.follow_device_frequency(), 14_100_250.0)
+        self.assertEqual(fg.nominal_freq_hz, 14_100_250.0)
+        self.assertIsNone(fg.follow_device_frequency())
+        self.assertEqual(self.rig.commands("F"), [])
+        self.rig.frequency = 70_000_000.0   # outside what this app drives: stays where it was
+        self.assertIsNone(fg.follow_device_frequency())
+        self.rig.frequency = 14_100_250.0
+
+    def test_keying_keeps_a_frequency_just_set_on_the_radio(self):
+        from pluto_tx import flowgraph as txf
+        fg = self.make(txf.PlutoTxFlowgraph.MODE_SSB)
+        fg.start()
+        time.sleep(0.2)
+        self.rig.frequency = 14_100_250.0
+        fg.key_ptt()
+        self.assertEqual(self.rig.frequency, 14_100_250.0)
+        self.assertEqual(fg.follow_device_frequency(), 14_100_250.0)  # reported to the display after all
+        self.rig.frequency = 14_101_000.0                             # while keyed: taken over only after it
+        self.assertIsNone(fg.follow_device_frequency())
+        fg.unkey_ptt()
+        self.assertIsNone(fg.follow_device_frequency())    # CAT is still silent after the power write before keying
+        fg.device._cat_busy_until = 0.0
+        self.assertEqual(fg.follow_device_frequency(), 14_101_000.0)
+
+    def test_power_slider_reaches_the_radio_unkeyed_within_the_ceiling(self):
+        from pluto_tx import flowgraph as txf
+        fg = self.make(txf.PlutoTxFlowgraph.MODE_SSB)
+        for value, expected in ((4.0, 0.04), (50.0, fg.power_ceiling / 100.0)):
+            fg.set_target_power(value)
+            end = time.monotonic() + 3.0
+            while abs(self.rig.rf_power - expected) > 0.005 and time.monotonic() < end:
+                time.sleep(0.02)
+            self.assertAlmostEqual(self.rig.rf_power, expected, delta=0.005)
+        self.assertFalse(self.rig.commanded_ptt)
 
     def test_band_check_applies_unlike_on_a_plain_sound_card(self):
         from pluto_tx import flowgraph as txf, jtty_codec
@@ -408,6 +519,79 @@ class GuiTests(Base):
         QtCore.QStandardPaths.setTestModeEnabled(True)
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
+    def test_display_follows_the_front_panel(self):
+        from pluto_tx import gui
+        from pluto_tx.devices.x6200 import X6200Device
+        rig = FakeRigctld()
+        self.addCleanup(rig.close)
+        dev = X6200Device(f"rigctld://127.0.0.1:{rig.port}|monitor:node", 14_090_000.0, 2_500_000, None)
+        with mock.patch("pluto_tx.devices.x6200._set_pipewire_volume"):
+            dev.prepare_for_start()
+        self.addCleanup(dev.close)
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("x6200"))
+        tb = mock.Mock(device=dev)
+        tb.follow_device_frequency.return_value = 14_100_250.0
+        tb.compressor.gain_reduction_db.return_value = 0.0
+        w.tb = tb
+        w._tick()
+        self.assertAlmostEqual(w.freq_spin.value(), 14.10025, places=6)
+        tb.set_frequency.assert_not_called()
+
+    def test_ssb_stays_selectable_after_another_mode(self):
+        """Reported on the real radio: it counted as audio-only here, which greys out SSB and forces RADE."""
+        from pluto_tx import gui
+        from pluto_tx.flowgraph import PlutoTxFlowgraph as F
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        w.show()
+        w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("x6200"))
+        self.app.processEvents()
+        for other_combo, other in ((w.digimode_combo, F.MODE_RTTY), (w.mode_combo, F.MODE_RADE)):
+            other_combo.setCurrentIndex(other_combo.findData(other))
+            self.app.processEvents()
+            self.assertEqual(w._current_mode, other)
+            w.mode_tab_widget.setCurrentIndex(0)   # the combo lives on this tab, and showing it activates its mode
+            for mode in (F.MODE_SSB, F.MODE_LSB):
+                self.assertTrue(w.mode_combo.model().item(w.mode_combo.findData(mode)).isEnabled(), mode)
+                w.mode_combo.setCurrentIndex(w.mode_combo.findData(mode))
+                self.app.processEvents()
+                self.assertEqual(w._current_mode, mode)
+                w._sync_mode_combo_availability()   # runs again on connecting
+                self.assertEqual(w._current_mode, mode)
+        for mode in (F.MODE_FM, F.MODE_M17, F.MODE_FREEDV):
+            self.assertFalse(w.mode_combo.model().item(w.mode_combo.findData(mode)).isEnabled(), mode)
+        for mode in (F.MODE_MESHTASTIC, F.MODE_MESHCORE, F.MODE_POCSAG, F.MODE_APRS):
+            self.assertFalse(w.digimode_combo.model().item(w.digimode_combo.findData(mode)).isEnabled(), mode)
+
+    def test_rearm_after_estop(self):
+        from pluto_tx import gui
+        from pluto_tx.devices.x6200 import X6200Device
+        rig = FakeRigctld()
+        self.addCleanup(rig.close)
+        dev = X6200Device(f"rigctld://127.0.0.1:{rig.port}|monitor:node", 14_090_000.0, 2_500_000, None)
+        with mock.patch("pluto_tx.devices.x6200._set_pipewire_volume"):
+            dev.prepare_for_start()
+        self.addCleanup(dev.close)
+        dev.set_power("rfpower", 5.0)
+        w = gui.MainWindow("x")
+        self.addCleanup(w.close)
+        w.tb = mock.Mock(device=dev)
+        w.tb.compressor.gain_reduction_db.return_value = 0.0
+        w.estop_button.setEnabled(True)
+        w.ptt_button.setEnabled(True)
+        w.estop_button.click()
+        self.assertFalse(w._armed)
+        self.assertFalse(w.ptt_button.isEnabled())
+        hook = mock.Mock()   # PyQt hands an exception in a slot to sys.excepthook instead of raising it here
+        with mock.patch("sys.excepthook", hook):
+            w.estop_button.click()
+        hook.assert_not_called()
+        self.assertTrue(w._armed)
+        self.assertTrue(w.ptt_button.isEnabled())
+        self.assertEqual(w.estop_button.text(), "E-STOP")
+
     def test_controls_follow_the_device(self):
         from pluto_tx import gui
         from pluto_tx.flowgraph import PlutoTxFlowgraph as F
@@ -428,6 +612,20 @@ class GuiTests(Base):
         w.device_type_combo.setCurrentIndex(w.device_type_combo.findData("soundcard"))
         self.app.processEvents()
         self.assertFalse(w.freq_spin.isVisible())
+
+
+class RxFollowTests(Base):
+    def test_tuned_away(self):
+        from pluto_advanced_rx.devices.x6200 import X6200RxDevice
+        dev = X6200RxDevice(f"rigctld://127.0.0.1:{self.rig.port}|monitor:src", 14_090_000.0, 48_000, None)
+        self.addCleanup(dev.close)
+        self.assertIsNone(dev.tuned_away_hz())
+        with mock.patch("pluto_advanced_rx.devices.x6200._set_pipewire_volume"), \
+                mock.patch("pluto_advanced_rx.devices.x6200._AudioToComplexSource"):
+            dev.build_source()
+        self.assertIsNone(dev.tuned_away_hz())
+        self.rig.frequency = 14_100_000.0
+        self.assertEqual(dev.tuned_away_hz(), 14_100_000.0)
 
 
 class RxDeviceTests(Base):

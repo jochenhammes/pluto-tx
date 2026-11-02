@@ -33,6 +33,10 @@ SERIAL_BAUD = 19200
 PTT_SEEN_TIMEOUT_S = 0.8            # 200 ms measured
 PTT_POLL_S = 0.05
 POWER_TOLERANCE = 0.006             # the radio's step is 1/255
+POWER_SETTLE_S = 0.25               # a dragged slider writes once, after it came to rest
+CAT_BUSY_AFTER_WRITE_S = 1.7        # measured: rigctld answers nothing for 1.6 s after a power write
+POWER_READBACK_S = 3.0              # one in five first reads after a write still gave the old value
+MIN_POWER_PCT = 1.2                 # measured: it goes no lower than 3/255 and leaves a lower request unanswered
 MAX_KEY_S = 120.0                   # the guard ends a transmission after this, whatever the app does
 PIPEWIRE_PREFIX = "monitor:"
 CIV_MODE_DATA = {"usb": "PKTUSB", "lsb": "PKTLSB"}
@@ -122,7 +126,7 @@ class X6200Device(TxDevice):
     supported_modes = frozenset({"ssb", "lsb", "rade", "digitext", "psk31", "rtty", "ft8", "js8", "jtty"})
     supported_modes_reason = "it takes USB audio only in USB-D and LSB-D, so nothing that needs FM or AM"
     power_stages = (
-        PowerStage(name="rfpower", label="RF power", kind="continuous_db", min_value=0.0, max_value=100.0, unit="%",
+        PowerStage(name="rfpower", label="RF power", kind="continuous_db", min_value=MIN_POWER_PCT, max_value=100.0, unit="%",
                    is_primary=True, off_value=0.0),
     )
     default_power_ceiling = 10.0     # of 8 W, 5 W on battery
@@ -141,6 +145,10 @@ class X6200Device(TxDevice):
         self._rig_mode = "PKTUSB"
         self._keyed = False
         self._lock = threading.Lock()
+        self._power_timer = None
+        self._written_pct = None
+        self._cat_busy_until = 0.0
+        self._last_state = {}
 
     @classmethod
     def is_audio_only(cls):
@@ -195,28 +203,70 @@ class X6200Device(TxDevice):
         if self._client is not None and lo <= freq_hz <= hi and not self._keyed:
             self._client.set_frequency(freq_hz)
 
-    def set_power(self, stage_name, value):
-        self._power_pct = float(value)
-        if self._client is not None:
-            self._apply_power()
-
-    def _apply_power(self):
-        """The readback decides: the firmware answers a power write with the value instead of FB, which Hamlib reports as
-        error -5 although the radio took it (docs/x6200/TESTS.md)."""
-        wanted = self._power_pct / 100.0
-        if abs(self._client.get_level("RFPOWER") - wanted) <= POWER_TOLERANCE:
-            return
+    def tuned_away_hz(self):
+        if self._client is None or self._keyed or time.monotonic() < self._cat_busy_until:
+            return None
         try:
-            self._client.set_level("RFPOWER", wanted)
+            tuned = self._client.get_frequency()
+        except RigError:
+            return None
+        lo, hi = self.frequency_range_hz
+        return tuned if abs(tuned - self.frequency_hz) > 1.0 and lo <= tuned <= hi else None
+
+    def set_power(self, stage_name, value):
+        if value <= self.primary_stage.off_value:  # the PTT keeps this radio dark, and it has no 0 % to go to
+            return
+        self._power_pct = float(value)
+        if self._client is None:
+            return
+        # Never on the caller's thread, which is the GUI's: a write blocks CAT for 1.6 s. pre_key() checks what arrived.
+        self._cancel_power_write()
+        self._power_timer = threading.Timer(POWER_SETTLE_S, self._write_power)
+        self._power_timer.daemon = True
+        self._power_timer.start()
+
+    def _cancel_power_write(self):
+        timer, self._power_timer = self._power_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _write_power(self):
+        pct = self._power_pct
+        if pct == self._written_pct:
+            return
+        self._send_power(pct)
+
+    def _send_power(self, pct):
+        """The firmware answers a power write with the value instead of FB, which Hamlib reports as error -5 although the
+        radio took it (docs/x6200/TESTS.md). So a write is not judged here, and only a readback says whether it arrived."""
+        self._cat_busy_until = time.monotonic() + CAT_BUSY_AFTER_WRITE_S
+        self._written_pct = pct
+        try:
+            self._client.set_level("RFPOWER", pct / 100.0)
         except RigError:
             pass
-        actual = self._client.get_level("RFPOWER")
-        if abs(actual - wanted) > POWER_TOLERANCE:
-            raise RigError(f"radio stayed at {actual * 100:.0f} % power instead of {wanted * 100:.0f} %")
+
+    def _apply_power(self):
+        self._cancel_power_write()
+        wanted = self._power_pct / 100.0
+        if abs(self._client.get_level("RFPOWER") - wanted) <= POWER_TOLERANCE:
+            self._written_pct = self._power_pct
+            return
+        self._send_power(self._power_pct)
+        end = time.monotonic() + POWER_READBACK_S
+        while True:
+            actual = self._client.get_level("RFPOWER")
+            if abs(actual - wanted) <= POWER_TOLERANCE:
+                return
+            if time.monotonic() > end:
+                raise RigError(f"radio stayed at {actual * 100:.0f} % power instead of {wanted * 100:.0f} %")
+            time.sleep(PTT_POLL_S)
 
     def pre_key(self):
         """Refuses before any RF: the tuned frequency and the mode are read back from the radio, and the caller unmutes the
         audio only after this returned, with the radio seen transmitting."""
+        if self._guard is None or self._guard.poll() is not None:
+            raise RigError("the PTT guard is not running: not keying without it")
         lo, hi = self.frequency_range_hz
         if not lo <= self.frequency_hz <= hi:
             raise RigError(f"{self.frequency_hz / 1e6:.3f} MHz is outside the radio's range")
@@ -274,6 +324,7 @@ class X6200Device(TxDevice):
 
     def close(self):
         """Ends the guard, which also releases the PTT once more. rigctld keeps running, see RigctldManager."""
+        self._cancel_power_write()
         guard, self._guard = self._guard, None
         if guard is not None:
             try:
@@ -289,6 +340,8 @@ class X6200Device(TxDevice):
     def read_hw_state(self):
         if self._client is None:
             return {}
+        if time.monotonic() < self._cat_busy_until:  # called on the GUI thread, which must not wait out a power write
+            return self._last_state
         state = {}
         try:
             state["frequency_hz"] = self._client.get_frequency()
@@ -302,6 +355,7 @@ class X6200Device(TxDevice):
                 state["s_meter_db"] = self._client.get_level("STRENGTH")
         except RigError as e:
             state["error"] = str(e)
+        self._last_state = state
         return state
 
     @staticmethod

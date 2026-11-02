@@ -80,6 +80,7 @@ except ImportError:
 logger = logging.getLogger("web_trx.radio_backend")
 
 SPECTRUM_POLL_HZ = 25.0
+RIG_FOLLOW_PERIOD_S = 0.5
 PROBE_TIMEOUT_S = 5.0
 SCAN_TIMEOUT_S = 5.0
 
@@ -714,6 +715,7 @@ class GnuRadioBackend(SessionBackend):
             self._spectrum_task.cancel()
             self._aux_task.cancel()
             self._squelch_task.cancel()
+            self._rig_follow_task.cancel()
             self._spectrum_task = None
         if self._js8_auto is not None:
             auto, self._js8_auto = self._js8_auto, None
@@ -743,6 +745,7 @@ class GnuRadioBackend(SessionBackend):
             self._spectrum_task = asyncio.create_task(self._spectrum_loop())
             self._aux_task = asyncio.create_task(self._rx_aux_loop())
             self._squelch_task = asyncio.create_task(self._squelch_loop())
+            self._rig_follow_task = asyncio.create_task(self._rig_follow_loop())
         if self._restore:
             self._restore_task = asyncio.create_task(self._restore_connections())
 
@@ -913,6 +916,23 @@ class GnuRadioBackend(SessionBackend):
         tb, self.rx.tb = self.rx.tb, None
         if tb is not None:
             await asyncio.to_thread(tb.shutdown)
+
+    async def _rig_follow_loop(self) -> None:
+        """A transceiver can be retuned on its front panel: the frequency shown here follows, in both directions, as it is one radio."""
+        while True:
+            await asyncio.sleep(RIG_FOLLOW_PERIOD_S)
+            await self._follow_rig_frequency()
+
+    async def _follow_rig_frequency(self) -> None:
+        for direction, st in (("tx", self.tx), ("rx", self.rx)):
+            tb = st.tb
+            if tb is None or st.device_type != "x6200":
+                continue
+            followed = await asyncio.to_thread(tb.follow_device_frequency)
+            if followed is not None and st.tb is tb:
+                st.freq_hz = followed
+                self._save_settings()
+                await self._emit_event("tuned", {"direction": direction, "freq_hz": followed})
 
     async def _spectrum_loop(self) -> None:
         period_s = 1.0 / SPECTRUM_POLL_HZ

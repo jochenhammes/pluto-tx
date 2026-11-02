@@ -59,6 +59,16 @@ class X6200RxDevice(AudioDevice):
         if self._client is not None and freq_hz and lo <= freq_hz <= hi:
             self._client.set_frequency(freq_hz)
 
+    def tuned_away_hz(self):
+        if self._client is None:
+            return None
+        try:
+            tuned = self._client.get_frequency()
+        except RigError:
+            return None
+        lo, hi = self.frequency_range_hz
+        return tuned if abs(tuned - self.frequency_hz) > 1.0 and lo <= tuned <= hi else None
+
     def read_hw_state(self):
         if self._client is None:
             return {}

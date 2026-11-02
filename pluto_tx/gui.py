@@ -2908,6 +2908,7 @@ class MainWindow(QtWidgets.QMainWindow):
         is_rf = device_cls.has_frequency_control()  # includes a transceiver on CAT: its signal is audio, its frequency real
         lo_hz, hi_hz = device_cls.frequency_range_hz
         self.freq_spin.setRange(lo_hz / 1e6, hi_hz / 1e6)
+        self.freq_spin.setDecimals(6 if is_rf and device_cls.is_audio_only() else 4)  # a transceiver's dial goes to 1 Hz
         self.freq_spin.setVisible(is_rf)
         self.fine_slider.setVisible(is_rf)
         self.fine_label.setVisible(is_rf)
@@ -2968,7 +2969,7 @@ class MainWindow(QtWidgets.QMainWindow):
         switching away (the operator picks freely again once everything
         is re-enabled)."""
         device_cls = devices.DEVICE_REGISTRY[self.device_type_combo.currentData()]
-        is_rf = not device_cls.is_audio_only()
+        is_rf = device_cls.has_frequency_control()  # a transceiver: what it cannot send, _apply_device_mode_support() greys out
         module_available = {
             PlutoTxFlowgraph.MODE_FM: True,
             PlutoTxFlowgraph.MODE_SSB: True,
@@ -4119,6 +4120,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.hw_status_label.setText("")
             return
         try:
+            followed = self.tb.follow_device_frequency()
+            if followed is not None:  # the radio is there already: not sent back to it
+                self.freq_spin.blockSignals(True)
+                self.freq_spin.setValue(followed / 1e6)
+                self.freq_spin.blockSignals(False)
             state = self.tb.device.read_hw_state()
             parts = (f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}" for k, v in state.items())
             self.hw_status_label.setText("HW: " + ", ".join(parts))

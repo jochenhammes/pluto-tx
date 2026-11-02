@@ -37,6 +37,7 @@ CAT-PTT hat keinen Totmann: Stirbt der Host, bleibt das Gerät getastet (gemesse
 2. **Wächter:** Ein eigener Prozess, verbunden über eine Pipe, ohne GNU Radio. Er löst die PTT nach 120 s und sobald die Pipe schließt, also auch bei `kill -9`. SIGTERM und SIGINT ignoriert er, damit die App zuerst aufräumt.
 3. **NOTAUS:** `force_safe_state()` nutzt eine eigene Verbindung und wartet nicht auf laufende Anfragen. Klappt das nicht, setzt es das Limit des Wächters auf einen sehr kurzen Wert.
 4. **rigctld bleibt laufen:** Er wird nie automatisch beendet, weil ein Wächter oder eine zweite App ihn noch brauchen kann.
+4a. **Frequenz am Gerät:** pluto-tx und Web-TRX fragen sie alle 0,5 s ab und übernehmen eine Änderung, ohne sie zurückzuschreiben; beim Tasten gilt, was gerade am Gerät steht. Während der Sendung wird nichts übernommen. pluto-advanced-rx und die CLI folgen nicht. Beim Verbinden setzt die App weiterhin ihre eigene Frequenz, sofern sie im Bereich des Geräts liegt.
 5. **Leistung:** Standardgrenze 10 %, freigeschaltet bis 100 %. Die Rücklesung entscheidet, zu hohe Leistung führt zur Abweisung.
 
 **Grenze:** Fällt der Rechner aus oder geht das USB-Kabel ab, kann auch der Wächter nichts mehr senden. Eine Sendezeitbegrenzung der Firmware wurde in 45 s nicht beobachtet. Am Funkgerät hilft dann die PTT-Taste oder Aus- und Einschalten.

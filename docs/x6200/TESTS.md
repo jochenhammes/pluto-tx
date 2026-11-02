@@ -19,6 +19,8 @@ Gerät: Xiegu X6200 mit OpenX6X00, 50-Ω-Dummy-Load, Akku. Messempfänger: HackR
 
 Folge: SSB-Sprache und Digimodes über USB-D und LSB-D. FM, POCSAG und APRS gehen über dieses Kabel nicht.
 
+**Leistung:** Das Gerät geht nicht unter 3/255 (rund 1,2 %); ein kleinerer Wert ändert nichts, gemessen mit 0, 1/255 und 2/255. Ganze Prozentwerte von 1 bis 20 kamen alle an. Nach dem Schreiben antwortet `rigctld` rund 1,6 s lang nicht, und einmal von fünf Mal lieferte das erste Lesen den alten Wert. Der Regler schreibt deshalb erst nach 0,25 s Ruhe im Hintergrund, und erst vor dem Tasten wird zurückgelesen. Der Regler beginnt bei 1,2 %, und Re-Arm fasst die Leistung nicht an. Vorher scheiterte Re-Arm nach E-STOP am Rücklesen.
+
 **Pegel:** PipeWire setzt die Soundkarte auf 40 %, wegen der kubischen Kennlinie rund −24 dB. Bei 100 % meldet das Leistungsmeter ab −16 dBFS Ausgangsleistung, ALC bleibt bis 0 dBFS bei 0. Das Meter ist bei 0,5 W sehr grob. Das Gerät setzt die Wiedergabe auf 100 %.
 
 **PTT:**
@@ -83,6 +85,16 @@ Beide am selben X6200, gemeinsamer `rigctld`. Der Empfänger wurde 1,5 s nach de
 - **X6200 empfängt 29 Minuten** (00:00–00:29 UTC, HackRF VGA 20 dB): Nach 5 Minuten 1 von 2 Nachrichten, nach 25 und 28 Minuten keine, Exit 0 ohne Absturz. Die Einkopplung liegt mit rund −14 dB nah an der Grenze.
 - **Das Gerät antwortete um 00:32 UTC nicht mehr auf CI-V**, der USB-Teil blieb sichtbar. Vermutlich Akku leer oder automatisches Abschalten, Start bei 62 % um 22:14 UTC. Wann genau, ist unbekannt. Die Ausfälle um Minute 25 und 28 können daran liegen; der Langlauf-Befund aus `docs/jtty/TESTS.md` ist damit weder bestätigt noch widerlegt.
 - Die Sendeversuche danach wurden sauber abgewiesen, vor jedem Tasten. Es lief keine Sendung, als das Gerät ausfiel. Der Lauf mit starkem Signal (X6200 sendet, HackRF empfängt 30 Minuten) brachte deshalb kein Ergebnis.
+
+## Offen: RADE aus dem Browser, Empfang in Web-TRX mit HackRF
+
+Gemeldet am 2026-11-02: Aus `pluto-tx` gesendet dekodiert der HackRF in Web-TRX, aus demselben Browser gesendet nicht (gleiche Datei, Frequenz und Leistung, 0,1 W), obwohl der Wasserfall ein Signal zeigt. Ohne Funk nicht nachstellbar:
+
+- Aufnahme hinter dem Sendeweg: `pluto-tx`-Weg und Browser-Weg gleiche Pegel, beide dekodieren (Datei-Aufnahme 24,3 von 26 s; stummer virtueller Ausgang rund 21 s einer Aufnahme von 25,5 s).
+- Echtes Backend mit Browser-Takt, simuliertem CAT, stummem virtuellem Ausgang: 26,8 s dekodiert, mit und ohne Empfänger im selben Prozess, 0 bis 2 `aU`.
+- Empfänger bleibt mit laufendem Sender bei 0,5 % Verlust und rund 93 % Synchronisation (simulierte Quelle, kein echter HackRF).
+
+Das echte Log zeigt rund 20 `O` je Sekunde vom HackRF-Empfang, mit und ohne Sendung gleich, und nur 10 Rahmen mit Synchronisation. 117 von 121 `aU` fielen vor 17:45, in den Läufen danach nur 3 während der Sendungen, sie erklären den Ausfall also nicht allein. Die meisten Browser-Sendungen waren kürzer als 15 s. Nicht geprüft: echter Browser und echter HackRF zusammen.
 
 ## Offene Punkte
 
