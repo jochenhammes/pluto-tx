@@ -160,7 +160,7 @@ WATERFALL_POLL_INTERVAL_MS = 33  # ~30 Hz GUI-side poll of fft_probe's latest ro
 # RTL-SDR (gr-soapy) USB transfer size: ~14 ms of samples per transfer at 2.4 MS/s instead of
 # librtlsdr's ~55 ms, so the waterfall gets evenly spaced rows (see devices/rtlsdr.py).
 RTL_SOAPY_BUFFLEN_BYTES = 65536
-FFT_COMPUTE_RATE_HZ = 30  # fft_probe's own compute throttle, independent of poll rate/sample rate
+FFT_COMPUTE_RATE_HZ = 15  # fft_probe's own compute throttle, independent of poll rate/sample rate
 WATERFALL_WINDOW = window.WIN_BLACKMAN_hARRIS  # matches GNU Radio's own qtgui.waterfall_sink_c default window
 WATERFALL_COLORMAP = "viridis"
 # Start-up color/Y-axis levels (no per-frame autoscale), replaced ~1 s after every connect by the
