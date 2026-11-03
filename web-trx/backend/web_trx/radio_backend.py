@@ -79,7 +79,7 @@ except ImportError:
 
 logger = logging.getLogger("web_trx.radio_backend")
 
-SPECTRUM_POLL_HZ = 25.0
+SPECTRUM_POLL_HZ = 15.0
 RIG_FOLLOW_PERIOD_S = 0.5
 PROBE_TIMEOUT_S = 5.0
 SCAN_TIMEOUT_S = 5.0

@@ -196,6 +196,20 @@ class RtlSdrDevice(RxDevice):
             return e
         if tcp is not None:
             return rtl_tcp.probe(*tcp, timeout_s=timeout_s)
+        # Use enumerate (does NOT open the device) instead of soapy.source: librtlsdr holds
+        # exclusive USB access, so a probe-open blocks the immediately-following build_source.
+        try:
+            import SoapySDR
+            results = SoapySDR.Device.enumerate("driver=rtlsdr")
+            if not results:
+                return RuntimeError("No RTL-SDR devices found!")
+            if connection:
+                serials = [r.asdict().get("serial", "") for r in results]
+                if connection not in serials:
+                    return RuntimeError(f"RTL-SDR with serial {connection!r} not found (found: {serials})")
+            return None
+        except ImportError:
+            pass  # python3-soapysdr not installed: fall back to the open-and-close probe below
         try:
             device_arg = f"driver=rtlsdr,serial={connection}" if connection else "driver=rtlsdr"
             soapy.source(device_arg, "fc32", 1, "", "", [""], [""])
